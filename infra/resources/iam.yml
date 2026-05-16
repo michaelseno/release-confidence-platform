@@ -1,0 +1,5 @@
+Resources: {}
+Outputs:
+  Phase0IamBoundary:
+    Description: IAM permissions are intentionally not expanded in Phase 0 because no runtime functions are implemented.
+    Value: phase-0-placeholder

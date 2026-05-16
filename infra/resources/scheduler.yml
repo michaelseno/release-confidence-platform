@@ -1,0 +1,5 @@
+Resources: {}
+Outputs:
+  Phase0SchedulerBoundary:
+    Description: Scheduler runtime logic is intentionally not implemented in Phase 0.
+    Value: phase-0-placeholder

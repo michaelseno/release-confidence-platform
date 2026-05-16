@@ -1,0 +1,6 @@
+{
+  "client_id": "sample-client",
+  "audit_id": "sample-audit",
+  "raw_result_version": "v0-placeholder",
+  "description": "Safe sample audit configuration for Phase 0 validation only"
+}
