@@ -1,0 +1,16 @@
+Resources:
+  RawResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: ${self:custom.rawResultsBucketName}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+Outputs:
+  RawResultsBucketName:
+    Description: Phase 0 future raw evidence bucket name.
+    Value: ${self:custom.rawResultsBucketName}

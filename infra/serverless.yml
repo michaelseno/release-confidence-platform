@@ -1,0 +1,38 @@
+service: release-confidence-platform
+frameworkVersion: '3'
+
+configValidationMode: error
+
+plugins:
+  - ./plugins/stage-guard
+
+provider:
+  name: aws
+  runtime: python3.11
+  region: ${opt:region, 'us-east-1'}
+  stage: ${opt:stage, 'dev'}
+  environment:
+    STAGE: ${self:provider.stage}
+    AWS_REGION: ${self:provider.region}
+    RAW_RESULTS_BUCKET: ${self:custom.rawResultsBucketName}
+    METADATA_TABLE: ${self:custom.metadataTableName}
+    LOG_LEVEL: INFO
+
+custom:
+  allowedStages:
+    - dev
+    - staging
+    - prod
+  resourcePrefix: release-confidence-platform
+  rawResultsBucketName: ${self:custom.resourcePrefix}-${self:provider.stage}-raw-results
+  metadataTableName: ${self:custom.resourcePrefix}-${self:provider.stage}-metadata
+
+package:
+  patterns:
+    - '!../**'
+
+resources:
+  - ${file(resources/s3.yml)}
+  - ${file(resources/dynamodb.yml)}
+  - ${file(resources/iam.yml)}
+  - ${file(resources/scheduler.yml)}

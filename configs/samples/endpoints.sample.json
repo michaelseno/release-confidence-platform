@@ -1,0 +1,12 @@
+{
+  "client_id": "sample-client",
+  "audit_id": "sample-audit",
+  "endpoints": [
+    {
+      "endpoint_id": "sample-endpoint",
+      "scenario_id": "sample-scenario",
+      "method": "GET",
+      "url": "https://example.invalid/health"
+    }
+  ]
+}

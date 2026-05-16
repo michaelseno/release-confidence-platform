@@ -1,0 +1,14 @@
+{
+  "name": "release-confidence-platform-infra",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Phase 0 Serverless Framework packaging for Release Confidence Platform",
+  "devDependencies": {
+    "serverless": "^3.38.0"
+  },
+  "scripts": {
+    "package:dev": "serverless package --stage dev",
+    "package:staging": "serverless package --stage staging",
+    "package:prod": "serverless package --stage prod"
+  }
+}
