@@ -32,7 +32,7 @@ No runtime data model or storage changes. Serverless resource declarations reser
 - Sample configs under `configs/samples/`
 - Validation scripts under `scripts/`
 - Foundational docs under `docs/architecture/`, `docs/audit-methodology/`, `docs/operational-safety/`, `docs/legal/`, `docs/prompts/`
-- Tests under `tests/unit/`
+- Tests under `tests/unit/`, including direct script and module execution coverage for `scripts/validate_config.py`
 
 ## 7. Security / Authorization Considerations
 
@@ -58,5 +58,6 @@ No authentication or authorization is implemented. Sample config values must be 
 - `python -m ruff format --check .`
 - `python -m pytest`
 - `python scripts/validate_config.py --samples-dir configs/samples`
+- `python -m scripts.validate_config --samples-dir configs/samples`
 - From `infra`: `npx serverless package --stage dev`, `npx serverless package --stage staging`, and `npx serverless package --stage prod`.
 - From `infra`: `npx serverless package --stage qa` must fail with an unsupported-stage error before producing deployable output.
