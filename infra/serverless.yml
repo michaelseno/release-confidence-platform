@@ -3,6 +3,9 @@ frameworkVersion: '3'
 
 configValidationMode: error
 
+plugins:
+  - ./plugins/stage-guard
+
 provider:
   name: aws
   runtime: python3.11

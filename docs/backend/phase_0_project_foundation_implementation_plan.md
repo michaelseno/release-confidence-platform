@@ -28,6 +28,7 @@ No runtime data model or storage changes. Serverless resource declarations reser
 - Root setup files: `README.md`, `.gitignore`, `pyproject.toml`
 - Backend/package placeholders under `apps/backend/` and `packages/`
 - Infrastructure files under `infra/`
+- Serverless local plugin under `infra/plugins/stage-guard.js`
 - Sample configs under `configs/samples/`
 - Validation scripts under `scripts/`
 - Foundational docs under `docs/architecture/`, `docs/audit-methodology/`, `docs/operational-safety/`, `docs/legal/`, `docs/prompts/`
@@ -42,7 +43,7 @@ No authentication or authorization is implemented. Sample config values must be 
 - Python 3.11 via `venv`
 - `pytest`, `ruff`, `boto3`, and `requests` configured in `pyproject.toml`
 - Serverless Framework pinned to major version 3 in `infra/package.json`
-- Serverless packaging must be local-only and support `dev`, `staging`, and `prod`
+- Serverless packaging must be local-only and support only `dev`, `staging`, and `prod`; unsupported stages must fail fast during Serverless initialization/package validation.
 
 ## 9. Assumptions
 
@@ -57,4 +58,5 @@ No authentication or authorization is implemented. Sample config values must be 
 - `python -m ruff format --check .`
 - `python -m pytest`
 - `python scripts/validate_config.py --samples-dir configs/samples`
-- From `infra`: `npm install` if needed, then `npx serverless package --stage dev`, with staging/prod packaging where feasible.
+- From `infra`: `npx serverless package --stage dev`, `npx serverless package --stage staging`, and `npx serverless package --stage prod`.
+- From `infra`: `npx serverless package --stage qa` must fail with an unsupported-stage error before producing deployable output.
