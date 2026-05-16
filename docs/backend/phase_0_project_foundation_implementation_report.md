@@ -87,4 +87,4 @@ Original Phase 0 implementation commit created: `b2b8c9a` (`feat(backend): imple
 
 QA follow-up stage-guard fix commit created: `3e63a60` (`fix(backend): enforce serverless stage allowlist`).
 
-QA follow-up config validator direct-execution fix commit had not yet been created at the time this report was updated; the final commit hash is reported in the backend handoff response.
+QA follow-up config validator direct-execution fix commit created: `c962b5d` (`fix(backend): support direct config validation`).
