@@ -1,1 +1,84 @@
-"""Placeholder boundary for future sanitization implementation."""
+"""Centralized sanitization for logs, metadata, and raw evidence."""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Mapping, Sequence
+from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+REDACTION_TOKEN = "[REDACTED]"
+
+SENSITIVE_KEY_PARTS = (
+    "authorization",
+    "cookie",
+    "api_key",
+    "apikey",
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "credential",
+    "email",
+    "phone",
+    "ssn",
+    "pii",
+)
+SENSITIVE_QUERY_KEYS = (
+    "token",
+    "api_key",
+    "apikey",
+    "password",
+    "secret",
+    "auth",
+    "email",
+    "phone",
+)
+EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+PHONE_PATTERN = re.compile(r"(?<!\d)(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})(?!\d)")
+BEARER_PATTERN = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+
+
+def _is_sensitive_key(key: object) -> bool:
+    normalized = str(key).lower().replace("-", "_")
+    return any(part in normalized for part in SENSITIVE_KEY_PARTS)
+
+
+def _sanitize_string(value: str) -> str:
+    value = BEARER_PATTERN.sub(REDACTION_TOKEN, value)
+    value = EMAIL_PATTERN.sub(REDACTION_TOKEN, value)
+    return PHONE_PATTERN.sub(REDACTION_TOKEN, value)
+
+
+def sanitize_url(value: str) -> str:
+    parts = urlsplit(value)
+    if not parts.scheme or not parts.netloc:
+        return _sanitize_string(value)
+    query = []
+    changed = False
+    for key, val in parse_qsl(parts.query, keep_blank_values=True):
+        if any(part in key.lower() for part in SENSITIVE_QUERY_KEYS):
+            query.append((key, REDACTION_TOKEN))
+            changed = True
+        else:
+            query.append((key, _sanitize_string(val)))
+    sanitized = urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+    )
+    return sanitized if changed else _sanitize_string(sanitized)
+
+
+def sanitize(value: Any) -> Any:
+    """Recursively redact sensitive keys and common PII patterns."""
+    if isinstance(value, Mapping):
+        sanitized: dict[Any, Any] = {}
+        for key, item in value.items():
+            sanitized[key] = REDACTION_TOKEN if _is_sensitive_key(key) else sanitize(item)
+        return sanitized
+    if isinstance(value, str):
+        if value.startswith(("http://", "https://")):
+            return sanitize_url(value)
+        return _sanitize_string(value)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [sanitize(item) for item in value]
+    return value
