@@ -70,7 +70,8 @@ class ApiRunner:
                 )
                 endpoint = {**endpoint, "payload": prepared.payload}
                 prepared_metadata = prepared.metadata
-            except PayloadValidationError:
+            except PayloadValidationError as exc:
+                prepared_metadata = exc.payload_metadata
                 return RunnerOutcome(
                     endpoint_id=endpoint["endpoint_id"],
                     method=endpoint["method"],

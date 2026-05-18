@@ -49,6 +49,12 @@ def test_generated_unknown_token_fails() -> None:
         render_template({"bad": "{{random}}"}, context)
 
 
+def test_generated_malformed_token_with_extra_brace_fails() -> None:
+    context = TemplateContext("client", "audit", "safe_run_123", "ep1", 1, "ts")
+    with pytest.raises(ValueError):
+        render_template({"bad": "{{uuid}}}"}, context)
+
+
 def test_data_pool_template_substitution_and_missing_field() -> None:
     context = TemplateContext(
         "client",
@@ -155,3 +161,29 @@ def test_payload_preparation_duplicate_allow_metadata() -> None:
     assert first.metadata["duplicate_allowed"] is False
     assert second.metadata["duplicate_detected"] is True
     assert second.metadata["duplicate_allowed"] is True
+
+
+def test_payload_preparation_fail_fast_duplicate_error_carries_safe_metadata() -> None:
+    service = PayloadPreparationService()
+    endpoint = {
+        "endpoint_id": "ep1",
+        "payload_strategy": "generated",
+        "payload_template": {"id": "fixed"},
+        "duplicate_policy": "fail_fast",
+        "duplicate_check_scope": "current_run",
+        "payload_safety": {"allow_generated_payloads": True},
+    }
+    dup = checker()
+    service.prepare(
+        endpoint=endpoint, run_context=run_context(), iteration=1, duplicate_checker=dup
+    )
+
+    with pytest.raises(PayloadValidationError) as exc_info:
+        service.prepare(
+            endpoint=endpoint, run_context=run_context(), iteration=1, duplicate_checker=dup
+        )
+
+    assert exc_info.value.payload_metadata is not None
+    assert exc_info.value.payload_metadata["duplicate_detected"] is True
+    assert exc_info.value.payload_metadata["duplicate_policy"] == "fail_fast"
+    assert exc_info.value.payload_metadata["duplicate_allowed"] is False

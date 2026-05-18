@@ -16,8 +16,14 @@ SUPPORTED_STRATEGIES = {"static", "generated", "data_pool"}
 
 
 class PayloadValidationError(EngineError):
-    def __init__(self, message: str = "Payload validation failed"):
+    def __init__(
+        self,
+        message: str = "Payload validation failed",
+        *,
+        payload_metadata: dict[str, Any] | None = None,
+    ):
         super().__init__("PAYLOAD_VALIDATION_ERROR", message)
+        self.payload_metadata = payload_metadata
 
 
 def validate_endpoint_payload_config(endpoint: dict[str, Any]) -> dict[str, Any]:

@@ -90,8 +90,12 @@ class PayloadPreparationService:
                 metadata["duplicate_allowed"] = True
                 return PreparedPayloadResult(payload, fp, metadata)
             if policy == "fail_fast":
-                raise PayloadValidationError("Duplicate payload detected")
-        raise PayloadValidationError("Duplicate payload regeneration exhausted") from None
+                raise PayloadValidationError(
+                    "Duplicate payload detected", payload_metadata=metadata
+                )
+        raise PayloadValidationError(
+            "Duplicate payload regeneration exhausted", payload_metadata=metadata
+        ) from None
 
     def _build_payload(
         self,

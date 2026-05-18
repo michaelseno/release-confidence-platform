@@ -113,7 +113,7 @@ def _render_string(
 
 def _balanced_tokens(value: str) -> bool:
     stripped = TOKEN_PATTERN.sub("", value)
-    return "{{" not in stripped and "}}" not in stripped
+    return "{" not in stripped and "}" not in stripped
 
 
 def _lookup_data_pool_token(record: dict[str, Any] | None, token: str) -> Any:

@@ -1,7 +1,7 @@
 # Implementation Report
 
 ## 1. Summary of Changes
-Implemented Phase 2 backend payload preparation for `static`, `generated`, and `data_pool` strategies, including deterministic substitutions, S3 data-pool loading, sanitized fingerprints, current-run duplicate checking, safety controls, payload iterations, and raw result metadata.
+Implemented Phase 2 backend payload preparation for `static`, `generated`, and `data_pool` strategies, including deterministic substitutions, S3 data-pool loading, sanitized fingerprints, current-run duplicate checking, safety controls, payload iterations, and raw result metadata. QA follow-up fixes now reject malformed trailing template brace syntax and preserve safe duplicate metadata on duplicate-policy failure paths.
 
 ## 2. Files Modified
 - `apps/backend/orchestrator/service.py` — captures run timestamp, initializes run-scoped duplicate checker/data-pool loader, passes Phase 2 context to runner, and expands payload iterations.
@@ -10,6 +10,7 @@ Implemented Phase 2 backend payload preparation for `static`, `generated`, and `
 - `packages/data_generation/*` — importable implementation for generation, templates, data pools, duplicate checking, validation, and fingerprints.
 - `packages/data-generation/*` — compatibility markers preserving required repository paths.
 - `tests/unit/test_phase2_payload_generation.py` — unit coverage for templates, fingerprints, validators, duplicate checker, data pools, and metadata.
+- `tests/api/test_phase2_payload_generation_qa.py` — QA supplemental coverage retained for malformed tokens and duplicate failure metadata.
 - `tests/integration/test_phase2_orchestrator_payloads.py` — orchestrator/runner integration coverage for generated and data-pool payloads with safe raw metadata.
 - `docs/backend/phase_2_payload_data_generation_implementation_plan.md` — implementation plan.
 
@@ -31,10 +32,10 @@ No new persistent storage. Data pools are read from `data-pools/{client_id}/{poo
 Pool names are path-safe. Unsupported duplicate scopes fail closed. Generated payloads require explicit `allow_generated_payloads = true`. Destructive endpoints require explicit boolean `allow_destructive_operation = true`. Raw metadata contains only safe booleans, strategy/policy names, pool name, attempts, and fingerprints.
 
 ## 7. Error Handling Implemented
-Payload preparation validation failures return runner outcomes with `failure_type = PAYLOAD_VALIDATION_ERROR` and no outbound request. Invalid config shapes fail config validation before execution. Missing/invalid data pools and template errors are mapped to `PAYLOAD_VALIDATION_ERROR` in runner preparation.
+Payload preparation validation failures return runner outcomes with `failure_type = PAYLOAD_VALIDATION_ERROR` and no outbound request. Invalid config shapes fail config validation before execution. Missing/invalid data pools and template errors are mapped to `PAYLOAD_VALIDATION_ERROR` in runner preparation. Duplicate-policy `fail_fast` and regenerate-exhaustion failures attach raw-safe `payload_metadata` to the controlled validation error so runner failure outcomes retain policy, scope, duplicate status, generation attempt, and fingerprints without exposing payload values.
 
 ## 8. Observability / Logging
-Existing orchestrator run logging is preserved. No raw payloads, generated values, or data-pool records are logged by the new code.
+Existing orchestrator run logging is preserved. No raw payloads, generated values, or data-pool records are logged by the new code. Duplicate failure metadata is propagated through the existing raw-safe result path; no unsafe values are logged or persisted.
 
 ## 9. Assumptions Made
 - Runtime modules use `packages/data_generation` because Python cannot import the required hyphenated `packages/data-generation` path.
@@ -44,7 +45,8 @@ Existing orchestrator run logging is preserved. No raw payloads, generated value
 ## 10. Validation Performed
 - `.venv/bin/python -m ruff check .` — passed.
 - `.venv/bin/python -m ruff format --check .` — passed after formatting.
-- `.venv/bin/python -m pytest` — 34 passed.
+- `.venv/bin/python -m pytest tests/api/test_phase2_payload_generation_qa.py tests/unit/test_phase2_payload_generation.py` — 12 passed after QA fixes.
+- `.venv/bin/python -m pytest` — 38 passed after QA supplemental coverage and added unit regressions.
 - `.venv/bin/python scripts/validate_config.py --samples-dir configs/samples` — passed.
 - `npx serverless package --stage dev` from `infra/` — passed.
 - `npx serverless package --stage staging` from `infra/` — passed.
@@ -53,8 +55,7 @@ Existing orchestrator run logging is preserved. No raw payloads, generated value
 
 ## 11. Known Limitations / Follow-Ups
 - Audit-wide duplicate checking remains intentionally unsupported.
-- Duplicate-related failure outcomes do not yet include partial duplicate metadata when preparation raises before a prepared payload is returned.
 - The required hyphenated data-generation directory remains non-importable by Python; importable implementation lives in `packages/data_generation`.
 
 ## 12. Commit Status
-Committed as `9bf45bb` (`feat(backend): implement phase 2 payload data generation`).
+Original implementation committed as `9bf45bb` (`feat(backend): implement phase 2 payload data generation`). QA follow-up fixes committed as `<pending>`.
