@@ -1,1 +1,1 @@
-"""Placeholder boundary for future data template definitions."""
+"""Compatibility marker for :mod:`packages.data_generation.templates`."""

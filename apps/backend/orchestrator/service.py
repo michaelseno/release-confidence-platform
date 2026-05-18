@@ -20,6 +20,9 @@ from packages.core.exceptions import DuplicateRunIdError, EngineError
 from packages.core.logging import StructuredLogger
 from packages.core.time import utc_now_iso
 from packages.core.validators import OrchestratorEvent, validate_event
+from packages.data_generation.data_pools import DataPoolLoader
+from packages.data_generation.duplicate_checker import DuplicateChecker
+from packages.data_generation.generator import PayloadPreparationService, RunContext
 from packages.sanitization.sanitizer import sanitize
 
 
@@ -58,11 +61,36 @@ class CoreEngineOrchestrator:
                 run_id=validated.run_id,
                 scenario_type=validated.scenario_type,
             )
+            run_timestamp = utc_now_iso()
+            duplicate_checker = DuplicateChecker(
+                client_id=validated.client_id, audit_id=validated.audit_id, run_id=validated.run_id
+            )
+            run_context = RunContext(
+                client_id=validated.client_id,
+                audit_id=validated.audit_id,
+                run_id=validated.run_id,
+                scenario_type=validated.scenario_type,
+                run_timestamp=run_timestamp,
+            )
+            payload_preparation = PayloadPreparationService(
+                data_pool_loader=DataPoolLoader(self.s3_storage)
+            )
             endpoints = self._load_and_validate_configs(validated)
-            results = [
-                self._raw_result(validated, self.runner.execute(self._resolve(endpoint)))
-                for endpoint in endpoints
-            ]
+            results = []
+            for endpoint in endpoints:
+                for iteration in range(1, endpoint.get("payload_iterations", 1) + 1):
+                    results.append(
+                        self._raw_result(
+                            validated,
+                            self.runner.execute(
+                                self._resolve(endpoint),
+                                run_context=run_context,
+                                duplicate_checker=duplicate_checker,
+                                payload_preparation=payload_preparation,
+                                iteration=iteration,
+                            ),
+                        )
+                    )
             envelope = sanitize(
                 {
                     "raw_result_version": RAW_RESULT_VERSION,

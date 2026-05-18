@@ -19,6 +19,10 @@ from packages.core.constants.engine import (
     FAILURE_TIMEOUT,
 )
 from packages.core.time import utc_now_iso
+from packages.data_generation.duplicate_checker import DuplicateChecker
+from packages.data_generation.fingerprints import response_fingerprint
+from packages.data_generation.generator import PayloadPreparationService, RunContext
+from packages.data_generation.validators import PayloadValidationError
 
 
 @dataclass(frozen=True)
@@ -34,13 +38,53 @@ class RunnerOutcome:
     retry_attempts: int
     assertion_results: dict[str, Any] | None = None
     error_code: str | None = None
+    payload_metadata: dict[str, Any] | None = None
+    response_fingerprint: str | None = None
 
 
 class ApiRunner:
     def __init__(self, session: Any | None = None):
         self.session = session or requests.Session()
 
-    def execute(self, endpoint: dict[str, Any]) -> RunnerOutcome:
+    def execute(
+        self,
+        endpoint: dict[str, Any],
+        *,
+        run_context: RunContext | None = None,
+        duplicate_checker: DuplicateChecker | None = None,
+        payload_preparation: PayloadPreparationService | None = None,
+        iteration: int = 1,
+    ) -> RunnerOutcome:
+        prepared_metadata: dict[str, Any] | None = None
+        if (
+            run_context is not None
+            and duplicate_checker is not None
+            and payload_preparation is not None
+        ):
+            try:
+                prepared = payload_preparation.prepare(
+                    endpoint=endpoint,
+                    run_context=run_context,
+                    iteration=iteration,
+                    duplicate_checker=duplicate_checker,
+                )
+                endpoint = {**endpoint, "payload": prepared.payload}
+                prepared_metadata = prepared.metadata
+            except PayloadValidationError as exc:
+                prepared_metadata = exc.payload_metadata
+                return RunnerOutcome(
+                    endpoint_id=endpoint["endpoint_id"],
+                    method=endpoint["method"],
+                    url=endpoint["url"],
+                    status_code=None,
+                    duration_ms=None,
+                    failure_type=FAILURE_PAYLOAD_VALIDATION,
+                    payload_strategy=endpoint.get("payload_strategy", "static"),
+                    timestamp=utc_now_iso(),
+                    retry_attempts=0,
+                    error_code=FAILURE_PAYLOAD_VALIDATION,
+                    payload_metadata=prepared_metadata,
+                )
         retry_attempts = 0
         final_duration: int | None = None
         last_error = None
@@ -60,6 +104,7 @@ class ApiRunner:
                 failure_type, assertion_results = evaluate_response(
                     response, endpoint.get("assertions") or {}
                 )
+                response_body = _response_body_for_fingerprint(response)
                 return RunnerOutcome(
                     endpoint_id=endpoint["endpoint_id"],
                     method=endpoint["method"],
@@ -71,6 +116,8 @@ class ApiRunner:
                     timestamp=utc_now_iso(),
                     retry_attempts=retry_attempts,
                     assertion_results=assertion_results,
+                    payload_metadata=prepared_metadata,
+                    response_fingerprint=response_fingerprint(response_body),
                 )
             except requests.Timeout as exc:
                 final_duration = int((time.monotonic() - started) * 1000)
@@ -101,6 +148,7 @@ class ApiRunner:
             timestamp=utc_now_iso(),
             retry_attempts=retry_attempts,
             error_code=failure_type,
+            payload_metadata=prepared_metadata,
         )
 
 
@@ -139,3 +187,10 @@ def _has_field(body: Any, field: str) -> bool:
             return False
         current = current[part]
     return True
+
+
+def _response_body_for_fingerprint(response: Any) -> Any:
+    try:
+        return response.json()
+    except Exception:
+        return getattr(response, "text", None)

@@ -1,4 +1,5 @@
-"""Placeholder boundary for future deterministic data generation.
+"""Compatibility marker for Phase 2 implementation.
 
-No runtime generation behavior is implemented in Phase 0.
+Runtime-importable code lives in :mod:`packages.data_generation.generator` because Python package
+imports cannot address this hyphenated repository-structure directory.
 """
