@@ -57,4 +57,4 @@ Existing orchestrator run logging is preserved. No raw payloads, generated value
 - The required hyphenated data-generation directory remains non-importable by Python; importable implementation lives in `packages/data_generation`.
 
 ## 12. Commit Status
-Not yet committed.
+Committed as `9bf45bb` (`feat(backend): implement phase 2 payload data generation`).
