@@ -1,1 +1,1 @@
-"""Placeholder boundary for future generated-data validators."""
+"""Compatibility marker for :mod:`packages.data_generation.validators`."""

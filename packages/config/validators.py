@@ -15,6 +15,10 @@ from packages.core.constants.engine import (
 )
 from packages.core.exceptions import ConfigError
 from packages.core.validators import validate_identifier
+from packages.data_generation.validators import (
+    PayloadValidationError,
+    validate_endpoint_payload_config,
+)
 
 SECRET_BEARING_KEYS = (
     "authorization",
@@ -88,9 +92,10 @@ def validate_endpoint(endpoint: dict[str, Any]) -> dict[str, Any]:
     retries = endpoint.get("retries", DEFAULT_RETRIES)
     if not isinstance(retries, int) or retries < 0 or retries > MAX_RETRIES:
         raise ConfigError("Invalid retries", "CONFIG_VALIDATION_ERROR")
-    payload_strategy = endpoint.get("payload_strategy", "static")
-    if not isinstance(payload_strategy, str) or not payload_strategy:
-        raise ConfigError("Invalid payload_strategy", "CONFIG_VALIDATION_ERROR")
+    try:
+        phase2_endpoint = validate_endpoint_payload_config({**endpoint, "payload": payload})
+    except PayloadValidationError as exc:
+        raise ConfigError(exc.message, "CONFIG_VALIDATION_ERROR") from exc
     assertions = endpoint.get("assertions", {}) or {}
     if not isinstance(assertions, dict):
         raise ConfigError("Assertions must be an object", "CONFIG_VALIDATION_ERROR")
@@ -98,14 +103,13 @@ def validate_endpoint(endpoint: dict[str, Any]) -> dict[str, Any]:
     if any(key not in allowed_assertions for key in assertions):
         raise ConfigError("Unsupported assertion", "CONFIG_VALIDATION_ERROR")
     return {
-        **endpoint,
+        **phase2_endpoint,
         "endpoint_id": endpoint_id,
         "method": method.upper(),
         "headers": headers,
         "payload": payload,
         "timeout_seconds": timeout,
         "retries": retries,
-        "payload_strategy": payload_strategy,
         "assertions": assertions,
     }
 
