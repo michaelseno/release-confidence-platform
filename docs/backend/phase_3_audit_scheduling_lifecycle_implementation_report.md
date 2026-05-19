@@ -71,4 +71,4 @@ Scheduled duplicate deliveries emit sanitized `audit_schedule_duplicate_delivery
 - Phase 3 does not implement analytics/reporting/scoring or transitions beyond defining future lifecycle transitions.
 
 ## 12. Commit Status
-Commit not yet created at report-write time; final commit hash will be reported after commit.
+Backend fix commit created: `ab9320fc9e81a07b14623f3552f27d3ed1fd64e8` (`fix(backend): enforce burst per-run caps`).
