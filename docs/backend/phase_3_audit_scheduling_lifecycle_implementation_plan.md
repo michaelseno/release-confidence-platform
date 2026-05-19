@@ -6,10 +6,13 @@ Implement the Phase 3 backend-only audit scheduling and lifecycle layer: determi
 ## 2. Technical Scope
 Add internal Python services and handlers for lifecycle metadata, scheduling, scheduler event validation, duplicate occurrence claims, repeated sequential execution, finalization, rollback, and cancellation. No public API, frontend, analytics/reporting workflow, RBAC, billing, or live AWS deployment is in scope.
 
+This update fixes the QA-reported Phase 3 operational-cap defect by enforcing `max_requests_per_run` for burst schedules at both schedule-time and execution-time guard boundaries, including non-production burst windows.
+
 ## 3. Source Inputs
 - `docs/architecture/phase_3_audit_scheduling_lifecycle_technical_design.md`
 - `docs/product/phase_3_audit_scheduling_lifecycle_product_spec.md`
 - `docs/qa/phase_3_audit_scheduling_lifecycle_test_plan.md`
+- `docs/qa/phase_3_audit_scheduling_lifecycle_qa_report.md`
 - `docs/release/phase_3_audit_scheduling_lifecycle_issue.md`
 
 ## 4. API Contracts Affected
@@ -32,6 +35,7 @@ No public API contract changes. Internal function/handler contracts added:
 - New scheduled execution and finalization handlers under `apps/backend/handlers/`.
 - Phase 3 unit/integration tests.
 - Backend implementation plan/report docs.
+- For the QA cap fix: `packages/audit_scheduling/validators.py`, `packages/audit_scheduling/safeguards.py`, and `tests/unit/test_phase3_safeguards.py`.
 
 ## 7. Security / Authorization Considerations
 Phase 3 is internal/IAM-bound only. Validate identifiers before key/log/name use. Reject raw tokens and `run_id` in scheduled events. Persist only sanitized metadata. Enforce production opt-in and production caps before schedule creation and execution. Do not log secrets, raw payloads, or provider details.

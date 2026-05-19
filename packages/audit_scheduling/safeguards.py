@@ -126,6 +126,8 @@ def ensure_execution_allowed(audit: dict[str, Any], event: dict[str, Any]) -> No
         raise ValidationError("Token expired for scheduled occurrence", "EXPIRED_TOKEN")
     burst = event.get("burst") or {}
     if burst:
+        if burst.get("request_count", 0) > caps["max_requests_per_run"]:
+            raise ValidationError("Request cap exceeded", "CAP_EXCEEDED")
         if burst.get("request_count", 0) > caps["max_burst_requests_per_window"]:
             raise ValidationError("Burst request cap exceeded", "CAP_EXCEEDED")
         if burst.get("concurrency", 0) > caps["max_concurrency"]:

@@ -28,13 +28,10 @@ def validate_schedule_config(
         raise ValidationError("Request cap exceeded", "CAP_EXCEEDED")
     for window in (config.get("burst_schedule") or {}).get("windows", []):
         validate_scenario_type(window.get("scenario_type", "burst_stability"))
+        if window.get("request_count", 0) > caps["max_requests_per_run"]:
+            raise ValidationError("Request cap exceeded", "CAP_EXCEEDED")
         if window.get("request_count", 0) > caps["max_burst_requests_per_window"]:
             raise ValidationError("Burst request cap exceeded", "CAP_EXCEEDED")
-        if (
-            window.get("request_count", 0) > caps["max_requests_per_run"]
-            and config.get("execution_environment", {}).get("target_environment") == "production"
-        ):
-            raise ValidationError("Production request cap exceeded", "CAP_EXCEEDED")
         if window.get("concurrency", 0) > caps["max_concurrency"]:
             raise ValidationError("Concurrency cap exceeded", "CAP_EXCEEDED")
     for repeated in config.get("repeated") or []:
