@@ -16,26 +16,42 @@ All completed responses are JSON with `service: mock-target-api` and an `endpoin
 
 ## Local Lambda Invocation
 
+Install app-local Serverless Framework tooling before invoking or packaging. Do not rely on a globally installed `serverless`/`sls` binary; this app is pinned to the repository-supported Serverless Framework v3 line.
+
 From `apps/mock-target-api/`:
 
 ```bash
-sls invoke local -f healthFast -p events/sample_events/health_fast.json
-sls invoke local -f healthSlow -p events/sample_events/health_slow.json
-sls invoke local -f healthFlaky -p events/sample_events/health_flaky_failure.json
-sls invoke local -f healthInconsistent -p events/sample_events/health_inconsistent_a.json
-MOCK_TARGET_SHORT_TIMEOUT=true sls invoke local -f healthTimeout -p events/sample_events/health_timeout_short.json
+npm install
+```
+
+Then invoke with npm scripts so the local Serverless binary is used:
+
+```bash
+npm run invoke -- -f healthFast -p events/sample_events/health_fast.json
+npm run invoke -- -f healthSlow -p events/sample_events/health_slow.json
+npm run invoke -- -f healthFlaky -p events/sample_events/health_flaky_failure.json
+npm run invoke -- -f healthInconsistent -p events/sample_events/health_inconsistent_a.json
+MOCK_TARGET_SHORT_TIMEOUT=true npm run invoke -- -f healthTimeout -p events/sample_events/health_timeout_short.json
 ```
 
 Do not run the timeout endpoint in default mode during normal local/CI tests unless a long wait is intended.
 
 ## Deployment
 
-Deploy with Serverless Framework from this directory:
+Package or deploy with the app-local Serverless Framework v3 tooling from this directory:
 
 ```bash
-sls deploy --stage dev
-sls deploy --stage staging
-sls deploy --stage prod
+npm run package -- --stage dev
+npm run package:staging
+npm run package:prod
+```
+
+Deploy with the same local tooling:
+
+```bash
+npm run deploy -- --stage dev
+npm run deploy -- --stage staging
+npm run deploy -- --stage prod
 ```
 
 The default deployed `MOCK_TARGET_SHORT_TIMEOUT` value is `false`; only set it explicitly for local/test validation.
