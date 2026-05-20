@@ -1,0 +1,52 @@
+service: mock-target-api
+
+frameworkVersion: "^3.38.0"
+
+provider:
+  name: aws
+  runtime: python3.11
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-1'}
+  environment:
+    STAGE: ${sls:stage}
+    SERVICE_NAME: mock-target-api
+    MOCK_TARGET_SHORT_TIMEOUT: ${env:MOCK_TARGET_SHORT_TIMEOUT, 'false'}
+  httpApi:
+    cors: false
+
+functions:
+  healthFast:
+    handler: handlers/health_fast.handler
+    timeout: 3
+    events:
+      - httpApi:
+          method: GET
+          path: /health/fast
+  healthSlow:
+    handler: handlers/health_slow.handler
+    timeout: 5
+    events:
+      - httpApi:
+          method: GET
+          path: /health/slow
+  healthFlaky:
+    handler: handlers/health_flaky.handler
+    timeout: 3
+    events:
+      - httpApi:
+          method: GET
+          path: /health/flaky
+  healthInconsistent:
+    handler: handlers/health_inconsistent.handler
+    timeout: 3
+    events:
+      - httpApi:
+          method: GET
+          path: /health/inconsistent
+  healthTimeout:
+    handler: handlers/health_timeout.handler
+    timeout: 50
+    events:
+      - httpApi:
+          method: GET
+          path: /health/timeout

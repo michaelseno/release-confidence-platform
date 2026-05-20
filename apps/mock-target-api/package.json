@@ -1,0 +1,17 @@
+{
+  "name": "release-confidence-platform-mock-target-api",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Layer 1 mock target API Serverless packaging fixture",
+  "devDependencies": {
+    "serverless": "^3.38.0"
+  },
+  "scripts": {
+    "package": "serverless package",
+    "package:dev": "serverless package --stage dev",
+    "package:staging": "serverless package --stage staging",
+    "package:prod": "serverless package --stage prod",
+    "deploy": "serverless deploy",
+    "invoke": "serverless invoke local"
+  }
+}
