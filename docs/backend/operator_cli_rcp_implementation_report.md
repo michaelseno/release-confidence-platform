@@ -122,4 +122,4 @@ No new logging sinks were required. CLI output is deterministic and sanitized fo
 - Local `python3` resolves to Python 3.13.2 in this environment, which is outside the project Python constraint; validation used `python3.11` explicitly.
 
 ## 12. Commit Status
-Commit not yet created at report-writing time for the HITL installed CLI fix update.
+Implementation commit created: `2b0f895` (`fix(backend): resolve installed rcp import`).
