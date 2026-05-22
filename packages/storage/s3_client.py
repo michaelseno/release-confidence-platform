@@ -38,6 +38,19 @@ class S3StorageClient:
         except FileNotFoundError:
             return False
 
+    def write_json(self, key: str, payload: dict[str, Any], *, overwrite: bool = False) -> None:
+        if not overwrite and self.object_exists(key):
+            raise StorageError("Config object exists", "CONFIG_OBJECT_EXISTS")
+        try:
+            self.s3_client.put_object(
+                Bucket=self.bucket_name,
+                Key=key,
+                Body=json.dumps(sanitize(payload), sort_keys=True).encode("utf-8"),
+                ContentType="application/json",
+            )
+        except Exception as exc:
+            raise StorageError("S3 config write failed", "STORAGE_ERROR") from exc
+
     def build_raw_result_key(self, client_id: str, audit_id: str, run_id: str) -> str:
         return RAW_RESULT_KEY_TEMPLATE.format(client_id=client_id, audit_id=audit_id, run_id=run_id)
 

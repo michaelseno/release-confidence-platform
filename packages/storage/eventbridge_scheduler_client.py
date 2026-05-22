@@ -12,11 +12,17 @@ from packages.sanitization.sanitizer import sanitize
 
 class EventBridgeSchedulerClient:
     def __init__(
-        self, scheduler_client: Any, *, target_arn: str | None = None, role_arn: str | None = None
+        self,
+        scheduler_client: Any,
+        *,
+        target_arn: str | None = None,
+        role_arn: str | None = None,
+        group_name: str | None = None,
     ):
         self.scheduler_client = scheduler_client
         self.target_arn = target_arn
         self.role_arn = role_arn
+        self.group_name = group_name
 
     def create_schedule(self, definition: Any) -> dict[str, Any]:
         try:
@@ -25,6 +31,8 @@ class EventBridgeSchedulerClient:
                 "ScheduleExpression": definition.expression,
                 "FlexibleTimeWindow": {"Mode": "OFF"},
             }
+            if self.group_name:
+                payload["GroupName"] = self.group_name
             if self.target_arn and self.role_arn:
                 payload["Target"] = {
                     "Arn": self.target_arn,
@@ -32,7 +40,9 @@ class EventBridgeSchedulerClient:
                     "Input": sanitize(definition.target_payload),
                 }
             self._call("create_schedule", **payload)
-            return sanitize({**definition.metadata, "status": "created"})
+            return sanitize(
+                {**definition.metadata, "schedule_group": self.group_name, "status": "created"}
+            )
         except ClientError as exc:
             raise StorageError("Schedule creation failed", "SCHEDULE_CREATE_FAILED") from exc
 

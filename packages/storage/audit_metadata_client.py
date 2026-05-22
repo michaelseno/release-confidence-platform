@@ -43,6 +43,56 @@ class AuditMetadataRepository:
         item = sanitize(item)
         self._put_conditional(item, error=StorageError("Audit metadata exists", "AUDIT_EXISTS"))
 
+    def update_for_force_recreate(self, item: dict[str, Any]) -> None:
+        item = sanitize(item)
+        key = self.audit_keys(item["client_id"], item["audit_id"])
+        history_entry = item.pop("force_history_entry")
+        values = {
+            ":draft": "DRAFT",
+            ":failed": "FAILED",
+            ":next_state": item["lifecycle_state"],
+            ":updated_at": item["updated_at"],
+            ":empty": [],
+            ":entry": [sanitize(history_entry)],
+        }
+        names: dict[str, str] = {}
+        assignments = ["lifecycle_state = :next_state", "updated_at = :updated_at"]
+        for index, field in enumerate(
+            (
+                "config_hash",
+                "config_version",
+                "config_s3_keys",
+                "audit_window",
+                "execution_environment",
+                "operational_caps",
+            )
+        ):
+            if field in item:
+                name = f"#force{index}"
+                val = f":force{index}"
+                names[name] = field
+                values[val] = item[field]
+                assignments.append(f"{name} = {val}")
+        assignments.append(
+            "lifecycle_history = list_append(if_not_exists(lifecycle_history, :empty), :entry)"
+        )
+        kwargs = {
+            "Key": key,
+            "UpdateExpression": "SET " + ", ".join(assignments),
+            "ExpressionAttributeValues": values,
+            "ConditionExpression": "lifecycle_state IN (:draft, :failed)",
+        }
+        if names:
+            kwargs["ExpressionAttributeNames"] = names
+        try:
+            self._call("update_item", **kwargs)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                raise StorageError(
+                    "Audit lifecycle is not eligible for force recreate", "FORCE_RECREATE_BLOCKED"
+                ) from exc
+            raise StorageError("Force recreate metadata update failed", "STORAGE_ERROR") from exc
+
     def append_lifecycle_transition(
         self,
         *,

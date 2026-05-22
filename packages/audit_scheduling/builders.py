@@ -49,16 +49,18 @@ def schedule_name(
     schedule_type: str,
     scenario_type: str | None = None,
     stable_config: dict[str, Any] | None = None,
+    name_prefix: str | None = None,
     max_length: int = AWS_SCHEDULER_NAME_MAX_LENGTH,
 ) -> tuple[str, str | None]:
     stage = validate_identifier("stage", stage)
     client_id = validate_identifier("client_id", client_id)
     audit_id = validate_identifier("audit_id", audit_id)
+    prefix = name_prefix or f"rcp-{stage}"
     if schedule_type == SCHEDULE_TYPE_FINALIZATION:
-        full_name = f"rcp-{stage}-{client_id}-{audit_id}-finalization"
+        full_name = f"{prefix}-{client_id}-{audit_id}-finalization"
     else:
         scenario_type = validate_scenario_type(scenario_type or "")
-        full_name = f"rcp-{stage}-{client_id}-{audit_id}-{schedule_type}-{scenario_type}"
+        full_name = f"{prefix}-{client_id}-{audit_id}-{schedule_type}-{scenario_type}"
     if len(full_name) <= max_length:
         return full_name, None
     hash_input = json.dumps(
@@ -72,8 +74,9 @@ def schedule_name(
 
 
 class ScheduleBuilder:
-    def __init__(self, *, stage: str):
+    def __init__(self, *, stage: str, name_prefix: str | None = None):
         self.stage = validate_identifier("stage", stage)
+        self.name_prefix = name_prefix
 
     def build_all(
         self, config: dict[str, Any], audit_window: dict[str, Any]
@@ -87,7 +90,8 @@ class ScheduleBuilder:
         for index, repeated in enumerate(config.get("repeated") or []):
             if repeated.get("enabled", True):
                 definitions.append(self.build_repeated(config, audit_window, repeated, index))
-        definitions.append(self.build_finalization(config, audit_window))
+        if (config.get("finalization_schedule") or {"enabled": True}).get("enabled", True):
+            definitions.append(self.build_finalization(config, audit_window))
         return definitions
 
     def build_baseline(
@@ -107,6 +111,7 @@ class ScheduleBuilder:
             schedule_type=SCHEDULE_TYPE_BASELINE,
             scenario_type=scenario_type,
             stable_config=baseline,
+            name_prefix=self.name_prefix,
         )
         scheduled_at = audit_window["start_time"]
         payload = self._execution_payload(
@@ -139,6 +144,7 @@ class ScheduleBuilder:
             schedule_type=SCHEDULE_TYPE_BURST,
             scenario_type=scenario_type,
             stable_config={**window, "index": index},
+            name_prefix=self.name_prefix,
         )
         payload = self._execution_payload(
             config,
@@ -176,6 +182,7 @@ class ScheduleBuilder:
             schedule_type=SCHEDULE_TYPE_REPEATED,
             scenario_type=scenario_type,
             stable_config={**repeated, "index": index},
+            name_prefix=self.name_prefix,
         )
         payload = self._execution_payload(
             config,
@@ -202,6 +209,7 @@ class ScheduleBuilder:
             audit_id=config["audit_id"],
             schedule_type=SCHEDULE_TYPE_FINALIZATION,
             stable_config=audit_window,
+            name_prefix=self.name_prefix,
         )
         payload = {
             "event_type": "audit_finalization",

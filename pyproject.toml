@@ -12,6 +12,9 @@ dependencies = [
   "requests>=2.31,<3",
 ]
 
+[project.scripts]
+rcp = "packages.operator_cli.main:main"
+
 [project.optional-dependencies]
 dev = [
   "pytest>=8,<9",
