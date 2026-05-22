@@ -66,14 +66,16 @@ class StageConfigLoader:
         resolved = {field: raw.get(field) for field in REQUIRED_FIELDS}
         for field, env_name in ENV_OVERRIDES.items():
             if env_name in env:
-                if env[env_name] == "":
+                if env[env_name].strip() == "":
                     raise ConfigError(
                         f"Environment override {env_name} must not be empty",
                         "STAGE_CONFIG_ERROR",
                     )
                 resolved[field] = env[env_name]
         missing = [
-            field for field, value in resolved.items() if not isinstance(value, str) or not value
+            field
+            for field, value in resolved.items()
+            if not isinstance(value, str) or value.strip() == ""
         ]
         if missing:
             raise ConfigError(

@@ -186,6 +186,9 @@ def test_stage_config_env_override_precedence(tmp_path, monkeypatch):
     monkeypatch.setenv("RCP_AWS_REGION", "")
     with pytest.raises(EngineError):
         StageConfigLoader(root=tmp_path).load("dev")
+    monkeypatch.setenv("RCP_AWS_REGION", "   ")
+    with pytest.raises(EngineError):
+        StageConfigLoader(root=tmp_path).load("dev")
 
 
 def test_validate_rejects_over_48h(tmp_path):
@@ -277,6 +280,32 @@ def test_schedule_dry_run_skips_missing_disabled_blocks(stage_config):
     names = [s["schedule_type"] for s in result["planned_schedules"]]
     assert names == ["baseline", "finalization"]
     assert scheduler.created == []
+
+
+def test_schedule_dry_run_does_not_infer_missing_finalization(stage_config):
+    _, audit, _ = configs()
+    audit.pop("finalization_schedule")
+    repo = FakeRepo(
+        {
+            "client_id": "client1",
+            "audit_id": "audit1",
+            "lifecycle_state": "DRAFT",
+            "config_s3_keys": {"audit_config": "audit.json"},
+        }
+    )
+    result = AuditSchedulingService(
+        repository=repo,
+        scheduler_client=FakeScheduler(),
+        stage="dev",
+        schedule_name_prefix="rcp-dev",
+    ).schedule_from_persisted_audit(
+        client_id="client1",
+        audit_id="audit1",
+        s3_storage=FakeS3({"audit.json": audit}),
+        dry_run=True,
+    )
+
+    assert [s["schedule_type"] for s in result["planned_schedules"]] == ["baseline"]
 
 
 def test_schedule_prod_requires_allow_production(stage_config):

@@ -267,4 +267,6 @@ def _normalize_product_schedule_config(
         config["repeated"] = repeated if isinstance(repeated, list) else [repeated]
     else:
         config["repeated"] = []
+    if "finalization_schedule" not in config:
+        config["finalization_schedule"] = {"enabled": False}
     return config
