@@ -22,8 +22,10 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
+where = ["."]
 include = ["packages*"]
 exclude = ["tests*", "docs*"]
+namespaces = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
