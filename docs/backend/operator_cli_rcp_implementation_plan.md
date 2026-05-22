@@ -7,10 +7,10 @@ Implement and stabilize the internal `rcp` operator CLI for audit validation, cr
 Add a thin CLI package and script entry point, shared stage configuration loading, shared audit config validation, creation, persisted scheduling, manual run, cancellation orchestration, and mockable AWS wrapper extensions.
 
 HITL defect fix scope:
-- Make setuptools package discovery explicit for the repository-root package layout.
-- Disable implicit namespace discovery so editable install metadata maps only regular, importable Python packages.
-- Add package markers for storage and sanitization helper packages used by the CLI dependency graph.
-- Preserve the existing console script target `packages.operator_cli.main:main` and the thin `scripts/rcp.py` shim.
+- Replace the installed console script target with a conventional project namespace: `release_confidence_platform.operator_cli.main:main`.
+- Add a thin packaged entry point that delegates to the existing `packages.operator_cli.main` implementation without changing CLI command behavior.
+- Keep the legacy `packages` implementation and shared service modules in place; this fix is packaging/import-only.
+- Update the local `scripts/rcp.py` shim to use the same packaged entry point while preserving direct script execution.
 
 ## 3. Source Inputs
 - `docs/architecture/operator_cli_rcp_technical_design.md`
@@ -33,7 +33,7 @@ No public HTTP API contract changes. Internal CLI commands affected:
 - `rcp audit cancel --client-id --audit-id --stage [--reason] [--dry-run] [--output]`
 
 Packaging contract correction:
-- Installed console script `rcp = "packages.operator_cli.main:main"` must import `packages.operator_cli.main` from a clean editable install at the repository root.
+- Installed console script `rcp = "release_confidence_platform.operator_cli.main:main"` must import a conventional package namespace from editable and non-editable installs.
 - `rcp --help` and `rcp audit --help` must render argparse help without relying on `PYTHONPATH` or `scripts/rcp.py` path bootstrapping.
 
 ## 5. Data Models / Storage Affected
@@ -63,8 +63,11 @@ QA defect fix files:
 
 HITL installed CLI fix files:
 - `pyproject.toml`
-- `packages/storage/__init__.py`
-- `packages/sanitization/__init__.py`
+- `release_confidence_platform/__init__.py`
+- `release_confidence_platform/operator_cli/__init__.py`
+- `release_confidence_platform/operator_cli/main.py`
+- `scripts/rcp.py`
+- `tests/unit/test_operator_cli_rcp.py`
 - `docs/backend/operator_cli_rcp_implementation_plan.md`
 - `docs/backend/operator_cli_rcp_implementation_report.md`
 
@@ -76,13 +79,14 @@ The installed CLI fix changes only package discovery/importability. It does not 
 ## 8. Dependencies / Constraints
 No new runtime dependencies planned. AWS calls stay behind existing boto3-compatible wrappers and are mocked in tests.
 
-Packaging constraint: the repository currently uses a top-level regular package named `packages`; setuptools discovery must expose that package and its regular subpackages to editable and non-editable installs.
+Packaging constraint: the repository still contains shared implementation modules under the historical top-level `packages` package. The installed console script must no longer target that generic namespace directly; setuptools discovery must include both `packages*` and the new `release_confidence_platform*` entrypoint namespace.
 
 ## 9. Assumptions
 - Existing config shapes are permissive; validation accepts both Phase 3 existing names and product-spec schedule block aliases where safe.
 - Stage config files use non-secret placeholder resource names suitable for tests and local dry-run usage.
 - Existing legacy `ScheduleBuilder.build_all` default behavior is left unchanged; Operator CLI persisted-config semantics are enforced in the service normalization adapter by explicitly setting missing `finalization_schedule` to disabled.
-- The console script target remains `packages.operator_cli.main:main`; making package discovery explicit is the smallest safe packaging fix and avoids CLI runtime path mutation.
+- The CLI business logic remains in `packages.operator_cli.main`; the new `release_confidence_platform.operator_cli.main` module is a delegation wrapper only.
+- The wrapper may add the repository root to `sys.path` only when running from the source tree and the legacy `packages` package is otherwise unavailable, preserving `python scripts/rcp.py ...` without requiring shell environment hacks.
 
 ## 10. Validation Plan
 - `python -m pytest tests/unit/test_operator_cli_rcp.py`
@@ -96,3 +100,6 @@ Packaging constraint: the repository currently uses a top-level regular package 
 - `/var/folders/7y/zdp6qp9n4dz00dn9f5c3n9lr0000gn/T/opencode/rcp-install-smoke/bin/python -c "import packages.operator_cli.main as m; print(m.build_parser().prog)"`
 - `/var/folders/7y/zdp6qp9n4dz00dn9f5c3n9lr0000gn/T/opencode/rcp-install-smoke/bin/rcp --help`
 - `/var/folders/7y/zdp6qp9n4dz00dn9f5c3n9lr0000gn/T/opencode/rcp-install-smoke/bin/rcp audit --help`
+- Active repo `.venv` uninstall/reinstall and installed `rcp --help` / `rcp audit --help` validation.
+- Clean Python 3.11 editable-install `rcp --help` / `rcp audit --help` validation.
+- Clean Python 3.11 non-editable-install `rcp --help` / `rcp audit --help` validation.

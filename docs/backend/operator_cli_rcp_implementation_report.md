@@ -12,6 +12,12 @@ HITL installed CLI blocker fix update:
 - Added regular package markers for `packages.storage` and `packages.sanitization`, which are imported by the Operator CLI dependency graph.
 - Preserved the installed console script target `packages.operator_cli.main:main` and the thin local `scripts/rcp.py` shim.
 
+Repeated HITL installed CLI blocker fix update:
+- Added the conventional `release_confidence_platform` package namespace and a thin `release_confidence_platform.operator_cli.main` entry point wrapper.
+- Updated `[project.scripts]` so generated `rcp` scripts import `release_confidence_platform.operator_cli.main:main` instead of `packages.operator_cli.main:main` directly.
+- Kept CLI business logic in the existing shared `packages.operator_cli` and service modules.
+- Updated `scripts/rcp.py` to delegate through the packaged entry point while retaining source-tree script execution.
+
 ## 2. Files Modified
 - `scripts/rcp.py`: executable CLI shim for `python scripts/rcp.py ...`.
 - `packages/operator_cli/*`: argparse command structure, dispatch adapters, and sanitized text/JSON rendering.
@@ -36,6 +42,12 @@ HITL installed CLI blocker fix update:
 - `packages/sanitization/__init__.py`: added regular package marker for sanitizer modules.
 - `docs/backend/operator_cli_rcp_implementation_plan.md`: updated with HITL installed CLI fix scope and packaging validation plan.
 - `docs/backend/operator_cli_rcp_implementation_report.md`: updated with installed CLI fix implementation and validation evidence.
+- `pyproject.toml`: changed the `rcp` console-script target to `release_confidence_platform.operator_cli.main:main` and included `release_confidence_platform*` in package discovery.
+- `release_confidence_platform/__init__.py`: added conventional installable project namespace marker.
+- `release_confidence_platform/operator_cli/__init__.py`: added operator CLI package marker under the conventional namespace.
+- `release_confidence_platform/operator_cli/main.py`: added a thin packaged wrapper that delegates to `packages.operator_cli.main`.
+- `scripts/rcp.py`: updated the developer shim to call the same packaged entry point.
+- `tests/unit/test_operator_cli_rcp.py`: added regression coverage that the packaged entry point exposes the existing parser.
 
 ## 3. API Contract Implementation
 No public HTTP API changes. Implemented internal CLI contracts for `rcp audit validate|create|schedule|run|cancel` with required `--stage` and documented command arguments. `--output json` is supported with sanitized payloads.
@@ -47,6 +59,11 @@ QA contract corrections implemented:
 Installed console-script contract correction implemented:
 - Clean editable install exposes `packages.operator_cli.main` to the generated `rcp` script.
 - `rcp --help` and `rcp audit --help` render argparse help from the installed venv script without `PYTHONPATH` or shell path mutation.
+
+Repeated HITL console-script correction implemented:
+- Generated console scripts now import `from release_confidence_platform.operator_cli.main import main`.
+- The conventional packaged entry point delegates to the existing `packages.operator_cli.main` implementation, preserving the CLI contract and help output.
+- `python scripts/rcp.py ...` also delegates to the packaged entry point and remains supported.
 
 ## 4. Data / Persistence Implementation
 Audit creation writes deterministic config S3 keys and `DRAFT` DynamoDB metadata. Force recreate is restricted to `DRAFT`/`FAILED` metadata and only overwrites the three config objects. Scheduling reads persisted audit config and metadata, creates enabled schedules, persists schedule metadata, and transitions lifecycle. Cancellation retains schedule metadata and persists cleanup errors when needed.
@@ -64,6 +81,7 @@ No data or persistence changes were made for the installed console-script import
 - Persisted schedule normalization explicitly sets missing `finalization_schedule` to `{"enabled": false}` while leaving legacy builder defaults isolated from the Operator CLI path.
 - Setuptools discovery now resolves from `where = ["."]`, includes `packages*`, excludes docs/tests, and disables namespace discovery so editable install metadata does not rely on implicit namespace mappings for this regular top-level package.
 - `packages.storage` and `packages.sanitization` are now regular packages, matching how the CLI imports shared storage and sanitizer modules.
+- `release_confidence_platform.operator_cli.main` is now the stable console-script import target. It imports the legacy CLI module lazily so argparse help can be reached through the installable namespace in active, clean editable, and non-editable installs.
 
 ## 6. Security / Authorization Implemented
 Trusted internal CLI only; no RBAC added. Identifier validation, production/destructive operation safeguards, auth reference validation, no literal secret output, and sanitizer-backed rendering/storage metadata are used.
@@ -79,6 +97,8 @@ Whitespace-only stage override and required-field failures use existing `ConfigE
 
 No new runtime error responses were added for the packaging fix. Successful import is validated before argparse dispatch, preventing the reported `ModuleNotFoundError` for clean installs.
 
+The repeated HITL fix removes the direct generated-script dependency on the generic `packages` namespace. If the wrapper ever cannot import the delegated legacy implementation, the failure occurs after the conventional project namespace has loaded and can be diagnosed as an internal packaging issue rather than the previous entry-point import failure.
+
 ## 8. Observability / Logging
 No new logging sinks were required. CLI output is deterministic and sanitized for operator logs. Cleanup and lifecycle metadata include sanitized status/error summaries.
 
@@ -87,6 +107,8 @@ No new logging sinks were required. CLI output is deterministic and sanitized fo
 - Stage config files contain non-secret placeholders until real infrastructure names are supplied through files or environment overrides.
 - Legacy `ScheduleBuilder.build_all` default finalization behavior is not changed globally; the Operator CLI persisted-audit path receives explicit disabled normalization when `finalization_schedule` is absent.
 - The console script should continue targeting `packages.operator_cli.main:main`; packaging discovery is the appropriate fix rather than adding runtime path mutation to CLI modules.
+- The repeated blocker required changing that earlier assumption: the console script now targets `release_confidence_platform.operator_cli.main:main` to avoid direct dependence on the generic `packages` namespace at process startup.
+- The wrapper contains a source-tree fallback that prepends the repository root only when `packages` is unavailable and the adjacent source tree is present; this is limited to preserving direct script/source usage and does not require operator shell configuration.
 
 ## 10. Validation Performed
 - `python3 -m pytest tests/unit/test_operator_cli_rcp.py` failed initially because system Python lacked pytest.
@@ -114,12 +136,36 @@ No new logging sinks were required. CLI output is deterministic and sanitized fo
 - `/var/folders/7y/zdp6qp9n4dz00dn9f5c3n9lr0000gn/T/opencode/rcp-install-smoke/bin/python scripts/rcp.py --help` — top-level help rendered successfully.
 - `/var/folders/7y/zdp6qp9n4dz00dn9f5c3n9lr0000gn/T/opencode/rcp-install-smoke/bin/python scripts/rcp.py audit --help` — audit help rendered successfully.
 - Optional non-editable smoke: `/var/folders/7y/zdp6qp9n4dz00dn9f5c3n9lr0000gn/T/opencode/rcp-wheel-smoke/bin/python -m pip install .`, import of `packages.operator_cli.main`, `packages.storage.s3_client`, and `packages.sanitization.sanitizer`, and installed `rcp --help` all succeeded.
+- `python -m pytest tests/unit/test_operator_cli_rcp.py && python -m pytest tests/api/test_operator_cli_rcp_contract.py` — failed because `python` is not available in this non-activated shell (`zsh:1: command not found: python`).
+- `python3.11 -m pytest tests/unit/test_operator_cli_rcp.py && python3.11 -m pytest tests/api/test_operator_cli_rcp_contract.py` — failed because the Homebrew Python 3.11 environment does not have pytest installed (`No module named pytest`).
+- `.venv/bin/python3.11 -m pip uninstall -y release-confidence-platform` — uninstalled existing active-venv install.
+- `.venv/bin/python3.11 -m pip install -e .` — editable reinstall succeeded.
+- `.venv/bin/rcp --help` — rendered top-level argparse help successfully.
+- `.venv/bin/rcp audit --help` — rendered audit argparse help successfully.
+- `.venv/bin/rcp` now imports `from release_confidence_platform.operator_cli.main import main`.
+- `.venv/bin/python -m pytest tests/unit/test_operator_cli_rcp.py` — 12 passed.
+- `.venv/bin/python -m pytest tests/api/test_operator_cli_rcp_contract.py` — 2 passed.
+- `python3.11 -m venv /var/folders/7y/zdp6qp9n4dz00dn9f5c3n9lr0000gn/T/opencode/rcp-hitl-clean-venv` — clean editable validation venv created.
+- `/var/folders/7y/zdp6qp9n4dz00dn9f5c3n9lr0000gn/T/opencode/rcp-hitl-clean-venv/bin/python -m pip install --upgrade pip` — pip upgraded to 26.1.1.
+- `/var/folders/7y/zdp6qp9n4dz00dn9f5c3n9lr0000gn/T/opencode/rcp-hitl-clean-venv/bin/python -m pip install -e .` — editable install succeeded.
+- `/var/folders/7y/zdp6qp9n4dz00dn9f5c3n9lr0000gn/T/opencode/rcp-hitl-clean-venv/bin/rcp --help` — rendered top-level argparse help successfully.
+- `/var/folders/7y/zdp6qp9n4dz00dn9f5c3n9lr0000gn/T/opencode/rcp-hitl-clean-venv/bin/rcp audit --help` — rendered audit argparse help successfully.
+- `python3.11 -m venv /var/folders/7y/zdp6qp9n4dz00dn9f5c3n9lr0000gn/T/opencode/rcp-hitl-wheel-venv` — clean non-editable validation venv created.
+- `/var/folders/7y/zdp6qp9n4dz00dn9f5c3n9lr0000gn/T/opencode/rcp-hitl-wheel-venv/bin/python -m pip install --upgrade pip` — pip upgraded to 26.1.1.
+- `/var/folders/7y/zdp6qp9n4dz00dn9f5c3n9lr0000gn/T/opencode/rcp-hitl-wheel-venv/bin/python -m pip install .` — wheel install succeeded.
+- `/var/folders/7y/zdp6qp9n4dz00dn9f5c3n9lr0000gn/T/opencode/rcp-hitl-wheel-venv/bin/rcp --help` — rendered top-level argparse help successfully.
+- `/var/folders/7y/zdp6qp9n4dz00dn9f5c3n9lr0000gn/T/opencode/rcp-hitl-wheel-venv/bin/rcp audit --help` — rendered audit argparse help successfully.
+- `.venv/bin/python scripts/rcp.py --help` — rendered top-level argparse help successfully.
+- `.venv/bin/python scripts/rcp.py audit --help` — rendered audit argparse help successfully.
 
 ## 11. Known Limitations / Follow-Ups
 - Stage configs use placeholder AWS resource names and must be replaced or overridden before real environment operations.
 - Unit coverage uses fakes/mocks only; no real AWS integration validation was performed by design.
 - No known blocking issues remain for the two QA defects or the installed console-script import blocker.
 - Local `python3` resolves to Python 3.13.2 in this environment, which is outside the project Python constraint; validation used `python3.11` explicitly.
+- The implementation intentionally leaves existing business logic under `packages.*`; a future broader source-layout migration could remove the wrapper, but is not required for this HITL blocker.
 
 ## 12. Commit Status
 Implementation commit created: `2b0f895` (`fix(backend): resolve installed rcp import`).
+
+Repeated HITL blocker fix commit: pending creation after this report update.

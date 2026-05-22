@@ -13,6 +13,7 @@ from packages.core.audit_creation_service import AuditCreationService
 from packages.core.exceptions import EngineError
 from packages.core.manual_run_service import ManualRunInvocationService
 from packages.operator_cli.main import build_parser
+from release_confidence_platform.operator_cli.main import build_parser as packaged_build_parser
 
 
 class FakeS3:
@@ -172,6 +173,27 @@ def test_parser_accepts_commands_and_requires_stage():
     with pytest.raises(SystemExit) as exc:
         parser.parse_args(["audit", "cancel", "--client-id", "c", "--audit-id", "a"])
     assert exc.value.code == 2
+
+
+def test_packaged_entrypoint_delegates_to_operator_cli_parser():
+    parser = packaged_build_parser()
+
+    args = parser.parse_args(
+        [
+            "audit",
+            "run",
+            "--client-id",
+            "c",
+            "--audit-id",
+            "a",
+            "--scenario-type",
+            "baseline_health",
+            "--stage",
+            "dev",
+        ]
+    )
+
+    assert args.audit_command == "run"
 
 
 def test_stage_config_env_override_precedence(tmp_path, monkeypatch):
