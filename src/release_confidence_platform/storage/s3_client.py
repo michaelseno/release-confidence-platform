@@ -7,9 +7,13 @@ from typing import Any
 
 from botocore.exceptions import ClientError
 
-from packages.core.constants.engine import RAW_RESULT_KEY_TEMPLATE
-from packages.core.exceptions import ConfigError, DuplicateRunIdError, StorageError
-from packages.sanitization.sanitizer import sanitize
+from release_confidence_platform.core.constants.engine import RAW_RESULT_KEY_TEMPLATE
+from release_confidence_platform.core.exceptions import (
+    ConfigError,
+    DuplicateRunIdError,
+    StorageError,
+)
+from release_confidence_platform.sanitization.sanitizer import sanitize
 
 
 class S3StorageClient:

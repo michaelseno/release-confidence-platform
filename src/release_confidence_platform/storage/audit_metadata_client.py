@@ -6,10 +6,10 @@ from typing import Any
 
 from botocore.exceptions import ClientError
 
-from packages.audit_lifecycle.exceptions import LifecycleConflictError
-from packages.core.exceptions import StorageError
-from packages.core.time import utc_now_iso
-from packages.sanitization.sanitizer import sanitize
+from release_confidence_platform.audit_lifecycle.exceptions import LifecycleConflictError
+from release_confidence_platform.core.exceptions import StorageError
+from release_confidence_platform.core.time import utc_now_iso
+from release_confidence_platform.sanitization.sanitizer import sanitize
 
 
 class DuplicateOccurrenceClaimError(StorageError):

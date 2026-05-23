@@ -9,7 +9,7 @@ from datetime import datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from packages.audit_scheduling.constants import (
+from release_confidence_platform.audit_scheduling.constants import (
     BASELINE_DEFAULT_INTERVAL_MINUTES,
     SCENARIO_BASELINE_HEALTH,
     SCENARIO_BURST_STABILITY,
@@ -19,10 +19,13 @@ from packages.audit_scheduling.constants import (
     SCHEDULE_TYPE_FINALIZATION,
     SCHEDULE_TYPE_REPEATED,
 )
-from packages.audit_scheduling.safeguards import isoformat_z, parse_iso_datetime
-from packages.audit_scheduling.taxonomy import reliability_category_for, validate_scenario_type
-from packages.core.exceptions import ValidationError
-from packages.core.validators import validate_identifier
+from release_confidence_platform.audit_scheduling.safeguards import isoformat_z, parse_iso_datetime
+from release_confidence_platform.audit_scheduling.taxonomy import (
+    reliability_category_for,
+    validate_scenario_type,
+)
+from release_confidence_platform.core.exceptions import ValidationError
+from release_confidence_platform.core.validators import validate_identifier
 
 AWS_SCHEDULER_NAME_MAX_LENGTH = 64
 

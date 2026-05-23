@@ -4,18 +4,24 @@ from __future__ import annotations
 
 from typing import Any
 
-from packages.audit_lifecycle.constants import (
+from release_confidence_platform.audit_lifecycle.constants import (
     LIFECYCLE_STATE_DRAFT,
     LIFECYCLE_STATE_FAILED,
     LIFECYCLE_STATE_SCHEDULED,
 )
-from packages.audit_lifecycle.service import AuditLifecycleService, LifecycleTransition
-from packages.audit_scheduling.builders import ScheduleBuilder
-from packages.audit_scheduling.safeguards import effective_caps, validate_audit_window
-from packages.audit_scheduling.validators import validate_schedule_config
-from packages.core.exceptions import ValidationError
-from packages.core.time import utc_now_iso
-from packages.sanitization.sanitizer import sanitize
+from release_confidence_platform.audit_lifecycle.service import (
+    AuditLifecycleService,
+    LifecycleTransition,
+)
+from release_confidence_platform.audit_scheduling.builders import ScheduleBuilder
+from release_confidence_platform.audit_scheduling.safeguards import (
+    effective_caps,
+    validate_audit_window,
+)
+from release_confidence_platform.audit_scheduling.validators import validate_schedule_config
+from release_confidence_platform.core.exceptions import ValidationError
+from release_confidence_platform.core.time import utc_now_iso
+from release_confidence_platform.sanitization.sanitizer import sanitize
 
 
 class AuditSchedulingService:

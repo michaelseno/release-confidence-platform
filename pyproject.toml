@@ -12,19 +12,27 @@ dependencies = [
   "requests>=2.31,<3",
 ]
 
+[project.scripts]
+rcp = "release_confidence_platform.operator_cli.main:main"
+
 [project.optional-dependencies]
 dev = [
   "pytest>=8,<9",
   "ruff>=0.5,<1",
 ]
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+
 [tool.setuptools.packages.find]
-include = ["packages*"]
-exclude = ["tests*", "docs*"]
+where = ["src"]
+include = ["release_confidence_platform*"]
+exclude = ["tests*", "docs*", "apps*"]
+namespaces = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = ["src", "."]
 
 [tool.ruff]
 target-version = "py311"

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from packages.audit_lifecycle.constants import LIFECYCLE_STATE_CANCELLED
-from packages.audit_lifecycle.service import AuditLifecycleService, LifecycleTransition
-from packages.core.time import utc_now_iso
-from packages.core.validators import validate_identifier
-from packages.sanitization.sanitizer import sanitize
+from release_confidence_platform.audit_lifecycle.constants import LIFECYCLE_STATE_CANCELLED
+from release_confidence_platform.audit_lifecycle.service import (
+    AuditLifecycleService,
+    LifecycleTransition,
+)
+from release_confidence_platform.core.time import utc_now_iso
+from release_confidence_platform.core.validators import validate_identifier
+from release_confidence_platform.sanitization.sanitizer import sanitize
 
 
 class AuditCancellationService:

@@ -1,0 +1,9 @@
+{
+  "region": "us-east-1",
+  "aws_profile": "rcp-dev",
+  "config_bucket": "rcp-dev-config-placeholder",
+  "audit_metadata_table": "rcp-dev-audit-metadata-placeholder",
+  "orchestrator_function_name": "rcp-dev-orchestrator-placeholder",
+  "scheduler_group_name": "rcp-dev-schedules-placeholder",
+  "schedule_name_prefix": "rcp-dev"
+}

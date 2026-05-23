@@ -1,0 +1,9 @@
+{
+  "region": "us-east-1",
+  "aws_profile": "rcp-staging",
+  "config_bucket": "rcp-staging-config-placeholder",
+  "audit_metadata_table": "rcp-staging-audit-metadata-placeholder",
+  "orchestrator_function_name": "rcp-staging-orchestrator-placeholder",
+  "scheduler_group_name": "rcp-staging-schedules-placeholder",
+  "schedule_name_prefix": "rcp-staging"
+}
