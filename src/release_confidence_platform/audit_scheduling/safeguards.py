@@ -39,7 +39,7 @@ def isoformat_z(value: datetime) -> str:
 
 def effective_caps(execution_environment: dict[str, Any] | None) -> dict[str, int]:
     env = execution_environment or {}
-    if env.get("target_environment") == "production":
+    if env.get("target_environment") in {"prod", "production"}:
         if env.get("allow_production_execution") is not True:
             raise ValidationError(
                 "Production execution requires explicit allow", "PRODUCTION_BLOCKED"

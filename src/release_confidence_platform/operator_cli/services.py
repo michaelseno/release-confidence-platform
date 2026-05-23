@@ -10,6 +10,7 @@ from release_confidence_platform.config.audit_validation_service import AuditCon
 from release_confidence_platform.config.stage_config import StageConfigLoader
 from release_confidence_platform.core.audit_creation_service import AuditCreationService
 from release_confidence_platform.core.manual_run_service import ManualRunInvocationService
+from release_confidence_platform.operator_cli.config_init import ConfigInitService
 from release_confidence_platform.operator_cli.discovery_service import (
     ConfigDiscoveryService,
     DiscoveryListService,
@@ -124,6 +125,24 @@ def config_download_command(args: Namespace) -> CommandResult:
             if args.overwrite
             else f"downloaded {data['count']} config files"
         ),
+        data=data,
+    )
+
+
+def config_init_command(args: Namespace) -> CommandResult:
+    data = ConfigInitService().init(
+        client_name=args.client_name,
+        target_environment=args.target_environment,
+        output_dir=args.output_dir,
+        timezone=args.timezone,
+        include_sample_endpoints=args.include_sample_endpoints,
+        overwrite=args.overwrite,
+    )
+    return CommandResult(
+        command="config init",
+        stage=None,
+        status="success",
+        summary="generated local starter config files",
         data=data,
     )
 

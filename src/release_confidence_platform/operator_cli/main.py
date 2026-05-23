@@ -81,6 +81,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output-dir", required=True)
     p.add_argument("--overwrite", action="store_true")
     _add_stage_output(p)
+    p = config_sub.add_parser("init", help="Generate local starter audit configuration files")
+    p.add_argument("--client-name", required=True)
+    p.add_argument(
+        "--target-environment", required=True, choices=("dev", "staging", "prod", "production")
+    )
+    p.add_argument("--output-dir", required=True)
+    p.add_argument("--timezone", default="UTC")
+    p.add_argument("--include-sample-endpoints", action="store_true")
+    p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--output", choices=("text", "json"), default="text")
     return parser
 
 
@@ -124,6 +134,8 @@ def dispatch(args: argparse.Namespace) -> CommandResult:
             return services.config_list_command(args)
         if args.config_command == "download":
             return services.config_download_command(args)
+        if args.config_command == "init":
+            return services.config_init_command(args)
         raise AssertionError(f"config {args.config_command}")
     command = f"audit {args.audit_command}"
     if args.audit_command == "list":

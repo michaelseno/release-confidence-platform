@@ -43,11 +43,11 @@ def _validate_no_literal_secret(key: str, value: Any) -> None:
         raise ConfigError("Secret-bearing fields must use secret_ref", "CONFIG_VALIDATION_ERROR")
 
 
-def extract_endpoints(config: Any) -> list[dict[str, Any]]:
+def extract_endpoints(config: Any, *, allow_empty: bool = False) -> list[dict[str, Any]]:
     endpoints = config.get("endpoints") if isinstance(config, dict) else config
     if not isinstance(endpoints, list):
         raise ConfigError("Endpoint config must contain endpoints list", "CONFIG_VALIDATION_ERROR")
-    if not endpoints:
+    if not endpoints and not allow_empty:
         raise ConfigError(
             "Endpoint config must include at least one endpoint", "CONFIG_VALIDATION_ERROR"
         )
@@ -114,5 +114,8 @@ def validate_endpoint(endpoint: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def validate_endpoint_config(config: Any) -> list[dict[str, Any]]:
-    return [validate_endpoint(endpoint) for endpoint in extract_endpoints(config)]
+def validate_endpoint_config(config: Any, *, allow_empty: bool = False) -> list[dict[str, Any]]:
+    return [
+        validate_endpoint(endpoint)
+        for endpoint in extract_endpoints(config, allow_empty=allow_empty)
+    ]
