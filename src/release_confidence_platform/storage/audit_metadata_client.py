@@ -39,6 +39,94 @@ class AuditMetadataRepository:
             raise StorageError("Audit metadata not found", "AUDIT_NOT_FOUND")
         return response["Item"]
 
+    def list_audits_for_client(
+        self, client_id: str, *, limit: int, exclusive_start_key: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """List audit metadata records for a client using a bounded DynamoDB query."""
+
+        kwargs: dict[str, Any] = {
+            "KeyConditionExpression": "PK = :pk AND begins_with(SK, :sk_prefix)",
+            "ExpressionAttributeValues": {
+                ":pk": f"CLIENT#{client_id}",
+                ":sk_prefix": "AUDIT#",
+            },
+            "Limit": limit,
+        }
+        if exclusive_start_key:
+            kwargs["ExclusiveStartKey"] = exclusive_start_key
+        try:
+            response = self._call("query", **kwargs)
+        except Exception as exc:
+            raise StorageError("DynamoDB audit query failed", "STORAGE_ERROR") from exc
+        return {
+            "items": response.get("Items", []),
+            "last_evaluated_key": response.get("LastEvaluatedKey"),
+        }
+
+    def list_clients_from_registry(
+        self, *, limit: int, exclusive_start_key: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
+        """Return registry-backed clients if a registry/index exists.
+
+        No registry or client index exists in the current repository schema, so callers should use
+        the documented temporary bounded scan fallback.
+        """
+
+        return None
+
+    def scan_clients_bounded(
+        self,
+        *,
+        limit: int,
+        exclusive_start_key: dict[str, Any] | None = None,
+        max_items: int = 1000,
+    ) -> dict[str, Any]:
+        """Temporary bounded scan fallback for client discovery.
+
+        This intentionally reads only safe metadata fields and stops once enough unique clients are
+        collected or the hard read guard is reached. Replace with a client registry/index when one
+        is available.
+        """
+
+        clients: dict[str, dict[str, Any]] = {}
+        read_count = 0
+        last_key = exclusive_start_key
+        while len(clients) < limit and read_count < max_items:
+            page_limit = min(limit - len(clients), max_items - read_count)
+            if page_limit <= 0:
+                break
+            kwargs: dict[str, Any] = {
+                "Limit": page_limit,
+                "ProjectionExpression": (
+                    "PK, SK, client_id, client_name, created_at, updated_at, lifecycle_state"
+                ),
+            }
+            if last_key:
+                kwargs["ExclusiveStartKey"] = last_key
+            try:
+                response = self._call("scan", **kwargs)
+            except Exception as exc:
+                raise StorageError("DynamoDB client scan failed", "STORAGE_ERROR") from exc
+            items = response.get("Items", [])
+            read_count += len(items)
+            for item in items:
+                client_id = _client_id_from_item(item)
+                if not client_id:
+                    continue
+                current = clients.setdefault(
+                    client_id,
+                    {"client_id": client_id, "active_audit_count": 0},
+                )
+                current["active_audit_count"] = current.get("active_audit_count", 0) + 1
+                for field in ("client_name", "created_at", "updated_at"):
+                    value = item.get(field)
+                    if value is not None and current.get(field) is None:
+                        current[field] = value
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+        return {"items": list(clients.values())[:limit], "last_evaluated_key": last_key}
+
     def put_audit_metadata_once(self, item: dict[str, Any]) -> None:
         item = sanitize(item)
         self._put_conditional(item, error=StorageError("Audit metadata exists", "AUDIT_EXISTS"))
@@ -202,3 +290,19 @@ class AuditMetadataRepository:
             return method(TableName=self.table_name, **kwargs)
         except TypeError:
             return method(**kwargs)
+
+
+def _client_id_from_item(item: dict[str, Any]) -> str | None:
+    value = _ddb_scalar(item.get("client_id"))
+    if isinstance(value, str) and value:
+        return value
+    pk = _ddb_scalar(item.get("PK"))
+    if isinstance(pk, str) and pk.startswith("CLIENT#"):
+        return pk.removeprefix("CLIENT#")
+    return None
+
+
+def _ddb_scalar(value: Any) -> Any:
+    if isinstance(value, dict) and set(value) & {"S", "N", "BOOL"}:
+        return value.get("S") or value.get("N") or value.get("BOOL")
+    return value

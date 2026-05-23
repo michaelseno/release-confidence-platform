@@ -31,6 +31,49 @@ class S3StorageClient:
         except Exception as exc:
             raise ConfigError("Config object could not be loaded", "CONFIG_LOAD_ERROR") from exc
 
+    def read_text(self, key: str) -> str:
+        try:
+            response = self.s3_client.get_object(Bucket=self.bucket_name, Key=key)
+            return response["Body"].read().decode("utf-8")
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in {"404", "NoSuchKey", "NotFound"}:
+                raise StorageError("Config object not found", "CONFIG_ARTIFACT_NOT_FOUND") from exc
+            raise StorageError("S3 config read failed", "STORAGE_ERROR") from exc
+        except Exception as exc:
+            raise StorageError("S3 config read failed", "STORAGE_ERROR") from exc
+
+    def head_metadata(self, key: str) -> dict[str, Any] | None:
+        try:
+            response = self.s3_client.head_object(Bucket=self.bucket_name, Key=key)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in {"404", "NoSuchKey", "NotFound"}:
+                return None
+            raise StorageError("S3 metadata lookup failed", "STORAGE_ERROR") from exc
+        except FileNotFoundError:
+            return None
+        metadata = {
+            "key": key,
+            "last_modified": response.get("LastModified"),
+            "version_id": response.get("VersionId"),
+            "size_bytes": response.get("ContentLength"),
+        }
+        return {k: _metadata_value(v) for k, v in metadata.items() if v is not None}
+
+    def list_keys(
+        self, prefix: str, *, max_keys: int = 1000, continuation_token: str | None = None
+    ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {"Bucket": self.bucket_name, "Prefix": prefix, "MaxKeys": max_keys}
+        if continuation_token:
+            kwargs["ContinuationToken"] = continuation_token
+        try:
+            response = self.s3_client.list_objects_v2(**kwargs)
+        except Exception as exc:
+            raise StorageError("S3 list failed", "STORAGE_ERROR") from exc
+        return {
+            "keys": [obj.get("Key") for obj in response.get("Contents", []) if obj.get("Key")],
+            "next_token": response.get("NextContinuationToken"),
+        }
+
     def object_exists(self, key: str) -> bool:
         try:
             self.s3_client.head_object(Bucket=self.bucket_name, Key=key)
@@ -68,3 +111,7 @@ class S3StorageClient:
             Body=json.dumps(sanitized, sort_keys=True).encode("utf-8"),
             ContentType="application/json",
         )
+
+
+def _metadata_value(value: Any) -> Any:
+    return value.isoformat() if hasattr(value, "isoformat") else value

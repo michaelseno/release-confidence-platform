@@ -10,6 +10,10 @@ from release_confidence_platform.config.audit_validation_service import AuditCon
 from release_confidence_platform.config.stage_config import StageConfigLoader
 from release_confidence_platform.core.audit_creation_service import AuditCreationService
 from release_confidence_platform.core.manual_run_service import ManualRunInvocationService
+from release_confidence_platform.operator_cli.discovery_service import (
+    ConfigDiscoveryService,
+    DiscoveryListService,
+)
 from release_confidence_platform.operator_cli.result import CommandResult
 from release_confidence_platform.storage.aws_client_factory import AwsClientFactory
 
@@ -48,6 +52,79 @@ def validate_command(args: Namespace) -> CommandResult:
         status="success",
         summary="validation passed; no mutations performed",
         data={"client_id": result.client_id, "audit_id": result.audit_id},
+    )
+
+
+def client_list_command(args: Namespace) -> CommandResult:
+    stage_config = _stage(args)
+    factory = AwsClientFactory(stage_config)
+    data = DiscoveryListService(factory.audit_metadata_repository()).list_clients(limit=args.limit)
+    return CommandResult(
+        command="client list",
+        stage=stage_config.stage,
+        status="success",
+        summary="no clients found" if data["count"] == 0 else f"found {data['count']} clients",
+        data=data,
+    )
+
+
+def audit_list_command(args: Namespace) -> CommandResult:
+    stage_config = _stage(args)
+    factory = AwsClientFactory(stage_config)
+    data = DiscoveryListService(factory.audit_metadata_repository()).list_audits(
+        client_id=args.client_id, limit=args.limit
+    )
+    return CommandResult(
+        command="audit list",
+        stage=stage_config.stage,
+        status="success",
+        summary=(
+            "no audits found for client" if data["count"] == 0 else f"found {data['count']} audits"
+        ),
+        data=data,
+    )
+
+
+def config_list_command(args: Namespace) -> CommandResult:
+    stage_config = _stage(args)
+    factory = AwsClientFactory(stage_config)
+    data = ConfigDiscoveryService(factory.s3_storage(), stage=stage_config.stage).list_config_keys(
+        client_id=args.client_id, audit_id=args.audit_id
+    )
+    return CommandResult(
+        command="config list",
+        stage=stage_config.stage,
+        status="success",
+        summary=(
+            "no config artifacts found"
+            if data["count"] == 0
+            else f"found {data['count']} config artifacts"
+        ),
+        data=data,
+    )
+
+
+def config_download_command(args: Namespace) -> CommandResult:
+    stage_config = _stage(args)
+    factory = AwsClientFactory(stage_config)
+    data = ConfigDiscoveryService(
+        factory.s3_storage(), stage=stage_config.stage
+    ).download_audit_config_set(
+        client_id=args.client_id,
+        audit_id=args.audit_id,
+        output_dir=args.output_dir,
+        overwrite=args.overwrite,
+    )
+    return CommandResult(
+        command="config download",
+        stage=stage_config.stage,
+        status="success",
+        summary=(
+            f"downloaded {data['count']} config files; existing local files were overwritten"
+            if args.overwrite
+            else f"downloaded {data['count']} config files"
+        ),
+        data=data,
     )
 
 

@@ -41,10 +41,28 @@ def render(result: CommandResult, *, output: str = "text") -> str:
     lines = [f"{label}: {result.command}"]
     if result.stage:
         lines.append(f"stage: {result.stage}")
-    for key in ("client_id", "audit_id", "lifecycle_state"):
+    for key in ("client_id", "audit_id", "output_dir", "lifecycle_state"):
         if payload.get(key) is not None:
             lines.append(f"{key}: {payload[key]}")
     lines.append(f"summary: {result.summary}")
+    if payload.get("count") is not None:
+        lines.append(f"count: {payload['count']}")
+    if payload.get("truncated") is not None:
+        lines.append(f"truncated: {str(payload['truncated']).lower()}")
+    if result.command in {"client list", "audit list"}:
+        _append_rows(lines, payload.get("items", []))
+    if result.command == "config list":
+        _append_config_keys(lines, payload.get("config_keys", []))
+    if result.command == "config download":
+        if payload.get("warning"):
+            lines.append("")
+            lines.append(f"WARNING: {payload['warning']}")
+        files = payload.get("downloaded_files", [])
+        if files:
+            lines.append("")
+            lines.append("files:")
+            for file_info in files:
+                lines.append(f"  - {file_info.get('file_name') or file_info.get('path')}")
     actions = (
         payload.get("planned_actions")
         or payload.get("planned_schedules")
@@ -59,9 +77,53 @@ def render(result: CommandResult, *, output: str = "text") -> str:
         lines.append("next_step: review cleanup_errors and reconcile schedules manually")
     elif result.status == "dry_run":
         lines.append("next_step: rerun without --dry-run to apply these actions")
+    elif result.command == "config download":
+        lines.append(
+            "next_step: keep files under .local-configs/, do not commit them, "
+            "and delete them when no longer needed"
+        )
     else:
         lines.append("next_step: none")
     return "\n".join(lines)
+
+
+def _append_rows(lines: list[str], rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    lines.append("")
+    keys = [
+        "client_id",
+        "audit_id",
+        "lifecycle_state",
+        "created_at",
+        "updated_at",
+        "active_audit_count",
+    ]
+    shown = [key for key in keys if any(key in row for row in rows)]
+    lines.append("  ".join(shown))
+    for row in rows:
+        lines.append("  ".join(str(row.get(key, "-")) for key in shown))
+
+
+def _append_config_keys(lines: list[str], rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    lines.append("")
+    lines.append("file_name  type  exists  size_bytes  last_modified  version_id")
+    for row in rows:
+        lines.append(
+            "  ".join(
+                str(row.get(key, "-"))
+                for key in (
+                    "file_name",
+                    "type",
+                    "exists",
+                    "size_bytes",
+                    "last_modified",
+                    "version_id",
+                )
+            )
+        )
 
 
 def render_error(
