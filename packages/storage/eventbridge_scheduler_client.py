@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from botocore.exceptions import ClientError
@@ -16,11 +17,13 @@ class EventBridgeSchedulerClient:
         scheduler_client: Any,
         *,
         target_arn: str | None = None,
+        target_arns: Mapping[str, str] | None = None,
         role_arn: str | None = None,
         group_name: str | None = None,
     ):
         self.scheduler_client = scheduler_client
         self.target_arn = target_arn
+        self.target_arns = dict(target_arns or {})
         self.role_arn = role_arn
         self.group_name = group_name
 
@@ -33,9 +36,10 @@ class EventBridgeSchedulerClient:
             }
             if self.group_name:
                 payload["GroupName"] = self.group_name
-            if self.target_arn and self.role_arn:
+            target_arn = self._target_arn_for(definition)
+            if target_arn and self.role_arn:
                 payload["Target"] = {
-                    "Arn": self.target_arn,
+                    "Arn": target_arn,
                     "RoleArn": self.role_arn,
                     "Input": sanitize(definition.target_payload),
                 }
@@ -83,3 +87,9 @@ class EventBridgeSchedulerClient:
     def _call(self, method_name: str, **kwargs: Any) -> dict[str, Any]:
         method = getattr(self.scheduler_client, method_name)
         return method(**kwargs)
+
+    def _target_arn_for(self, definition: Any) -> str | None:
+        schedule_type = getattr(definition, "schedule_type", None)
+        if schedule_type and schedule_type in self.target_arns:
+            return self.target_arns[schedule_type]
+        return self.target_arn

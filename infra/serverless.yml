@@ -11,12 +11,45 @@ provider:
   runtime: python3.11
   region: ${opt:region, 'us-east-1'}
   stage: ${opt:stage, 'dev'}
+  logRetentionInDays: ${self:custom.logRetentionInDays.${self:provider.stage}}
   environment:
     STAGE: ${self:provider.stage}
     AWS_REGION: ${self:provider.region}
     RAW_RESULTS_BUCKET: ${self:custom.rawResultsBucketName}
     METADATA_TABLE: ${self:custom.metadataTableName}
+    SCHEDULER_GROUP_NAME: ${self:custom.schedulerGroupName}
     LOG_LEVEL: INFO
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+          Resource:
+            - arn:aws:logs:${self:provider.region}:*:log-group:/aws/lambda/${self:service}-${self:provider.stage}-*:*
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:HeadObject
+            - s3:PutObject
+          Resource:
+            - arn:aws:s3:::${self:custom.rawResultsBucketName}/*
+        - Effect: Allow
+          Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+          Resource:
+            - Fn::GetAtt:
+                - MetadataTable
+                - Arn
+        - Effect: Allow
+          Action:
+            - secretsmanager:GetSecretValue
+          Resource:
+            - arn:aws:secretsmanager:${self:provider.region}:*:secret:${self:custom.secretNamePrefix}*
 
 custom:
   allowedStages:
@@ -26,6 +59,13 @@ custom:
   resourcePrefix: release-confidence-platform
   rawResultsBucketName: ${self:custom.resourcePrefix}-${self:provider.stage}-raw-results
   metadataTableName: ${self:custom.resourcePrefix}-${self:provider.stage}-metadata
+  schedulerGroupName: rcp-${self:provider.stage}-schedules
+  schedulerNamePrefix: rcp-${self:provider.stage}
+  secretNamePrefix: ${self:custom.resourcePrefix}/${self:provider.stage}/
+  logRetentionInDays:
+    dev: 14
+    staging: 30
+    prod: 90
 
 package:
   patterns:
@@ -35,7 +75,15 @@ package:
 
 functions:
   coreEngineOrchestrator:
-    handler: ../apps/backend/handlers/orchestrator_handler.handler
+    handler: apps.backend.handlers.orchestrator_handler.handler
+    timeout: 60
+    memorySize: 256
+  scheduledExecution:
+    handler: apps.backend.handlers.scheduled_execution_handler.handler
+    timeout: 300
+    memorySize: 512
+  auditFinalization:
+    handler: apps.backend.handlers.audit_finalization_handler.handler
     timeout: 60
     memorySize: 256
 

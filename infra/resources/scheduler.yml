@@ -1,5 +1,53 @@
-Resources: {}
+Resources:
+  BackendSchedulerGroup:
+    Type: AWS::Scheduler::ScheduleGroup
+    Properties:
+      Name: ${self:custom.schedulerGroupName}
+
+  BackendSchedulerInvocationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ${self:service}-${self:provider.stage}-scheduler-invoke
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke-backend-scheduler-targets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - Fn::GetAtt:
+                      - ScheduledExecutionLambdaFunction
+                      - Arn
+                  - Fn::GetAtt:
+                      - AuditFinalizationLambdaFunction
+                      - Arn
 Outputs:
-  Phase0SchedulerBoundary:
-    Description: Scheduler runtime logic is intentionally not implemented in Phase 0.
-    Value: phase-0-placeholder
+  SchedulerGroupName:
+    Description: EventBridge Scheduler group for backend audit schedules.
+    Value: ${self:custom.schedulerGroupName}
+  SchedulerInvocationRoleArn:
+    Description: IAM role ARN used by EventBridge Scheduler to invoke backend target Lambdas.
+    Value:
+      Fn::GetAtt:
+        - BackendSchedulerInvocationRole
+        - Arn
+  ScheduledExecutionTargetArn:
+    Description: Lambda target ARN for baseline, burst, and repeated scheduler events.
+    Value:
+      Fn::GetAtt:
+        - ScheduledExecutionLambdaFunction
+        - Arn
+  AuditFinalizationTargetArn:
+    Description: Lambda target ARN for finalization scheduler events.
+    Value:
+      Fn::GetAtt:
+        - AuditFinalizationLambdaFunction
+        - Arn

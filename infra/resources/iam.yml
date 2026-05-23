@@ -1,5 +1,5 @@
 Resources: {}
 Outputs:
-  Phase0IamBoundary:
-    Description: IAM permissions are intentionally not expanded in Phase 0 because no runtime functions are implemented.
-    Value: phase-0-placeholder
+  BackendLambdaIamScope:
+    Description: Backend Lambda role is scoped to stage S3, DynamoDB, Secrets Manager, and CloudWatch Logs resources in serverless.yml.
+    Value: stage-scoped-runtime-permissions
