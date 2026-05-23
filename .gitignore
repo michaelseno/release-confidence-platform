@@ -28,3 +28,6 @@ package-lock.json
 dist/
 build/
 tmp/
+
+# Local operator config downloads
+.local-configs/
