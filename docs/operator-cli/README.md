@@ -35,4 +35,34 @@ The CLI is internal only and does not accept or print secrets. Discovery command
 
 Downloaded configs may contain sensitive operational details. Prefer paths under `.local-configs/`, which is gitignored by this repository, and do not commit downloaded files.
 
+## Setup troubleshooting
+
+Use Python 3.11 for this repository (`pyproject.toml` requires `>=3.11,<3.12`). If an editable install succeeds but `rcp --help` fails with:
+
+```text
+ModuleNotFoundError: No module named 'release_confidence_platform'
+```
+
+on macOS, hidden file flags on `.venv` can cause Python to skip editable-install `.pth` files. From the repository root, clear the flags and reinstall:
+
+```bash
+chflags -R nohidden .venv
+.venv/bin/python -m pip install -e .
+hash -r
+rcp --help
+rcp audit --help
+```
+
+If that does not resolve the issue, rebuild the virtual environment:
+
+```bash
+rm -rf .venv
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -U pip setuptools
+.venv/bin/python -m pip install -e .[dev]
+hash -r
+rcp --help
+rcp audit --help
+```
+
 Deferred operator workflows are documented for future planning only and are not implemented here: `config delete`, `config archive`, `run list`, `run inspect`, `audit status`, `schedule status`, and version-specific config downloads via `--version-id`.

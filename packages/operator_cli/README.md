@@ -13,4 +13,28 @@ Operational discovery commands are available through the same `rcp` entry point:
 
 Discovery is read-only against AWS. Config downloads write only local files, protect existing files unless `--overwrite` is provided, and should normally be stored under `.local-configs/`.
 
+## Setup troubleshooting
+
+Use Python 3.11 (`pyproject.toml` requires `>=3.11,<3.12`). If `pip install -e .` succeeds but `rcp --help` fails with `ModuleNotFoundError: No module named 'release_confidence_platform'` on macOS, hidden flags may be causing Python to skip editable-install `.pth` files.
+
+```bash
+chflags -R nohidden .venv
+.venv/bin/python -m pip install -e .
+hash -r
+rcp --help
+rcp audit --help
+```
+
+If needed, rebuild cleanly:
+
+```bash
+rm -rf .venv
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -U pip setuptools
+.venv/bin/python -m pip install -e .[dev]
+hash -r
+rcp --help
+rcp audit --help
+```
+
 Future placeholders are not implemented in this package: config delete/archive, run list/inspect, audit status, schedule status, and `--version-id` downloads.

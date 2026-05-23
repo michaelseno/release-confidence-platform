@@ -5,6 +5,8 @@ Implemented read-only Operational Discovery CLI commands for clients, audits, co
 
 QA-blocking DynamoDB low-level client unmarshalling defects were fixed by normalizing discovery read items in the audit metadata repository before CLI service output shaping.
 
+Added HITL-requested operator documentation for the installed `rcp` editable-install import issue caused by macOS hidden `.pth` flags. No CLI behavior was changed.
+
 ## 2. Files Modified
 - `.gitignore`: added `.local-configs/` for local operator downloads.
 - `src/release_confidence_platform/operator_cli/main.py`: added `client list`, `audit list`, `config list`, and `config download` parser/dispatch support; no `--version-id` support added.
@@ -18,6 +20,9 @@ QA-blocking DynamoDB low-level client unmarshalling defects were fixed by normal
 - `docs/operator-cli/README.md`: documented discovery command usage, safety boundaries, `.local-configs/`, and future placeholders.
 - `packages/operator_cli/README.md`: updated legacy package documentation to point to current src-layout implementation and discovery commands.
 - `docs/backend/operator_cli_discovery_implementation_plan.md`: added implementation plan.
+- `docs/operator-cli/README.md`: added setup troubleshooting for macOS hidden file flags causing editable-install `.pth` files to be skipped, including remediation and clean rebuild commands.
+- `packages/operator_cli/README.md`: mirrored concise troubleshooting guidance in the package-local compatibility README.
+- `docs/backend/operator_cli_discovery_implementation_plan.md`: updated for the documentation-only HITL troubleshooting addition.
 
 ## 3. API Contract Implementation
 No HTTP API changes.
@@ -31,6 +36,8 @@ Implemented CLI contracts:
 `--version-id` is not exposed or accepted. `--next-token` was not implemented because the direct user scope and CLI UX specification excluded active pagination-token workflow for this PR.
 
 The `rcp audit list` and `rcp client list` output contracts now receive plain Python scalar/object fields from repository reads rather than DynamoDB AttributeValue maps.
+
+The HITL documentation update does not change any CLI contract or runtime behavior.
 
 ## 4. Data / Persistence Implementation
 No new AWS persistence or schema changes.
@@ -84,6 +91,7 @@ No new logging or metrics were added. The implementation follows existing CLI er
 - `config list` requires `--audit-id` for this PR, matching the user scope and CLI UX spec.
 - Local partial writes are removed on write failure where possible.
 - DynamoDB numeric AttributeValue scalars in discovery metadata are unmarshalled as their string payloads to avoid introducing non-JSON-native numeric behavior outside the approved discovery contract.
+- Package-local CLI documentation remains relevant because it points operators from the legacy package path to the src-layout implementation.
 
 ## 10. Validation Performed
 - `python -m pytest ...` attempted first but `python` was not available in the shell.
@@ -97,6 +105,7 @@ No new logging or metrics were added. The implementation follows existing CLI er
 - `python3.11 -m pytest tests/unit/test_operator_cli_rcp.py tests/api/test_operator_cli_rcp_contract.py` — 14 passed.
 - `python3.11 -m pytest tests/unit` — 74 passed.
 - `python3.11 -m ruff check src/release_confidence_platform/operator_cli src/release_confidence_platform/storage tests/unit/test_operator_cli_discovery.py tests/api/test_operator_cli_discovery_contract.py` — passed.
+- `python3.11 - <<'PY' ...` documentation check — passed; verified both operator CLI READMEs contain the required symptom, macOS hidden `.pth` cause, remediation commands, clean rebuild commands, and Python 3.11 note.
 
 ## 11. Known Limitations / Follow-Ups
 - `client list` uses a temporary bounded scan fallback until a first-class client registry/index is introduced.
@@ -108,3 +117,5 @@ No new logging or metrics were added. The implementation follows existing CLI er
 Implementation committed in `334f1a1` (`feat(backend): implement operator cli discovery`).
 
 DynamoDB unmarshalling QA fix committed in `0169488` (`fix(backend): normalize discovery dynamodb items`).
+
+HITL troubleshooting documentation update pending commit at report update time.

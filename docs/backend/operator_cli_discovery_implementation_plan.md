@@ -11,6 +11,7 @@ Implement read-only Operational Discovery commands for the internal `rcp` Operat
 - Add mocked unit tests and update operator CLI docs.
 - Ensure `.local-configs/` is gitignored.
 - Fix QA-blocking DynamoDB low-level client response handling by normalizing AttributeValue-shaped discovery read items at the audit metadata repository boundary.
+- Add concise operator documentation for macOS hidden-flag editable-install troubleshooting without changing CLI behavior.
 
 ## 3. Source Inputs
 - `docs/architecture/operator_cli_discovery_technical_design.md`
@@ -21,7 +22,9 @@ Implement read-only Operational Discovery commands for the internal `rcp` Operat
 - Existing `src/release_confidence_platform/operator_cli` and storage wrapper patterns.
 - `docs/qa/operator_cli_discovery_test_report.md`
 - `docs/bugs/operator_cli_discovery_dynamodb_unmarshal_bug_report.md`
+- `docs/bugs/operator_cli_installed_rcp_import_bug_report.md`
 - `tests/api/test_operator_cli_discovery_contract.py`
+- User HITL approval and documentation update request for installed `rcp` import troubleshooting.
 
 ## 4. API Contracts Affected
 No HTTP API contract changes.
@@ -76,12 +79,14 @@ Local filesystem writes only for `config download`.
 - Tests use mocked/fake AWS clients only.
 - Client registry/index is not visible in the current repository; implement documented temporary bounded scan fallback.
 - Preserve compatibility with existing plain-dict unit fakes while supporting low-level DynamoDB AttributeValue response items.
+- Documentation-only HITL update; no CLI behavior changes.
 
 ## 9. Assumptions
 - Limit values above 1000 are rejected rather than capped, matching the UX invalid-argument behavior.
 - `config list` requires `--audit-id` per user scope and CLI UX spec.
 - Download partial cleanup will remove files written during the failed operation where possible before raising a controlled error.
 - DynamoDB numeric AttributeValue scalars in discovery metadata can remain string-compatible when unmarshalled because the discovery contract covers safe summary fields and does not require numeric transformation.
+- The package-local README remains relevant as compatibility documentation and should mirror the operator setup troubleshooting note concisely.
 
 ## 10. Validation Plan
 - `python -m pytest tests/unit/test_operator_cli_discovery.py tests/unit/test_operator_cli_rcp.py tests/api/test_operator_cli_rcp_contract.py`
@@ -91,3 +96,4 @@ Local filesystem writes only for `config download`.
 - `python3.11 -m pytest tests/unit/test_operator_cli_rcp.py tests/api/test_operator_cli_rcp_contract.py`
 - `python3.11 -m pytest tests/unit`
 - `python3.11 -m ruff check src/release_confidence_platform/operator_cli src/release_confidence_platform/storage tests/unit/test_operator_cli_discovery.py tests/api/test_operator_cli_discovery_contract.py` if ruff is available.
+- Lightweight documentation check for the required troubleshooting terms in `docs/operator-cli/README.md` and `packages/operator_cli/README.md`.
