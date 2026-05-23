@@ -107,4 +107,4 @@ No new logging or metrics were added. The implementation follows existing CLI er
 ## 12. Commit Status
 Implementation committed in `334f1a1` (`feat(backend): implement operator cli discovery`).
 
-DynamoDB unmarshalling QA fix commit pending at report update time.
+DynamoDB unmarshalling QA fix committed in `0169488` (`fix(backend): normalize discovery dynamodb items`).
