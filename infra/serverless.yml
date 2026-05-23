@@ -70,8 +70,20 @@ custom:
 package:
   patterns:
     - '!../**'
-    - '../apps/**'
-    - '../packages/**'
+    - '../apps/__init__.py'
+    - '../apps/backend/**'
+    - '!../apps/backend/**/__pycache__/**'
+    - '!../apps/backend/**/*.pyc'
+    - '../packages/__init__.py'
+    - '../packages/audit_lifecycle/**'
+    - '../packages/audit_scheduling/**'
+    - '../packages/config/**'
+    - '../packages/core/**'
+    - '../packages/data_generation/**'
+    - '../packages/sanitization/**'
+    - '../packages/storage/**'
+    - '!../packages/**/__pycache__/**'
+    - '!../packages/**/*.pyc'
 
 functions:
   coreEngineOrchestrator:

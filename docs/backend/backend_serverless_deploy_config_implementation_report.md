@@ -1,10 +1,10 @@
 # Implementation Report
 
 ## 1. Summary of Changes
-Updated the backend Serverless deployment configuration to deploy all current event-driven backend runtime handlers, define required environment variables, provision stage-aware storage and scheduler resources, and wire scheduler target selection for separate execution and finalization Lambdas.
+Updated the backend Serverless deployment configuration to deploy all current event-driven backend runtime handlers, define required environment variables, provision stage-aware storage and scheduler resources, wire scheduler target selection for separate execution and finalization Lambdas, and isolate backend packaging from the mock target API application.
 
 ## 2. Files Modified
-- `infra/serverless.yml` — added all three backend Lambda functions, stage-aware env vars/log retention, IAM statements, and corrected handler module paths.
+- `infra/serverless.yml` — added all three backend Lambda functions, stage-aware env vars/log retention, IAM statements, corrected handler module paths, and scoped package patterns to backend runtime code plus required shared Python packages only.
 - `infra/resources/dynamodb.yml` — aligned table key schema to runtime `PK`/`SK` keys.
 - `infra/resources/s3.yml` — clarified runtime bucket outputs.
 - `infra/resources/iam.yml` — replaced stale placeholder output with runtime IAM scope documentation output.
@@ -15,7 +15,8 @@ Updated the backend Serverless deployment configuration to deploy all current ev
 - `config/stages/dev.json`, `config/stages/staging.json`, `config/stages/prod.json` — added scheduler target/role config fields with placeholders to document required stage config shape.
 - `tests/unit/test_operator_cli_rcp.py`, `tests/api/test_operator_cli_rcp_contract.py` — updated stage config fixtures and added scheduler target-selection coverage.
 - `docs/backend/backend_deployment.md` — documented validation, deployment, outputs, and scheduler operator configuration.
-- `docs/backend/backend_serverless_deploy_config_implementation_plan.md` — recorded implementation plan.
+- `docs/backend/backend_serverless_deploy_config_implementation_plan.md` — recorded implementation plan and package isolation validation scope.
+- `docs/backend/backend_serverless_deploy_config_implementation_report.md` — recorded package isolation fix and validation evidence.
 
 ## 3. API Contract Implementation
 No API contract changes. No API Gateway or HTTP events were added. Backend deployment remains Lambda/event-driven only.
@@ -33,6 +34,8 @@ The stage-specific S3 bucket remains the configured `RAW_RESULTS_BUCKET`; it is 
   - `coreEngineOrchestrator`
   - `scheduledExecution`
   - `auditFinalization`
+- Backend Serverless packaging now starts from `!../**`, includes only `apps/__init__.py`, `apps/backend/**`, `packages/__init__.py`, and required shared package directories (`audit_lifecycle`, `audit_scheduling`, `config`, `core`, `data_generation`, `sanitization`, `storage`), and excludes Python cache artifacts.
+- The broad `../apps/**` include was removed, so `apps/mock-target-api/**`, mock `.serverless` artifacts, mock handlers, and mock `node_modules` are not eligible for the backend deployment ZIP.
 - Scheduler integration now exposes a schedule group and invocation role.
 - Dynamic schedule creation can select the scheduled execution Lambda for `baseline`, `burst`, and `repeated` definitions, and the finalization Lambda for `finalization` definitions.
 - Handler logic was not changed. Only deployment config and scheduler client wiring/configuration were updated.
@@ -42,6 +45,7 @@ The stage-specific S3 bucket remains the configured `RAW_RESULTS_BUCKET`; it is 
 - Scheduler invocation role trusts only `scheduler.amazonaws.com`.
 - Scheduler invocation role permits `lambda:InvokeFunction` only on scheduled execution and audit finalization Lambda ARNs.
 - No public HTTP exposure was added.
+- Mock target API code and build artifacts are excluded from the backend Lambda package boundary.
 
 ## 7. Error Handling Implemented
 No handler error behavior was changed. Scheduler client behavior remains backward-compatible: if no target ARN/role is configured, it omits the target as before; when configured, it selects the target by schedule type.
@@ -62,7 +66,9 @@ Serverless log retention is now stage-aware: 14 days for `dev`, 30 days for `sta
 - `serverless print --stage staging` from `infra/` — passed with stage-specific names/env.
 - `serverless print --stage prod` from `infra/` — passed with stage-specific names/env.
 - `serverless package --stage dev` from `infra/` — passed.
-- Packaged artifact inspection confirmed the ZIP includes all three handler modules plus `packages/storage/eventbridge_scheduler_client.py`, and Serverless state contains `auditFinalization`, `coreEngineOrchestrator`, and `scheduledExecution`.
+- Packaged artifact inspection confirmed the ZIP includes all three handler modules plus required shared package modules, contains `0` entries under `apps/mock-target-api/`, and contains no `__pycache__`/`.pyc` entries.
+- `serverless print --stage staging` from `infra/` — passed after package isolation change; rendered stage-specific env vars, all three Lambda functions, no events/API Gateway, IAM, DynamoDB, and Scheduler resources.
+- `serverless print --stage prod` from `infra/` — passed after package isolation change; rendered stage-specific env vars, all three Lambda functions, no events/API Gateway, IAM, DynamoDB, and Scheduler resources.
 - `python3 -m py_compile ...` for changed Python modules and tests — passed.
 
 ## 11. Known Limitations / Follow-Ups
@@ -71,4 +77,4 @@ Serverless log retention is now stage-aware: 14 days for `dev`, 30 days for `sta
 - Secrets Manager scope uses the stage-prefixed naming convention documented above; if production secrets use a different prefix, deployment config must be adjusted before deploy.
 
 ## 12. Commit Status
-Implementation commit created: `657716b` (`fix(backend): update serverless deploy config`).
+Implementation commit `657716b` (`fix(backend): update serverless deploy config`) existed before the QA rejection. Package isolation fix is pending commit.
