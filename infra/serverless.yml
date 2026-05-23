@@ -14,7 +14,6 @@ provider:
   logRetentionInDays: ${self:custom.logRetentionInDays.${self:provider.stage}}
   environment:
     STAGE: ${self:provider.stage}
-    AWS_REGION: ${self:provider.region}
     RAW_RESULTS_BUCKET: ${self:custom.rawResultsBucketName}
     METADATA_TABLE: ${self:custom.metadataTableName}
     SCHEDULER_GROUP_NAME: ${self:custom.schedulerGroupName}

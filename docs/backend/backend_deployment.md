@@ -37,11 +37,12 @@ For each stage, the backend deployment provisions:
 Serverless defines these Lambda environment variables:
 
 - `STAGE`
-- `AWS_REGION`
 - `RAW_RESULTS_BUCKET`
 - `METADATA_TABLE`
 - `SCHEDULER_GROUP_NAME`
 - `LOG_LEVEL`
+
+`AWS_REGION` is intentionally not configured in Serverless because it is a reserved Lambda-provided environment variable. Runtime code should rely on the Lambda-provided value if region discovery is needed.
 
 ## Scheduler Operator Configuration
 
