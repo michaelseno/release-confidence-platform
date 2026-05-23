@@ -87,4 +87,4 @@ No new logging or metrics were added. The implementation follows existing CLI er
 - Future placeholders remain documentation-only: `config delete`, `config archive`, `run list`, `run inspect`, `audit status`, `schedule status`, and `config download --version-id`.
 
 ## 12. Commit Status
-Commit not created yet at report-writing time.
+Implementation committed in `334f1a1` (`feat(backend): implement operator cli discovery`).
