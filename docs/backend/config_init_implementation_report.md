@@ -66,4 +66,4 @@ No logging was added because this is a small local-only generator and the techni
 - None known for the approved scope.
 
 ## 12. Commit Status
-Pending commit at report creation time.
+Implementation committed in `e1e25b2` (`feat(backend): implement config init`).
