@@ -71,4 +71,4 @@ Serverless log retention is now stage-aware: 14 days for `dev`, 30 days for `sta
 - Secrets Manager scope uses the stage-prefixed naming convention documented above; if production secrets use a different prefix, deployment config must be adjusted before deploy.
 
 ## 12. Commit Status
-Commit not yet created at report-writing time. Final handoff will include the created commit hash after validation and commit.
+Implementation commit created: `657716b` (`fix(backend): update serverless deploy config`).
