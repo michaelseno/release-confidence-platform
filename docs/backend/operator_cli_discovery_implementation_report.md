@@ -118,4 +118,4 @@ Implementation committed in `334f1a1` (`feat(backend): implement operator cli di
 
 DynamoDB unmarshalling QA fix committed in `0169488` (`fix(backend): normalize discovery dynamodb items`).
 
-HITL troubleshooting documentation update pending commit at report update time.
+HITL troubleshooting documentation update committed in `082af5d` (`docs(backend): document operator cli install troubleshooting`).

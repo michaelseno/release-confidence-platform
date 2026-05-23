@@ -37,7 +37,7 @@ Downloaded configs may contain sensitive operational details. Prefer paths under
 
 ## Setup troubleshooting
 
-Use Python 3.11 for this repository (`pyproject.toml` requires `>=3.11,<3.12`). If an editable install succeeds but `rcp --help` fails with:
+Use Python 3.11 for this repository (`pyproject.toml` requires `>=3.11,<3.12`). If `.venv/bin/python -m pip install -e .` succeeds but `rcp --help` fails with:
 
 ```text
 ModuleNotFoundError: No module named 'release_confidence_platform'
