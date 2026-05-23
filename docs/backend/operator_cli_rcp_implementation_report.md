@@ -191,4 +191,4 @@ No new logging sinks were required. CLI output is deterministic and sanitized fo
 ## 12. Commit Status
 Implementation commit created: `2b0f895` (`fix(backend): resolve installed rcp import`).
 
-Repeated HITL blocker fix commit: pending creation after final src-layout validation.
+Final src-layout remediation commit created: `e3211b1` (`fix(backend): convert rcp to src package`).
