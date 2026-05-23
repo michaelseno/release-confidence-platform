@@ -52,10 +52,9 @@ def _hash(value: Any) -> str:
 
 def _is_production(audit_config: dict[str, Any]) -> bool:
     env = audit_config.get("execution_environment") or {}
-    return (
-        env.get("target_environment") == "production"
-        or audit_config.get("target_environment") == "production"
-    )
+    return env.get("target_environment") in {"prod", "production"} or audit_config.get(
+        "target_environment"
+    ) in {"prod", "production"}
 
 
 def _allowed_methods(client_config: dict[str, Any]) -> set[str] | None:
@@ -94,12 +93,14 @@ class AuditConfigValidationService:
         audit_config_path: str | Path,
         endpoints_config_path: str | Path,
         stage: str,
+        template_mode: bool = False,
     ) -> ValidatedAuditConfig:
         return self.validate_configs(
             client_config=_load_json_file(client_config_path, "client_config"),
             audit_config=_load_json_file(audit_config_path, "audit_config"),
             endpoints_config=_load_json_file(endpoints_config_path, "endpoints_config"),
             stage=stage,
+            template_mode=template_mode,
         )
 
     def validate_configs(
@@ -109,6 +110,7 @@ class AuditConfigValidationService:
         audit_config: dict[str, Any],
         endpoints_config: dict[str, Any],
         stage: str,
+        template_mode: bool = False,
     ) -> ValidatedAuditConfig:
         if not isinstance(client_config, dict) or not isinstance(audit_config, dict):
             raise ConfigError("Client and audit configs must be objects", "CONFIG_VALIDATION_ERROR")
@@ -127,15 +129,27 @@ class AuditConfigValidationService:
         normalized["audit_id"] = audit_id
         audit_window = validate_audit_window(normalized.get("audit_window"))
         normalized["audit_window"] = audit_window
-        endpoints = validate_endpoint_config(endpoints_config)
+        endpoints = validate_endpoint_config(endpoints_config, allow_empty=template_mode)
         allowed_methods = _allowed_methods(client_config)
         execution_env = normalized.get("execution_environment") or {}
         is_prod = stage == "prod" or _is_production(normalized)
-        if is_prod and execution_env.get("allow_production_execution") is not True:
+        if (
+            is_prod
+            and not template_mode
+            and execution_env.get("allow_production_execution") is not True
+        ):
             raise ValidationError(
                 "Production execution requires explicit allow", "PRODUCTION_BLOCKED"
             )
-        effective_caps(execution_env)
+        if (
+            template_mode
+            and is_prod
+            and execution_env.get("allow_production_execution") is not True
+        ):
+            non_prod_env = {**execution_env, "target_environment": "staging"}
+            effective_caps(non_prod_env)
+        else:
+            effective_caps(execution_env)
         for endpoint in endpoints:
             method = endpoint["method"]
             if allowed_methods is not None and method not in allowed_methods:

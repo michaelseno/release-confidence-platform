@@ -63,6 +63,17 @@ def render(result: CommandResult, *, output: str = "text") -> str:
             lines.append("files:")
             for file_info in files:
                 lines.append(f"  - {file_info.get('file_name') or file_info.get('path')}")
+    if result.command == "config init":
+        lines.append(f"overwritten: {str(bool(payload.get('overwritten'))).lower()}")
+        files = payload.get("generated_files", [])
+        if files:
+            lines.append("")
+            lines.append("files:")
+            for file_info in files:
+                lines.append(f"  - {file_info.get('path') or file_info.get('file_name')}")
+        if payload.get("warning"):
+            lines.append("")
+            lines.append(f"WARNING: {payload['warning']}")
     actions = (
         payload.get("planned_actions")
         or payload.get("planned_schedules")
@@ -81,6 +92,11 @@ def render(result: CommandResult, *, output: str = "text") -> str:
         lines.append(
             "next_step: keep files under .local-configs/, do not commit them, "
             "and delete them when no longer needed"
+        )
+    elif result.command == "config init":
+        lines.append(
+            "next_step: run rcp audit validate with the generated file paths before onboarding; "
+            "keep files under .local-configs/ and do not commit them"
         )
     else:
         lines.append("next_step: none")
