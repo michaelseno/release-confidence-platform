@@ -20,6 +20,9 @@ The backend deployment config is expected at `infra/serverless.yml`. The mock ta
 | 8 | Mock API deployment remains unaffected | Inspect mock API Serverless config and backend package for accidental mock coupling |
 | 9 | No API Gateway unless needed | Inspect backend functions/events and generated CloudFormation for API Gateway/HttpApi resources |
 | 10 | No invented handlers or handler business logic changes unless called out | Compare branch changed files and handler definitions |
+| 11 | Final cleanup removed unused duplicate relative path `config/stages 2` | Filesystem check confirms duplicate directory is absent |
+| 12 | Real runtime stage config directory remains intact | File inspection confirms `config/stages/dev.json`, `config/stages/staging.json`, and `config/stages/prod.json` remain present and non-empty |
+| 13 | No code/docs/config references remain to `config/stages 2` or `stages 2` | Repository content search for both strings returns no matches |
 
 ## 3. Test Scenarios
 
@@ -54,10 +57,16 @@ The backend deployment config is expected at `infra/serverless.yml`. The mock ta
    - Validation logic: Python `zipfile` inspection.
 
 6. **Regression tests**
-   - Purpose: Confirm backend/operator scheduler behavior still passes targeted tests.
-   - Input: Existing pytest suites.
-   - Expected output: Relevant tests pass without regression.
-   - Validation logic: Execute targeted pytest command with Python 3.11.
+    - Purpose: Confirm backend/operator scheduler behavior still passes targeted tests.
+    - Input: Existing pytest suites.
+    - Expected output: Relevant tests pass without regression.
+    - Validation logic: Execute targeted pytest command with Python 3.11.
+
+7. **Final duplicate stage directory cleanup**
+   - Purpose: Confirm the unused duplicate `config/stages 2` path was safely removed after successful deployment/HITL validation.
+   - Input: `config/`, repository source/docs/config content search.
+   - Expected output: `config/stages 2` is absent; `config/stages/` still contains dev/staging/prod JSON configs; no references to `config/stages 2` or `stages 2` remain.
+   - Validation logic: Filesystem assertions, JSON config file inspection, repository content search.
 
 ## 4. Edge Cases
 
@@ -66,6 +75,7 @@ The backend deployment config is expected at `infra/serverless.yml`. The mock ta
 - Scheduler invocation role only invokes scheduled execution and finalization Lambdas.
 - Backend package does not include mock API `.serverless`, mock handlers, or mock `node_modules` content.
 - Handler business logic files are not changed by this infrastructure fix.
+- Removing an empty duplicate directory must not remove or alter the real runtime `config/stages/` files.
 
 ## 5. Test Types Covered
 
@@ -74,7 +84,8 @@ The backend deployment config is expected at `infra/serverless.yml`. The mock ta
 - Edge: stage-specific generation and package composition.
 - Integration: generated Serverless/CloudFormation output inspection.
 - Regression: targeted backend/operator pytest suites.
+- Cleanup: filesystem and content-search validation for the deleted duplicate path.
 
 ## 6. Coverage Justification
 
-Coverage directly maps each acceptance criterion to static inspection, Serverless generated output, packaging validation, or automated regression execution. Package composition inspection is included because the fix must not accidentally couple backend deployment to the mock target API.
+Coverage directly maps each acceptance criterion to static inspection, Serverless generated output, packaging validation, filesystem cleanup checks, content-search checks, or automated regression execution. Package composition inspection is included because the fix must not accidentally couple backend deployment to the mock target API.
