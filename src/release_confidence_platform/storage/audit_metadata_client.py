@@ -47,8 +47,8 @@ class AuditMetadataRepository:
         kwargs: dict[str, Any] = {
             "KeyConditionExpression": "PK = :pk AND begins_with(SK, :sk_prefix)",
             "ExpressionAttributeValues": {
-                ":pk": f"CLIENT#{client_id}",
-                ":sk_prefix": "AUDIT#",
+                ":pk": {"S": f"CLIENT#{client_id}"},
+                ":sk_prefix": {"S": "AUDIT#"},
             },
             "Limit": limit,
         }
@@ -59,7 +59,7 @@ class AuditMetadataRepository:
         except Exception as exc:
             raise StorageError("DynamoDB audit query failed", "STORAGE_ERROR") from exc
         return {
-            "items": response.get("Items", []),
+            "items": [_unmarshal_ddb_item(item) for item in response.get("Items", [])],
             "last_evaluated_key": response.get("LastEvaluatedKey"),
         }
 
@@ -110,6 +110,7 @@ class AuditMetadataRepository:
             items = response.get("Items", [])
             read_count += len(items)
             for item in items:
+                item = _unmarshal_ddb_item(item)
                 client_id = _client_id_from_item(item)
                 if not client_id:
                     continue
@@ -303,6 +304,39 @@ def _client_id_from_item(item: dict[str, Any]) -> str | None:
 
 
 def _ddb_scalar(value: Any) -> Any:
-    if isinstance(value, dict) and set(value) & {"S", "N", "BOOL"}:
-        return value.get("S") or value.get("N") or value.get("BOOL")
+    value = _unmarshal_ddb_value(value)
     return value
+
+
+def _unmarshal_ddb_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Return a plain-Python item for both low-level DDB and unit fake shapes."""
+
+    return {key: _unmarshal_ddb_value(value) for key, value in item.items()}
+
+
+def _unmarshal_ddb_value(value: Any) -> Any:
+    """Unwrap DynamoDB AttributeValue maps without altering plain fake items."""
+
+    if isinstance(value, list):
+        return [_unmarshal_ddb_value(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if len(value) == 1:
+        kind, raw = next(iter(value.items()))
+        if kind == "S":
+            return raw
+        if kind == "N":
+            return raw
+        if kind == "BOOL":
+            return raw
+        if kind == "NULL":
+            return None
+        if kind == "M":
+            return {key: _unmarshal_ddb_value(item) for key, item in raw.items()}
+        if kind == "L":
+            return [_unmarshal_ddb_value(item) for item in raw]
+        if kind in {"SS", "NS", "BS"}:
+            return list(raw)
+        if kind == "B":
+            return raw
+    return {key: _unmarshal_ddb_value(item) for key, item in value.items()}

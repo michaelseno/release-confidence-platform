@@ -10,6 +10,7 @@ Implement read-only Operational Discovery commands for the internal `rcp` Operat
 - Add JSON/text rendering support for list and config download results.
 - Add mocked unit tests and update operator CLI docs.
 - Ensure `.local-configs/` is gitignored.
+- Fix QA-blocking DynamoDB low-level client response handling by normalizing AttributeValue-shaped discovery read items at the audit metadata repository boundary.
 
 ## 3. Source Inputs
 - `docs/architecture/operator_cli_discovery_technical_design.md`
@@ -18,6 +19,9 @@ Implement read-only Operational Discovery commands for the internal `rcp` Operat
 - `docs/qa/operator_cli_discovery_test_plan.md`
 - `docs/release/operator_cli_discovery_issue.md`
 - Existing `src/release_confidence_platform/operator_cli` and storage wrapper patterns.
+- `docs/qa/operator_cli_discovery_test_report.md`
+- `docs/bugs/operator_cli_discovery_dynamodb_unmarshal_bug_report.md`
+- `tests/api/test_operator_cli_discovery_contract.py`
 
 ## 4. API Contracts Affected
 No HTTP API contract changes.
@@ -38,6 +42,8 @@ Read-only access only:
 - Temporary bounded DynamoDB scan fallback for `client list` when no registry/index exists.
 - S3 config objects at existing deterministic config paths.
 
+DynamoDB discovery read responses from low-level `boto3.client("dynamodb")` are normalized from AttributeValue maps to plain Python values before service output shaping. No table/index/schema changes are made.
+
 Local filesystem writes only for `config download`.
 
 ## 6. Files Expected to Change
@@ -52,6 +58,7 @@ Local filesystem writes only for `config download`.
 - `docs/operator-cli/README.md`
 - `packages/operator_cli/README.md`
 - `docs/backend/operator_cli_discovery_implementation_report.md`
+- `tests/api/test_operator_cli_discovery_contract.py` if additional regression coverage is needed.
 
 ## 7. Security / Authorization Considerations
 - AWS authentication/authorization remains IAM-based via existing stage config and `AwsClientFactory`.
@@ -61,18 +68,26 @@ Local filesystem writes only for `config download`.
 - `config list` uses metadata/head operations only.
 - `config download` prints/returns file paths only, not config contents.
 - Output continues through the existing sanitizer.
+- DynamoDB unmarshalling must not broaden the safe metadata allowlist returned by discovery services.
 
 ## 8. Dependencies / Constraints
 - No new dependencies planned.
 - No hardcoded buckets, tables, profiles, regions, ARNs, or account IDs.
 - Tests use mocked/fake AWS clients only.
 - Client registry/index is not visible in the current repository; implement documented temporary bounded scan fallback.
+- Preserve compatibility with existing plain-dict unit fakes while supporting low-level DynamoDB AttributeValue response items.
 
 ## 9. Assumptions
 - Limit values above 1000 are rejected rather than capped, matching the UX invalid-argument behavior.
 - `config list` requires `--audit-id` per user scope and CLI UX spec.
 - Download partial cleanup will remove files written during the failed operation where possible before raising a controlled error.
+- DynamoDB numeric AttributeValue scalars in discovery metadata can remain string-compatible when unmarshalled because the discovery contract covers safe summary fields and does not require numeric transformation.
 
 ## 10. Validation Plan
 - `python -m pytest tests/unit/test_operator_cli_discovery.py tests/unit/test_operator_cli_rcp.py tests/api/test_operator_cli_rcp_contract.py`
 - `python -m ruff check src/release_confidence_platform/operator_cli src/release_confidence_platform/storage tests/unit/test_operator_cli_discovery.py`
+- `python3.11 -m pytest tests/api/test_operator_cli_discovery_contract.py`
+- `python3.11 -m pytest tests/unit/test_operator_cli_discovery.py`
+- `python3.11 -m pytest tests/unit/test_operator_cli_rcp.py tests/api/test_operator_cli_rcp_contract.py`
+- `python3.11 -m pytest tests/unit`
+- `python3.11 -m ruff check src/release_confidence_platform/operator_cli src/release_confidence_platform/storage tests/unit/test_operator_cli_discovery.py tests/api/test_operator_cli_discovery_contract.py` if ruff is available.
