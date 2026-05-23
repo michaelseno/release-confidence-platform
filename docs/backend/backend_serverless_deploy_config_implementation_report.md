@@ -77,4 +77,4 @@ Serverless log retention is now stage-aware: 14 days for `dev`, 30 days for `sta
 - Secrets Manager scope uses the stage-prefixed naming convention documented above; if production secrets use a different prefix, deployment config must be adjusted before deploy.
 
 ## 12. Commit Status
-Implementation commit `657716b` (`fix(backend): update serverless deploy config`) existed before the QA rejection. Package isolation fix is pending commit.
+Package isolation fix commit created: `a2d86b3` (`fix(backend): isolate serverless package contents`). Previous backend deployment config commit: `657716b` (`fix(backend): update serverless deploy config`).
