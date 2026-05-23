@@ -51,6 +51,9 @@ def _stage_file_payload() -> dict[str, str]:
         orchestrator_function_name="fn",
         scheduler_group_name="group",
         schedule_name_prefix="rcp-dev",
+        scheduler_execution_target_arn="arn:aws:lambda:us-east-1:123:function:execution",
+        scheduler_finalization_target_arn="arn:aws:lambda:us-east-1:123:function:finalization",
+        scheduler_role_arn="arn:aws:iam::123:role/scheduler",
     ).to_dict()
 
 

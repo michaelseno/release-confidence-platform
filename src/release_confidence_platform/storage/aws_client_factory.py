@@ -31,7 +31,15 @@ class AwsClientFactory:
 
     def scheduler(self) -> EventBridgeSchedulerClient:
         return EventBridgeSchedulerClient(
-            self._session.client("scheduler"), group_name=self.stage_config.scheduler_group_name
+            self._session.client("scheduler"),
+            target_arns={
+                "baseline": self.stage_config.scheduler_execution_target_arn,
+                "burst": self.stage_config.scheduler_execution_target_arn,
+                "repeated": self.stage_config.scheduler_execution_target_arn,
+                "finalization": self.stage_config.scheduler_finalization_target_arn,
+            },
+            role_arn=self.stage_config.scheduler_role_arn,
+            group_name=self.stage_config.scheduler_group_name,
         )
 
     def lambda_invocation(self) -> LambdaInvocationClient:

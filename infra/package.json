@@ -9,6 +9,9 @@
   "scripts": {
     "package:dev": "serverless package --stage dev",
     "package:staging": "serverless package --stage staging",
-    "package:prod": "serverless package --stage prod"
+    "package:prod": "serverless package --stage prod",
+    "deploy:dev": "serverless deploy --stage dev",
+    "deploy:staging": "serverless deploy --stage staging",
+    "deploy:prod": "serverless deploy --stage prod"
   }
 }

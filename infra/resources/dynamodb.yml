@@ -5,16 +5,22 @@ Resources:
       TableName: ${self:custom.metadataTableName}
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
-        - AttributeName: client_id
+        - AttributeName: PK
           AttributeType: S
-        - AttributeName: audit_id
+        - AttributeName: SK
           AttributeType: S
       KeySchema:
-        - AttributeName: client_id
+        - AttributeName: PK
           KeyType: HASH
-        - AttributeName: audit_id
+        - AttributeName: SK
           KeyType: RANGE
 Outputs:
   MetadataTableName:
-    Description: Phase 0 future metadata table name.
+    Description: Runtime metadata DynamoDB table name.
     Value: ${self:custom.metadataTableName}
+  MetadataTableArn:
+    Description: Runtime metadata DynamoDB table ARN.
+    Value:
+      Fn::GetAtt:
+        - MetadataTable
+        - Arn

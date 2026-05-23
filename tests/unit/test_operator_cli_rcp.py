@@ -13,6 +13,7 @@ from release_confidence_platform.core.audit_creation_service import AuditCreatio
 from release_confidence_platform.core.exceptions import EngineError
 from release_confidence_platform.core.manual_run_service import ManualRunInvocationService
 from release_confidence_platform.operator_cli.main import build_parser
+from release_confidence_platform.storage.eventbridge_scheduler_client import EventBridgeSchedulerClient
 
 
 class FakeS3:
@@ -119,6 +120,9 @@ def stage_config():
         orchestrator_function_name="orchestrator",
         scheduler_group_name="group",
         schedule_name_prefix="rcp-dev",
+        scheduler_execution_target_arn="arn:aws:lambda:us-east-1:123:function:execution",
+        scheduler_finalization_target_arn="arn:aws:lambda:us-east-1:123:function:finalization",
+        scheduler_role_arn="arn:aws:iam::123:role/scheduler",
     )
 
 
@@ -199,7 +203,21 @@ def test_stage_config_env_override_precedence(tmp_path, monkeypatch):
     stage_dir = tmp_path / "config" / "stages"
     stage_dir.mkdir(parents=True)
     (stage_dir / "dev.json").write_text(
-        json.dumps(StageConfig("dev", "file", "p", "b", "t", "f", "g", "x").to_dict())
+        json.dumps(
+            StageConfig(
+                stage="dev",
+                region="file",
+                aws_profile="p",
+                config_bucket="b",
+                audit_metadata_table="t",
+                orchestrator_function_name="f",
+                scheduler_group_name="g",
+                schedule_name_prefix="x",
+                scheduler_execution_target_arn="execution",
+                scheduler_finalization_target_arn="finalization",
+                scheduler_role_arn="role",
+            ).to_dict()
+        )
     )
     monkeypatch.setenv("RCP_AWS_REGION", "env-region")
     loaded = StageConfigLoader(root=tmp_path).load("dev")
@@ -210,6 +228,38 @@ def test_stage_config_env_override_precedence(tmp_path, monkeypatch):
     monkeypatch.setenv("RCP_AWS_REGION", "   ")
     with pytest.raises(EngineError):
         StageConfigLoader(root=tmp_path).load("dev")
+
+
+def test_scheduler_client_selects_target_by_schedule_type():
+    class FakeAwsScheduler:
+        def __init__(self):
+            self.calls = []
+
+        def create_schedule(self, **kwargs):
+            self.calls.append(kwargs)
+            return {}
+
+    class Definition:
+        name = "rcp-dev-client-audit-finalization"
+        schedule_type = "finalization"
+        expression = "at(2026-01-01T00:00:00Z)"
+        target_payload = {"event_type": "audit_finalization"}
+        metadata = {"schedule_type": "finalization"}
+
+    aws_scheduler = FakeAwsScheduler()
+    EventBridgeSchedulerClient(
+        aws_scheduler,
+        target_arns={
+            "baseline": "arn:aws:lambda:us-east-1:123:function:execution",
+            "finalization": "arn:aws:lambda:us-east-1:123:function:finalization",
+        },
+        role_arn="arn:aws:iam::123:role/scheduler",
+        group_name="rcp-dev-schedules",
+    ).create_schedule(Definition())
+
+    assert aws_scheduler.calls[0]["Target"]["Arn"].endswith(":function:finalization")
+    assert aws_scheduler.calls[0]["Target"]["RoleArn"] == "arn:aws:iam::123:role/scheduler"
+    assert aws_scheduler.calls[0]["GroupName"] == "rcp-dev-schedules"
 
 
 def test_validate_rejects_over_48h(tmp_path):

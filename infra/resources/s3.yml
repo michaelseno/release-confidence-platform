@@ -12,5 +12,8 @@ Resources:
         Status: Enabled
 Outputs:
   RawResultsBucketName:
-    Description: Phase 0 future raw evidence bucket name.
+    Description: Runtime raw results and backend config bucket name.
     Value: ${self:custom.rawResultsBucketName}
+  RawResultsBucketArn:
+    Description: Runtime raw results and backend config bucket ARN.
+    Value: arn:aws:s3:::${self:custom.rawResultsBucketName}

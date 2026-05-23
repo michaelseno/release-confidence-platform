@@ -1,6 +1,22 @@
 from pathlib import Path
 
 
+LAMBDA_RESERVED_ENVIRONMENT_KEYS = {
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_LAMBDA_FUNCTION_NAME",
+    "AWS_LAMBDA_FUNCTION_MEMORY_SIZE",
+    "AWS_LAMBDA_FUNCTION_VERSION",
+    "AWS_LAMBDA_INITIALIZATION_TYPE",
+    "AWS_LAMBDA_LOG_GROUP_NAME",
+    "AWS_LAMBDA_LOG_STREAM_NAME",
+    "LAMBDA_TASK_ROOT",
+    "LAMBDA_RUNTIME_DIR",
+    "_HANDLER",
+    "_X_AMZN_TRACE_ID",
+}
+
+
 def test_serverless_configuration_contains_required_stages_and_names() -> None:
     serverless_yml = Path("infra/serverless.yml").read_text(encoding="utf-8")
 
@@ -29,3 +45,13 @@ def test_resource_fragments_reference_required_resources() -> None:
     assert "${self:custom.rawResultsBucketName}" in s3_yml
     assert "MetadataTable" in dynamodb_yml
     assert "${self:custom.metadataTableName}" in dynamodb_yml
+
+
+def test_serverless_lambda_environment_avoids_reserved_keys() -> None:
+    serverless_yml = Path("infra/serverless.yml").read_text(encoding="utf-8")
+
+    reserved_definitions = [
+        key for key in LAMBDA_RESERVED_ENVIRONMENT_KEYS if f"    {key}:" in serverless_yml
+    ]
+
+    assert reserved_definitions == []

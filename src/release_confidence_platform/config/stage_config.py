@@ -19,6 +19,9 @@ REQUIRED_FIELDS = (
     "orchestrator_function_name",
     "scheduler_group_name",
     "schedule_name_prefix",
+    "scheduler_execution_target_arn",
+    "scheduler_finalization_target_arn",
+    "scheduler_role_arn",
 )
 ENV_OVERRIDES = {
     "region": "RCP_AWS_REGION",
@@ -28,6 +31,9 @@ ENV_OVERRIDES = {
     "orchestrator_function_name": "RCP_ORCHESTRATOR_FUNCTION_NAME",
     "scheduler_group_name": "RCP_SCHEDULER_GROUP_NAME",
     "schedule_name_prefix": "RCP_SCHEDULE_NAME_PREFIX",
+    "scheduler_execution_target_arn": "RCP_SCHEDULER_EXECUTION_TARGET_ARN",
+    "scheduler_finalization_target_arn": "RCP_SCHEDULER_FINALIZATION_TARGET_ARN",
+    "scheduler_role_arn": "RCP_SCHEDULER_ROLE_ARN",
 }
 
 
@@ -41,6 +47,9 @@ class StageConfig:
     orchestrator_function_name: str
     scheduler_group_name: str
     schedule_name_prefix: str
+    scheduler_execution_target_arn: str
+    scheduler_finalization_target_arn: str
+    scheduler_role_arn: str
 
     def to_dict(self) -> dict[str, str]:
         return asdict(self)
