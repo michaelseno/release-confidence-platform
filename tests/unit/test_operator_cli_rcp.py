@@ -5,15 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from packages.audit_lifecycle.cancellation import AuditCancellationService
-from packages.audit_scheduling.service import AuditSchedulingService
-from packages.config.audit_validation_service import AuditConfigValidationService
-from packages.config.stage_config import StageConfig, StageConfigLoader
-from packages.core.audit_creation_service import AuditCreationService
-from packages.core.exceptions import EngineError
-from packages.core.manual_run_service import ManualRunInvocationService
-from packages.operator_cli.main import build_parser
-from release_confidence_platform.operator_cli.main import build_parser as packaged_build_parser
+from release_confidence_platform.audit_lifecycle.cancellation import AuditCancellationService
+from release_confidence_platform.audit_scheduling.service import AuditSchedulingService
+from release_confidence_platform.config.audit_validation_service import AuditConfigValidationService
+from release_confidence_platform.config.stage_config import StageConfig, StageConfigLoader
+from release_confidence_platform.core.audit_creation_service import AuditCreationService
+from release_confidence_platform.core.exceptions import EngineError
+from release_confidence_platform.core.manual_run_service import ManualRunInvocationService
+from release_confidence_platform.operator_cli.main import build_parser
 
 
 class FakeS3:
@@ -48,7 +47,7 @@ class FakeRepo:
 
     def get_audit_metadata(self, client_id, audit_id):
         if self.item is None:
-            from packages.core.exceptions import StorageError
+            from release_confidence_platform.core.exceptions import StorageError
 
             raise StorageError("not found", "AUDIT_NOT_FOUND")
         return self.item
@@ -175,8 +174,8 @@ def test_parser_accepts_commands_and_requires_stage():
     assert exc.value.code == 2
 
 
-def test_packaged_entrypoint_delegates_to_operator_cli_parser():
-    parser = packaged_build_parser()
+def test_packaged_entrypoint_exposes_operator_cli_parser():
+    parser = build_parser()
 
     args = parser.parse_args(
         [

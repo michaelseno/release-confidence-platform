@@ -21,15 +21,18 @@ dev = [
   "ruff>=0.5,<1",
 ]
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["packages*", "release_confidence_platform*"]
-exclude = ["tests*", "docs*"]
+where = ["src"]
+include = ["release_confidence_platform*"]
+exclude = ["tests*", "docs*", "apps*"]
 namespaces = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = ["src", "."]
 
 [tool.ruff]
 target-version = "py311"
