@@ -4,6 +4,7 @@ frameworkVersion: '3'
 configValidationMode: error
 
 plugins:
+  - serverless-python-requirements
   - ./plugins/stage-guard
 
 provider:
@@ -30,11 +31,28 @@ provider:
             - arn:aws:logs:${self:provider.region}:*:log-group:/aws/lambda/${self:service}-${self:provider.stage}-*:*
         - Effect: Allow
           Action:
+            - s3:ListBucket
+          Resource:
+            - arn:aws:s3:::${self:custom.rawResultsBucketName}
+          Condition:
+            StringLike:
+              s3:prefix:
+                - raw-results/*
+                - configs/*
+                - data-pools/*
+        - Effect: Allow
+          Action:
             - s3:GetObject
             - s3:HeadObject
+          Resource:
+            - arn:aws:s3:::${self:custom.rawResultsBucketName}/raw-results/*
+            - arn:aws:s3:::${self:custom.rawResultsBucketName}/configs/*
+            - arn:aws:s3:::${self:custom.rawResultsBucketName}/data-pools/*
+        - Effect: Allow
+          Action:
             - s3:PutObject
           Resource:
-            - arn:aws:s3:::${self:custom.rawResultsBucketName}/*
+            - arn:aws:s3:::${self:custom.rawResultsBucketName}/raw-results/*
         - Effect: Allow
           Action:
             - dynamodb:GetItem
@@ -51,6 +69,10 @@ provider:
             - arn:aws:secretsmanager:${self:provider.region}:*:secret:${self:custom.secretNamePrefix}*
 
 custom:
+  pythonRequirements:
+    fileName: ../apps/backend/requirements.txt
+    slim: true
+    dockerizePip: non-linux
   allowedStages:
     - dev
     - staging

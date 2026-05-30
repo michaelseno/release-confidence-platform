@@ -37,6 +37,9 @@ SENSITIVE_QUERY_KEYS = (
 EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 PHONE_PATTERN = re.compile(r"(?<!\d)(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})(?!\d)")
 BEARER_PATTERN = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+SECRET_ASSIGNMENT_PATTERN = re.compile(
+    r"\b(token|secret|api[_-]?key|password)=([^\s;,]+)", re.IGNORECASE
+)
 
 
 def _is_sensitive_key(key: object) -> bool:
@@ -46,6 +49,9 @@ def _is_sensitive_key(key: object) -> bool:
 
 def _sanitize_string(value: str) -> str:
     value = BEARER_PATTERN.sub(REDACTION_TOKEN, value)
+    value = SECRET_ASSIGNMENT_PATTERN.sub(
+        lambda match: f"{match.group(1)}={REDACTION_TOKEN}", value
+    )
     value = EMAIL_PATTERN.sub(REDACTION_TOKEN, value)
     return PHONE_PATTERN.sub(REDACTION_TOKEN, value)
 

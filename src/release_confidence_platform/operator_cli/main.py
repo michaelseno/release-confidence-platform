@@ -28,9 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     audit_sub = audit.add_subparsers(dest="audit_command", required=True)
-    p = audit_sub.add_parser(
-        "list", help="List audits for a client without exposing raw evidence"
-    )
+    p = audit_sub.add_parser("list", help="List audits for a client without exposing raw evidence")
     p.add_argument("--client-id", required=True)
     _add_stage_output(p)
     _add_limit(p)
@@ -81,16 +79,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output-dir", required=True)
     p.add_argument("--overwrite", action="store_true")
     _add_stage_output(p)
+    p = config_sub.add_parser(
+        "stage-info", help="Show resolved local stage resource configuration without AWS calls"
+    )
+    _add_stage_output(p)
     p = config_sub.add_parser("init", help="Generate local starter audit configuration files")
     p.add_argument("--client-name", required=True)
-    p.add_argument(
-        "--target-environment", required=True, choices=("dev", "staging", "prod", "production")
-    )
-    p.add_argument("--output-dir", required=True)
-    p.add_argument("--timezone", default="UTC")
+    p.add_argument("--defaults", default="dev")
+    p.add_argument("--output-dir")
+    p.add_argument("--timezone")
     p.add_argument("--include-sample-endpoints", action="store_true")
     p.add_argument("--overwrite", action="store_true")
-    p.add_argument("--output", choices=("text", "json"), default="text")
+    p.add_argument("--output", choices=("text", "json"), default=None)
     return parser
 
 
@@ -134,6 +134,8 @@ def dispatch(args: argparse.Namespace) -> CommandResult:
             return services.config_list_command(args)
         if args.config_command == "download":
             return services.config_download_command(args)
+        if args.config_command == "stage-info":
+            return services.config_stage_info_command(args)
         if args.config_command == "init":
             return services.config_init_command(args)
         raise AssertionError(f"config {args.config_command}")
@@ -181,7 +183,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 1
-    print(render(result, output=args.output))
+    output = result.data.get("output_format") or getattr(args, "output", None) or "text"
+    print(render(result, output=output))
     return result.exit_code
 
 

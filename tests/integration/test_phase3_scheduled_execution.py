@@ -73,6 +73,30 @@ def test_accepted_occurrence_claims_before_orchestrator_and_omits_run_id():
     assert claim["run_id"] == "generated-run-id"
 
 
+def test_scheduled_burst_metadata_is_preserved_for_orchestrator():
+    repo = Repo()
+    orch = Orchestrator()
+    event = schedule_event(
+        schedule_name="rcp-dev-client123-audit456-burst-burst_stability",
+        schedule_type="burst",
+        scenario_type="burst_stability",
+        burst={
+            "request_count": 7,
+            "concurrency": 2,
+            "window_start": "2026-05-19T09:00:00Z",
+            "window_end": "2026-05-19T09:30:00Z",
+        },
+    )
+
+    result = ScheduledExecutionHandler(repository=repo, orchestrator=orch).handle(event)
+
+    assert result["status"] == "accepted"
+    assert orch.events[0]["schedule_type"] == "burst"
+    assert orch.events[0]["scheduled_at"] == "2026-05-19T00:15:00Z"
+    assert orch.events[0]["burst"] == event["burst"]
+    assert "run_id" not in orch.events[0]
+
+
 def test_repeated_execution_is_sequential_and_omits_run_id():
     repo = Repo()
     orch = Orchestrator()
@@ -85,4 +109,5 @@ def test_repeated_execution_is_sequential_and_omits_run_id():
     assert result["status"] == "accepted"
     assert len(orch.events) == 3
     assert [event["iteration"] for event in orch.events] == [1, 2, 3]
+    assert [event["repeated"]["iteration_count"] for event in orch.events] == [3, 3, 3]
     assert all("run_id" not in event for event in orch.events)

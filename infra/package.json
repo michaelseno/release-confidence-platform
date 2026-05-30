@@ -4,7 +4,8 @@
   "private": true,
   "description": "Phase 0 Serverless Framework packaging for Release Confidence Platform",
   "devDependencies": {
-    "serverless": "^3.38.0"
+    "serverless": "^3.38.0",
+    "serverless-python-requirements": "^6.1.2"
   },
   "scripts": {
     "package:dev": "serverless package --stage dev",

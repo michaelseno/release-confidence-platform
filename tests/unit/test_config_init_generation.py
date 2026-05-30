@@ -80,7 +80,11 @@ def test_generators_emit_safe_defaults_and_no_secret_material():
     assert client["request_defaults"]["max_concurrency"] == 5
     assert audit["audit_window"]["duration_hours"] == 48
     assert audit["baseline_schedule"]["interval_minutes"] == 15
-    assert audit["burst_schedule"] == {"enabled": False, "windows": []}
+    assert audit["burst_schedule"] == {
+        "enabled": False,
+        "windows": [],
+        "manual_burst_defaults": {"enabled": True, "request_count": 10, "concurrency": 2},
+    }
     assert audit["repeated_schedule"]["runs_per_day"] == 1
     assert endpoints["endpoints"][0]["url"] == "https://example.com/health"
     assert endpoints["endpoints"][0]["auth_required"] is False

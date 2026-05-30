@@ -27,6 +27,8 @@ class RepeatedExecutionCoordinator:
                         "audit_id": event["audit_id"],
                         "scenario_type": event["scenario_type"],
                         "triggered_by": event["triggered_by"],
+                        "schedule_type": event.get("schedule_type"),
+                        "repeated": {"iteration_count": iteration_count},
                         "iteration": index,
                     }
                 )

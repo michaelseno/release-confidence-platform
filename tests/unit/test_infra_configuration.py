@@ -1,5 +1,7 @@
+import zipfile
 from pathlib import Path
 
+import pytest
 
 LAMBDA_RESERVED_ENVIRONMENT_KEYS = {
     "AWS_REGION",
@@ -55,3 +57,66 @@ def test_serverless_lambda_environment_avoids_reserved_keys() -> None:
     ]
 
     assert reserved_definitions == []
+
+
+def test_serverless_grants_prefix_scoped_s3_listbucket_for_runtime_bucket() -> None:
+    serverless_yml = Path("infra/serverless.yml").read_text(encoding="utf-8")
+
+    assert "- s3:ListBucket" in serverless_yml
+    assert "arn:aws:s3:::${self:custom.rawResultsBucketName}" in serverless_yml
+    assert "StringLike:" in serverless_yml
+    assert "s3:prefix:" in serverless_yml
+    for prefix in ("raw-results/*", "configs/*", "data-pools/*"):
+        assert f"- {prefix}" in serverless_yml
+
+
+def test_serverless_scopes_runtime_s3_object_permissions_to_required_prefixes() -> None:
+    serverless_yml = Path("infra/serverless.yml").read_text(encoding="utf-8")
+
+    assert "arn:aws:s3:::${self:custom.rawResultsBucketName}/*" not in serverless_yml
+    for prefix in ("raw-results", "configs", "data-pools"):
+        assert f"arn:aws:s3:::${{self:custom.rawResultsBucketName}}/{prefix}/*" in serverless_yml
+    assert "- s3:GetObject" in serverless_yml
+    assert "- s3:HeadObject" in serverless_yml
+    assert "- s3:PutObject" in serverless_yml
+
+
+def test_backend_lambda_requirements_manifest_includes_requests() -> None:
+    requirements = Path("apps/backend/requirements.txt").read_text(encoding="utf-8")
+
+    assert "requests>=2.31,<3" in requirements
+
+
+def test_serverless_packages_backend_python_requirements() -> None:
+    serverless_yml = Path("infra/serverless.yml").read_text(encoding="utf-8")
+    package_json = Path("infra/package.json").read_text(encoding="utf-8")
+
+    assert "serverless-python-requirements" in serverless_yml
+    assert "pythonRequirements:" in serverless_yml
+    assert "fileName: ../apps/backend/requirements.txt" in serverless_yml
+    assert "slim: true" in serverless_yml
+    assert "dockerizePip: non-linux" in serverless_yml
+    assert '"serverless-python-requirements"' in package_json
+
+
+def test_serverless_artifact_contains_backend_handler_and_requests_dependencies_if_present() -> (
+    None
+):
+    artifact = Path("infra/.serverless/release-confidence-platform.zip")
+    if not artifact.exists():
+        pytest.skip("serverless package artifact is not present; run infra package validation")
+    inputs = [
+        Path("infra/serverless.yml"),
+        Path("infra/package.json"),
+        Path("apps/backend/requirements.txt"),
+    ]
+    if artifact.stat().st_mtime < max(path.stat().st_mtime for path in inputs):
+        pytest.skip("serverless package artifact predates packaging configuration inputs")
+
+    with zipfile.ZipFile(artifact) as zip_file:
+        names = set(zip_file.namelist())
+
+    assert "apps/backend/handlers/orchestrator_handler.py" in names
+    assert "requests/__init__.py" in names
+    for dependency in ("urllib3", "certifi", "charset_normalizer", "idna"):
+        assert f"{dependency}/__init__.py" in names

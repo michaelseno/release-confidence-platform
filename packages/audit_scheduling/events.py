@@ -43,15 +43,44 @@ def validate_scheduled_execution_event(event: dict[str, Any]) -> dict[str, Any]:
     schedule_type = event["schedule_type"]
     if schedule_type not in EXECUTION_SCHEDULE_TYPES:
         raise ValidationError("Invalid schedule type", "INVALID_SCHEDULE_EVENT")
+    burst = _validate_optional_burst(event.get("burst"))
     return {
         **event,
         "client_id": validate_identifier("client_id", event["client_id"]),
         "audit_id": validate_identifier("audit_id", event["audit_id"]),
         "schedule_name": validate_identifier("schedule_name", event["schedule_name"]),
+        "schedule_type": schedule_type,
         "schedule_occurrence_id": validate_occurrence_id(event["schedule_occurrence_id"]),
         "scenario_type": validate_scenario_type(event["scenario_type"]),
         "triggered_by": validate_identifier("triggered_by", event["triggered_by"]),
+        "scheduled_at": _validate_string("scheduled_at", event["scheduled_at"]),
+        "burst": burst,
     }
+
+
+def _validate_optional_burst(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValidationError("Invalid burst metadata", "INVALID_SCHEDULE_EVENT")
+    burst = dict(value)
+    for key in ("request_count", "concurrency"):
+        if (
+            not isinstance(burst.get(key), int)
+            or isinstance(burst.get(key), bool)
+            or burst[key] <= 0
+        ):
+            raise ValidationError(f"Invalid burst {key}", "INVALID_SCHEDULE_EVENT")
+    for key in ("window_start", "window_end", "window_id"):
+        if key in burst and burst[key] is not None and not isinstance(burst[key], str):
+            raise ValidationError(f"Invalid burst {key}", "INVALID_SCHEDULE_EVENT")
+    return burst
+
+
+def _validate_string(name: str, value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValidationError(f"Invalid {name}", "INVALID_SCHEDULE_EVENT")
+    return value
 
 
 def validate_finalization_event(event: dict[str, Any]) -> dict[str, Any]:

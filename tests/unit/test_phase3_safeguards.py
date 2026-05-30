@@ -28,6 +28,37 @@ def test_caps_and_production_block():
     )
 
 
+def test_caps_resolution_precedence_audit_environment_client_request_defaults():
+    assert (
+        effective_caps(
+            {"target_environment": "staging", "max_concurrency": 4},
+            audit_config={"operational_caps": {"max_concurrency": 3, "max_requests_per_run": 30}},
+            client_config={
+                "operational_caps": {"max_concurrency": 2, "max_requests_per_run": 20},
+                "request_defaults": {"max_concurrency": 1, "max_requests_per_run": 10},
+            },
+        )["max_concurrency"]
+        == 3
+    )
+    assert (
+        effective_caps(
+            {"target_environment": "staging", "max_concurrency": 4},
+            client_config={
+                "operational_caps": {"max_concurrency": 2},
+                "request_defaults": {"max_concurrency": 1},
+            },
+        )["max_concurrency"]
+        == 4
+    )
+    assert (
+        effective_caps(
+            {"target_environment": "staging"},
+            client_config={"request_defaults": {"max_concurrency": 1}},
+        )["max_concurrency"]
+        == 1
+    )
+
+
 def test_schedule_config_rejects_caps_and_repeated_estimate():
     window = {"start_time": "2026-05-19T00:00:00Z", "end_time": "2026-05-19T01:00:00Z"}
     with pytest.raises(ValidationError):

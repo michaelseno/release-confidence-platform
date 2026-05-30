@@ -78,6 +78,8 @@ def create_command(args: Namespace) -> CommandResult:
 
 def schedule_command(args: Namespace) -> CommandResult:
     stage_config = _stage(args)
+    if not args.dry_run:
+        stage_config.validate_scheduler_config()
     factory = AwsClientFactory(stage_config)
     data = AuditSchedulingService(
         repository=factory.audit_metadata_repository(),

@@ -51,6 +51,11 @@ class Scheduler:
         raise AssertionError("disable should not be needed")
 
 
+class S3ShouldNotRead:
+    def read_json(self, key):  # noqa: ARG002
+        raise AssertionError("non-DRAFT lifecycle validation should block before S3 reads")
+
+
 def valid_config():
     token_expiry = (datetime.now(UTC) + timedelta(hours=70)).isoformat().replace("+00:00", "Z")
     return {
@@ -107,6 +112,34 @@ def test_scheduling_validation_blocks_before_aws_calls():
         AuditSchedulingService(
             repository=repo, scheduler_client=scheduler, stage="dev"
         ).schedule_audit(config)
+    assert scheduler.created == []
+
+
+def test_schedule_from_persisted_non_draft_reports_lifecycle_context_before_side_effects():
+    repo = Repo()
+    scheduler = Scheduler()
+    repo.items[("CLIENT#client123", "AUDIT#audit456")] = {
+        "PK": "CLIENT#client123",
+        "SK": "AUDIT#audit456",
+        "client_id": "client123",
+        "audit_id": "audit456",
+        "lifecycle_state": "SCHEDULED",
+        "config_s3_keys": {"audit_config": "audit.json"},
+    }
+
+    with pytest.raises(ValidationError) as exc:
+        AuditSchedulingService(
+            repository=repo, scheduler_client=scheduler, stage="dev"
+        ).schedule_from_persisted_audit(
+            client_id="client123",
+            audit_id="audit456",
+            s3_storage=S3ShouldNotRead(),
+            dry_run=True,
+        )
+
+    assert exc.value.error_type == "INVALID_LIFECYCLE_STATE"
+    assert "current_state=SCHEDULED" in exc.value.message
+    assert "required_state=DRAFT" in exc.value.message
     assert scheduler.created == []
 
 

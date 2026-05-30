@@ -31,6 +31,8 @@ class ManualRunInvocationService:
             "audit_id": validate_identifier("audit_id", audit_id),
             "scenario_type": validate_scenario_type(scenario_type),
             "triggered_by": "manual",
+            "schedule_type": "manual",
+            "stage": self.stage_config.stage,
         }
         if run_id is not None:
             payload["run_id"] = validate_run_id(run_id)
@@ -48,7 +50,69 @@ class ManualRunInvocationService:
                     "function_name": self.stage_config.orchestrator_function_name,
                 }
             )
+        self.stage_config.validate_orchestrator_function_name()
         response = self.lambda_client.invoke(
-            function_name=self.stage_config.orchestrator_function_name, payload=payload
+            function_name=self.stage_config.orchestrator_function_name,
+            payload=payload,
+            invocation_type="RequestResponse",
         )
-        return sanitize({"status": "success", "payload": payload, "invocation": response})
+        handler_status = response.get("handler_status")
+        normalized_status = handler_status.lower() if isinstance(handler_status, str) else None
+        status = normalized_status if normalized_status in {"completed", "failed"} else "success"
+        result = {"status": status, "payload": payload, "invocation": response}
+        if status == "failed":
+            result.update(_handler_failure_details(response=response, payload=payload))
+        return sanitize(result)
+
+
+def _handler_failure_details(
+    *, response: dict[str, Any], payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Extract bounded, safe fields from a synchronous handler failure response."""
+    handler_response = response.get("handler_response")
+    if not isinstance(handler_response, dict):
+        handler_response = {}
+    failure_summary = handler_response.get("failure_summary")
+    if not isinstance(failure_summary, dict):
+        failure_summary = {}
+
+    error_type = failure_summary.get("error_type") or handler_response.get("error_type")
+    message = failure_summary.get("message") or handler_response.get("message")
+    run_id = handler_response.get("run_id") or payload.get("run_id")
+    scenario_type = handler_response.get("scenario_type") or payload.get("scenario_type")
+    handler_status = response.get("handler_status") or handler_response.get("status")
+    next_step = failure_summary.get("next_step") or handler_response.get("next_step")
+
+    details: dict[str, Any] = {
+        "handler_status": handler_status,
+        "run_id": run_id,
+        "scenario_type": scenario_type,
+        "error_code": error_type,
+        "failure_type": error_type,
+        "failure_message": message,
+        "failure_summary": {
+            key: value
+            for key, value in {
+                "error_type": error_type,
+                "message": message,
+                "next_step": next_step,
+            }.items()
+            if value is not None
+        },
+    }
+    if next_step is not None:
+        details["next_step"] = next_step
+    details["failure_details"] = {
+        key: details[key]
+        for key in (
+            "handler_status",
+            "run_id",
+            "scenario_type",
+            "error_code",
+            "failure_type",
+            "failure_message",
+            "next_step",
+        )
+        if details.get(key) is not None
+    }
+    return {key: value for key, value in details.items() if value not in (None, {})}

@@ -29,13 +29,14 @@ class DynamoDBMetadataClient:
         try:
             self._call(
                 "put_item",
+                preserve_client_error_codes={"ConditionalCheckFailedException"},
                 Item=sanitize(item),
                 ConditionExpression="attribute_not_exists(PK) AND attribute_not_exists(SK)",
             )
         except ClientError as exc:
             if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
                 raise DuplicateRunIdError() from exc
-            raise StorageError("DynamoDB put failed", "STORAGE_ERROR") from exc
+            raise _storage_error_from_dynamodb_client_error(exc, operation="put_item") from exc
 
     def update_terminal(self, key: dict[str, str], updates: dict[str, Any]) -> None:
         if updates.get("status") not in RUN_STATUSES:
@@ -52,9 +53,51 @@ class DynamoDBMetadataClient:
             ConditionExpression="attribute_exists(PK) AND attribute_exists(SK)",
         )
 
-    def _call(self, method_name: str, **kwargs: Any) -> dict[str, Any]:
+    def _call(
+        self,
+        method_name: str,
+        *,
+        preserve_client_error_codes: set[str] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         method = getattr(self.dynamodb_client, method_name)
         try:
             return method(TableName=self.table_name, **kwargs)
         except TypeError:
             return method(**kwargs)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in (preserve_client_error_codes or set()):
+                raise
+            raise _storage_error_from_dynamodb_client_error(exc, operation=method_name) from exc
+
+
+_MISSING_TABLE_CODES = {"ResourceNotFoundException"}
+_PERMISSION_CODES = {
+    "AccessDenied",
+    "AccessDeniedException",
+    "UnauthorizedOperation",
+    "UnrecognizedClientException",
+}
+
+
+def _storage_error_from_dynamodb_client_error(exc: ClientError, *, operation: str) -> StorageError:
+    aws_code = _safe_aws_error_code(exc)
+    context = (
+        f"aws_error_code={aws_code}; operation={operation}; "
+        "required_permissions=dynamodb:GetItem,dynamodb:PutItem,dynamodb:UpdateItem"
+    )
+    if aws_code in _MISSING_TABLE_CODES:
+        return StorageError(
+            f"DynamoDB run metadata table not found ({context})", "STORAGE_CONFIG_ERROR"
+        )
+    if aws_code in _PERMISSION_CODES:
+        return StorageError(
+            f"DynamoDB run metadata permission denied ({context})", "STORAGE_PERMISSION_ERROR"
+        )
+    return StorageError(f"DynamoDB run metadata operation failed ({context})", "STORAGE_ERROR")
+
+
+def _safe_aws_error_code(exc: ClientError) -> str:
+    code = str(exc.response.get("Error", {}).get("Code") or "Unknown")
+    sanitized = "".join(ch for ch in code if ch.isalnum() or ch in "_.:-")
+    return sanitized[:80] or "Unknown"
