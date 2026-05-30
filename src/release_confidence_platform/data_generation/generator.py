@@ -67,6 +67,7 @@ class PayloadPreparationService:
             )
             fp = payload_fingerprint(payload)
             duplicate = False
+            bypass_payload_duplicate_check = self._is_static_no_body_safe_method(endpoint, payload)
             if endpoint["payload_strategy"] == "data_pool" and pool_record_fingerprint is not None:
                 if endpoint["payload_safety"].get("allow_data_pool_reuse") is not True:
                     duplicate = duplicate_checker.check_and_reserve(
@@ -77,18 +78,25 @@ class PayloadPreparationService:
                         iteration=iteration,
                         payload_strategy=endpoint["payload_strategy"],
                     ).duplicate_detected
-            payload_duplicate = duplicate_checker.check_and_reserve(
-                scope=endpoint["duplicate_check_scope"],
-                fingerprint=fp,
-                duplicate_subject_type="payload",
-                endpoint_id=endpoint["endpoint_id"],
-                iteration=iteration,
-                payload_strategy=endpoint["payload_strategy"],
-            ).duplicate_detected
+            payload_duplicate = False
+            if not bypass_payload_duplicate_check:
+                payload_duplicate = duplicate_checker.check_and_reserve(
+                    scope=endpoint["duplicate_check_scope"],
+                    fingerprint=fp,
+                    duplicate_subject_type="payload",
+                    endpoint_id=endpoint["endpoint_id"],
+                    iteration=iteration,
+                    payload_strategy=endpoint["payload_strategy"],
+                ).duplicate_detected
             duplicate = duplicate or payload_duplicate
             duplicate_seen = duplicate_seen or duplicate
             metadata = self._metadata(
-                endpoint, fp, duplicate_seen, attempt, pool_record_fingerprint
+                endpoint,
+                fp,
+                duplicate_seen,
+                attempt,
+                pool_record_fingerprint,
+                bypass_payload_duplicate_check=bypass_payload_duplicate_check,
             )
             if not duplicate:
                 return PreparedPayloadResult(payload, fp, metadata)
@@ -155,10 +163,14 @@ class PayloadPreparationService:
         duplicate_detected: bool,
         attempt: int,
         pool_record_fingerprint: str | None,
+        *,
+        bypass_payload_duplicate_check: bool = False,
     ) -> dict[str, Any]:
         return {
             "payload_fingerprint": fp,
-            "duplicate_check_scope": endpoint["duplicate_check_scope"],
+            "duplicate_check_scope": "not_applicable"
+            if bypass_payload_duplicate_check
+            else endpoint["duplicate_check_scope"],
             "duplicate_detected": duplicate_detected,
             "duplicate_policy": endpoint["duplicate_policy"],
             "generation_attempt": attempt,
@@ -168,3 +180,11 @@ class PayloadPreparationService:
             "data_pool_record_fingerprint": pool_record_fingerprint,
             "duplicate_allowed": False,
         }
+
+    @staticmethod
+    def _is_static_no_body_safe_method(endpoint: dict[str, Any], payload: Any) -> bool:
+        return (
+            endpoint["payload_strategy"] == "static"
+            and payload is None
+            and str(endpoint.get("method", "")).upper() in {"GET", "HEAD"}
+        )

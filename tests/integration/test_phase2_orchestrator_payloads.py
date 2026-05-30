@@ -124,3 +124,55 @@ def test_orchestrator_executes_generated_and_data_pool_payloads_with_safe_metada
     assert raw["results"][1]["payload_metadata"]["data_pool_name"] == "users"
     assert "a@example.test" not in json.dumps(raw)
     assert raw["results"][0]["response_fingerprint"] == raw["results"][1]["response_fingerprint"]
+
+
+def test_orchestrator_executes_named_static_get_health_endpoints_without_duplicate_errors() -> None:
+    endpoint_ids = [
+        "health_fast",
+        "health_slow",
+        "health_flaky",
+        "health_inconsistent_variant_a",
+        "health_inconsistent_variant_b",
+    ]
+    objects = {
+        "configs/client/client_config.json": {"client_id": "client"},
+        "configs/client/audits/audit/audit_config.json": {"audit_id": "audit"},
+        "configs/client/audits/audit/endpoints.json": {
+            "endpoints": [
+                {
+                    "endpoint_id": endpoint_id,
+                    "method": "GET",
+                    "url": f"https://service.test/{endpoint_id}",
+                    "payload_strategy": "static",
+                    "assertions": {"expected_status_codes": [200]},
+                }
+                for endpoint_id in endpoint_ids
+            ]
+        },
+    }
+    session = Session()
+    response = CoreEngineOrchestrator(
+        s3_storage=S3StorageClient("bucket", S3(objects)),
+        metadata_storage=DynamoDBMetadataClient("table", DDB()),
+        secrets_client=SecretsManagerClient(Secrets()),
+        runner=ApiRunner(session),
+    ).run(
+        {
+            "client_id": "client",
+            "audit_id": "audit",
+            "scenario_type": "release_smoke",
+            "triggered_by": "operator",
+            "run_id": "safe_run_456",
+        }
+    )
+
+    assert response["status"] == "COMPLETED"
+    assert len(session.requests) == 5
+    raw = objects["raw-results/client/audit/safe_run_456/results.json"]
+    assert [result["endpoint_id"] for result in raw["results"]] == endpoint_ids
+    assert {result["failure_type"] for result in raw["results"]} == {"PASS"}
+    assert all(
+        result["payload_metadata"]["duplicate_detected"] is False
+        and result["payload_metadata"]["duplicate_check_scope"] == "not_applicable"
+        for result in raw["results"]
+    )

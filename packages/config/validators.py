@@ -43,6 +43,74 @@ def _validate_no_literal_secret(key: str, value: Any) -> None:
         raise ConfigError("Secret-bearing fields must use secret_ref", "CONFIG_VALIDATION_ERROR")
 
 
+def _normalize_expected_status_codes(value: Any) -> list[int]:
+    if isinstance(value, bool):
+        raise ConfigError("Expected status codes must be integers", "CONFIG_VALIDATION_ERROR")
+    if isinstance(value, int):
+        codes = [value]
+    elif isinstance(value, list):
+        if not value:
+            raise ConfigError("Expected status codes must not be empty", "CONFIG_VALIDATION_ERROR")
+        codes = value
+    else:
+        raise ConfigError(
+            "Expected status codes must be an integer or non-empty list",
+            "CONFIG_VALIDATION_ERROR",
+        )
+    for code in codes:
+        if isinstance(code, bool) or not isinstance(code, int):
+            raise ConfigError("Expected status codes must be integers", "CONFIG_VALIDATION_ERROR")
+        if code < 100 or code > 599:
+            raise ConfigError(
+                "Expected status codes must be valid HTTP status codes",
+                "CONFIG_VALIDATION_ERROR",
+            )
+    return list(codes)
+
+
+def _normalize_assertions(endpoint: dict[str, Any]) -> dict[str, Any]:
+    assertions = endpoint.get("assertions", {}) or {}
+    if not isinstance(assertions, dict):
+        raise ConfigError("Assertions must be an object", "CONFIG_VALIDATION_ERROR")
+    allowed_assertions = {"expected_status_codes", "expect_json", "required_response_fields"}
+    if any(key not in allowed_assertions for key in assertions):
+        raise ConfigError("Unsupported assertion", "CONFIG_VALIDATION_ERROR")
+
+    normalized = dict(assertions)
+    expected_candidates: list[tuple[str, list[int]]] = []
+    if "expected_status_codes" in normalized:
+        expected_candidates.append(
+            (
+                "assertions.expected_status_codes",
+                _normalize_expected_status_codes(normalized["expected_status_codes"]),
+            )
+        )
+    if "expected_status_codes" in endpoint:
+        expected_candidates.append(
+            (
+                "expected_status_codes",
+                _normalize_expected_status_codes(endpoint["expected_status_codes"]),
+            )
+        )
+    if "expected_status_code" in endpoint:
+        expected_candidates.append(
+            (
+                "expected_status_code",
+                _normalize_expected_status_codes(endpoint["expected_status_code"]),
+            )
+        )
+    if expected_candidates:
+        first_name, first_codes = expected_candidates[0]
+        for name, codes in expected_candidates[1:]:
+            if codes != first_codes:
+                raise ConfigError(
+                    f"Conflicting expected status assertions between {first_name} and {name}",
+                    "CONFIG_VALIDATION_ERROR",
+                )
+        normalized["expected_status_codes"] = first_codes
+    return normalized
+
+
 def extract_endpoints(config: Any) -> list[dict[str, Any]]:
     endpoints = config.get("endpoints") if isinstance(config, dict) else config
     if not isinstance(endpoints, list):
@@ -96,12 +164,9 @@ def validate_endpoint(endpoint: dict[str, Any]) -> dict[str, Any]:
         phase2_endpoint = validate_endpoint_payload_config({**endpoint, "payload": payload})
     except PayloadValidationError as exc:
         raise ConfigError(exc.message, "CONFIG_VALIDATION_ERROR") from exc
-    assertions = endpoint.get("assertions", {}) or {}
-    if not isinstance(assertions, dict):
-        raise ConfigError("Assertions must be an object", "CONFIG_VALIDATION_ERROR")
-    allowed_assertions = {"expected_status_codes", "expect_json", "required_response_fields"}
-    if any(key not in allowed_assertions for key in assertions):
-        raise ConfigError("Unsupported assertion", "CONFIG_VALIDATION_ERROR")
+    assertions = _normalize_assertions(endpoint)
+    phase2_endpoint.pop("expected_status_codes", None)
+    phase2_endpoint.pop("expected_status_code", None)
     return {
         **phase2_endpoint,
         "endpoint_id": endpoint_id,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from botocore.exceptions import ClientError
@@ -32,9 +33,11 @@ class S3StorageClient:
             self.s3_client.head_object(Bucket=self.bucket_name, Key=key)
             return True
         except ClientError as exc:
-            if exc.response.get("Error", {}).get("Code") in {"404", "NoSuchKey", "NotFound"}:
+            if exc.response.get("Error", {}).get("Code") in _OBJECT_NOT_FOUND_CODES:
                 return False
-            raise StorageError("S3 existence check failed", "STORAGE_ERROR") from exc
+            raise _storage_error_from_s3_client_error(
+                exc, key=key, operation="head_object"
+            ) from exc
         except FileNotFoundError:
             return False
 
@@ -48,6 +51,8 @@ class S3StorageClient:
                 Body=json.dumps(sanitize(payload), sort_keys=True).encode("utf-8"),
                 ContentType="application/json",
             )
+        except ClientError as exc:
+            raise _storage_error_from_s3_client_error(exc, key=key, operation="put_object") from exc
         except Exception as exc:
             raise StorageError("S3 config write failed", "STORAGE_ERROR") from exc
 
@@ -58,9 +63,73 @@ class S3StorageClient:
         if self.object_exists(key):
             raise DuplicateRunIdError()
         sanitized = sanitize(payload)
-        self.s3_client.put_object(
-            Bucket=self.bucket_name,
-            Key=key,
-            Body=json.dumps(sanitized, sort_keys=True).encode("utf-8"),
-            ContentType="application/json",
+        try:
+            self.s3_client.put_object(
+                Bucket=self.bucket_name,
+                Key=key,
+                Body=json.dumps(sanitized, sort_keys=True).encode("utf-8"),
+                ContentType="application/json",
+            )
+        except ClientError as exc:
+            raise _storage_error_from_s3_client_error(exc, key=key, operation="put_object") from exc
+        except Exception as exc:
+            raise StorageError("S3 raw result write failed", "STORAGE_ERROR") from exc
+
+
+_OBJECT_NOT_FOUND_CODES = {"404", "NoSuchKey", "NotFound"}
+_BUCKET_NOT_FOUND_CODES = {"NoSuchBucket"}
+_PERMISSION_CODES = {"AccessDenied", "Forbidden"}
+_REGION_CODES = {
+    "PermanentRedirect",
+    "AuthorizationHeaderMalformed",
+    "IllegalLocationConstraintException",
+}
+_SAFE_ERROR_CODE_PATTERN = re.compile(r"[^A-Za-z0-9_.:-]")
+
+
+def _storage_error_from_s3_client_error(
+    exc: ClientError, *, key: str, operation: str
+) -> StorageError:
+    aws_code = _safe_aws_error_code(exc)
+    key_prefix = _safe_key_prefix(key)
+    required_permission = _required_permission(operation)
+    context = (
+        f"aws_error_code={aws_code}; operation={operation}; key_prefix={key_prefix}; "
+        f"required_permission={required_permission}"
+    )
+    if aws_code in _BUCKET_NOT_FOUND_CODES:
+        return StorageError(
+            f"S3 runtime bucket not found or not configured ({context})",
+            "STORAGE_CONFIG_ERROR",
         )
+    if aws_code in _PERMISSION_CODES:
+        return StorageError(
+            f"S3 runtime bucket permission denied ({context})",
+            "STORAGE_PERMISSION_ERROR",
+        )
+    if aws_code in _REGION_CODES:
+        return StorageError(
+            f"S3 runtime bucket region mismatch or redirect ({context})",
+            "STORAGE_CONFIG_ERROR",
+        )
+    return StorageError(f"S3 runtime storage operation failed ({context})", "STORAGE_ERROR")
+
+
+def _required_permission(operation: str) -> str:
+    if operation == "head_object":
+        return "s3:GetObject+s3:ListBucket"
+    if operation == "put_object":
+        return "s3:PutObject"
+    return "s3:GetObject"
+
+
+def _safe_aws_error_code(exc: ClientError) -> str:
+    code = str(exc.response.get("Error", {}).get("Code") or "Unknown")
+    sanitized = _SAFE_ERROR_CODE_PATTERN.sub("", code)
+    return sanitized[:80] or "Unknown"
+
+
+def _safe_key_prefix(key: str) -> str:
+    prefix = key.split("/", 1)[0] if key else "<empty>"
+    sanitized = _SAFE_ERROR_CODE_PATTERN.sub("", prefix)
+    return sanitized[:80] or "<unknown>"

@@ -37,27 +37,72 @@ def isoformat_z(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
-def effective_caps(execution_environment: dict[str, Any] | None) -> dict[str, int]:
+def effective_caps(
+    execution_environment: dict[str, Any] | None,
+    *,
+    audit_config: dict[str, Any] | None = None,
+    client_config: dict[str, Any] | None = None,
+) -> dict[str, int]:
     env = execution_environment or {}
-    if env.get("target_environment") == "production":
+    if env.get("target_environment") in {"prod", "production"}:
         if env.get("allow_production_execution") is not True:
             raise ValidationError(
                 "Production execution requires explicit allow", "PRODUCTION_BLOCKED"
             )
-        return {
+        fallback = {
             "max_requests_per_run": PROD_MAX_REQUESTS_PER_RUN,
             "max_concurrency": PROD_MAX_CONCURRENCY,
             "max_burst_requests_per_window": PROD_MAX_BURST_REQUESTS_PER_WINDOW,
             "max_repeated_iterations": MAX_REPEATED_ITERATIONS,
             "max_audit_window_hours": MAX_AUDIT_WINDOW_HOURS,
         }
+    else:
+        fallback = {
+            "max_requests_per_run": MAX_REQUESTS_PER_RUN,
+            "max_concurrency": MAX_CONCURRENCY,
+            "max_burst_requests_per_window": MAX_BURST_REQUESTS_PER_WINDOW,
+            "max_repeated_iterations": MAX_REPEATED_ITERATIONS,
+            "max_audit_window_hours": MAX_AUDIT_WINDOW_HOURS,
+        }
+    audit_config = audit_config or {}
+    client_config = client_config or {}
     return {
-        "max_requests_per_run": MAX_REQUESTS_PER_RUN,
-        "max_concurrency": MAX_CONCURRENCY,
-        "max_burst_requests_per_window": MAX_BURST_REQUESTS_PER_WINDOW,
-        "max_repeated_iterations": MAX_REPEATED_ITERATIONS,
-        "max_audit_window_hours": MAX_AUDIT_WINDOW_HOURS,
+        "max_requests_per_run": _first_positive_int(
+            audit_config.get("operational_caps"),
+            env,
+            client_config.get("operational_caps"),
+            client_config.get("request_defaults"),
+            key="max_requests_per_run",
+            fallback=fallback["max_requests_per_run"],
+        ),
+        "max_concurrency": _first_positive_int(
+            audit_config.get("operational_caps"),
+            env,
+            client_config.get("operational_caps"),
+            client_config.get("request_defaults"),
+            key="max_concurrency",
+            fallback=fallback["max_concurrency"],
+        ),
+        "max_burst_requests_per_window": _first_positive_int(
+            audit_config.get("operational_caps"),
+            env,
+            client_config.get("operational_caps"),
+            client_config.get("request_defaults"),
+            key="max_burst_requests_per_window",
+            fallback=fallback["max_burst_requests_per_window"],
+        ),
+        "max_repeated_iterations": fallback["max_repeated_iterations"],
+        "max_audit_window_hours": fallback["max_audit_window_hours"],
     }
+
+
+def _first_positive_int(*sources: Any, key: str, fallback: int) -> int:
+    for source in sources:
+        if isinstance(source, dict):
+            value = source.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                return value
+    return fallback
 
 
 def validate_audit_window(

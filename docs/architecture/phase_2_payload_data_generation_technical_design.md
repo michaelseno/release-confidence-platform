@@ -263,6 +263,7 @@ phase2.uuid.v1|client_id|audit_id|run_id|endpoint_id|iteration|field_path|token_
 - Canonicalize strings/non-JSON bodies as sanitized UTF-8 strings with collision-safe internal typing where needed.
 - Canonicalize absent/no-body payloads using the exact sentinel string `EMPTY_PAYLOAD` for the externally recorded `payload_fingerprint`.
 - Compute lowercase SHA-256 hex digests for payload, response, and data-pool record fingerprints.
+- Treat `response_fingerprint` as raw evidence only. The fingerprint utility and runner must not perform cross-iteration comparison or produce response-consistency verdicts in Phase 2.
 - Keep the fingerprinting contract centralized so runner, raw result builder, and tests do not diverge.
 
 ### Runner Extension
@@ -468,6 +469,8 @@ Record payload handling evidence without unsafe values.
 | `response_fingerprint` | string/null | When response evidence exists | SHA-256 of canonical sanitized response representation; null/no field if no response. |
 | `payload_strategy` | string | All endpoint records | Top-level field. Resolved `static`, `generated`, or `data_pool`. Phase 1 already included strategy label; Phase 2 makes values strict. |
 | `payload_metadata` | object | When payload preparation is attempted | Nested object containing Phase 2-specific safe payload metadata. |
+
+`response_fingerprint` is a raw evidence field only. Raw Result Schema v1 does not include `response_consistency_status`, `consistency_verdict`, or any cross-iteration/cross-run fingerprint comparison output. Any fingerprint comparison analytics must be implemented later in a reporting/aggregation phase, not in the runner or raw result schema v1 extension.
 
 `payload_metadata` fields:
 

@@ -302,6 +302,8 @@ The runner must generate `response_fingerprint` for each response using SHA-256 
 
 Equivalent JSON response content with different key ordering must produce the same fingerprint.
 
+Phase 1/Phase 2 response fingerprinting is evidence collection only. The runner must not compare response fingerprints across iterations, endpoints, schedules, or runs, and must not emit response-consistency verdicts or statuses in this phase. Fingerprint comparison analytics are deferred to a later reporting/aggregation phase.
+
 ### FR-012: Payload Validation
 
 Payload validation must check:

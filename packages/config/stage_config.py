@@ -54,6 +54,9 @@ class StageConfig:
     def to_dict(self) -> dict[str, str]:
         return asdict(self)
 
+    def validate_scheduler_config(self) -> None:
+        validate_scheduler_config(self)
+
 
 class StageConfigLoader:
     def __init__(self, *, root: Path | None = None):
@@ -92,3 +95,40 @@ class StageConfigLoader:
                 "STAGE_CONFIG_ERROR",
             )
         return StageConfig(stage=stage, **resolved)
+
+
+def validate_scheduler_config(config: StageConfig) -> None:
+    """Reject placeholder Scheduler resources before schedule mutation attempts."""
+
+    invalid_fields = []
+    if _is_placeholder(config.scheduler_group_name):
+        invalid_fields.append("scheduler_group_name")
+    if _is_placeholder(config.scheduler_role_arn) or _has_placeholder_account(
+        config.scheduler_role_arn
+    ):
+        invalid_fields.append("scheduler_role_arn")
+    if _is_placeholder(config.scheduler_execution_target_arn) or _has_placeholder_account(
+        config.scheduler_execution_target_arn
+    ):
+        invalid_fields.append("scheduler_execution_target_arn")
+    if _is_placeholder(config.scheduler_finalization_target_arn) or _has_placeholder_account(
+        config.scheduler_finalization_target_arn
+    ):
+        invalid_fields.append("scheduler_finalization_target_arn")
+    if invalid_fields:
+        raise ConfigError(
+            "Stage scheduler configuration contains placeholder or missing deployed resources: "
+            f"{', '.join(invalid_fields)}. Export RCP_SCHEDULER_GROUP_NAME, "
+            "RCP_SCHEDULER_EXECUTION_TARGET_ARN, RCP_SCHEDULER_FINALIZATION_TARGET_ARN, "
+            "and RCP_SCHEDULER_ROLE_ARN from deployed scheduler outputs before running "
+            "rcp audit schedule.",
+            "SCHEDULER_CONFIG_ERROR",
+        )
+
+
+def _is_placeholder(value: str | None) -> bool:
+    return not value or "placeholder" in value.lower()
+
+
+def _has_placeholder_account(value: str | None) -> bool:
+    return bool(value and ":000000000000:" in value)

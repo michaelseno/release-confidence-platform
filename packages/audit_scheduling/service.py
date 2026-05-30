@@ -43,9 +43,13 @@ class AuditSchedulingService:
         dry_run: bool = False,
     ) -> dict[str, Any]:
         audit = self.repository.get_audit_metadata(client_id, audit_id)
-        if audit.get("lifecycle_state") != LIFECYCLE_STATE_DRAFT:
+        current_state = audit.get("lifecycle_state") or "UNKNOWN"
+        if current_state != LIFECYCLE_STATE_DRAFT:
             raise ValidationError(
-                "Audit lifecycle does not allow scheduling", "INVALID_LIFECYCLE_STATE"
+                "Audit lifecycle does not allow scheduling "
+                f"(client_id={client_id}, audit_id={audit_id}, "
+                f"current_state={current_state}, required_state={LIFECYCLE_STATE_DRAFT})",
+                "INVALID_LIFECYCLE_STATE",
             )
         keys = audit.get("config_s3_keys") or {}
         audit_config = s3_storage.read_json(

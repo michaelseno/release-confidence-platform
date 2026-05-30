@@ -77,7 +77,21 @@ def render_error(
         [
             f"code: {payload['code']}",
             f"message: {payload['message']}",
-            "next_step: correct the error and retry",
+            f"next_step: {_error_next_step(payload['code'], stage)}",
         ]
     )
     return "\n".join(lines)
+
+
+def _error_next_step(code: str, stage: str | None) -> str:
+    if code == "INVALID_LIFECYCLE_STATE":
+        stage_name = stage or "<stage>"
+        return (
+            "scheduling is only valid when audit lifecycle_state is DRAFT; inspect current "
+            f"metadata with rcp audit list --client-id <client_id> --stage {stage_name} "
+            "--output json, then use a fresh audit ID/config bundle as the safest recovery. "
+            "Use audit create --force only when existing metadata is DRAFT or FAILED and you "
+            "have confirmed there are no active orphaned schedules. Do not manually mutate "
+            "lifecycle metadata except during controlled dev/test remediation."
+        )
+    return "correct the error and retry"

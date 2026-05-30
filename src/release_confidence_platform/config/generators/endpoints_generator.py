@@ -10,8 +10,14 @@ from release_confidence_platform.config.generators.client_config_generator impor
 
 
 def generate_endpoints_config(
-    *, client_id: str, audit_id: str, target_environment: str, include_sample: bool = False
+    *,
+    client_id: str,
+    audit_id: str,
+    target_environment: str,
+    include_sample: bool = False,
+    request_defaults: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    request_defaults = request_defaults or {}
     endpoints: list[dict[str, Any]] = []
     if include_sample:
         endpoints.append(
@@ -30,8 +36,8 @@ def generate_endpoints_config(
                 },
                 "auth_required": False,
                 "headers": {},
-                "timeout_seconds": SAFE_TIMEOUT_SECONDS,
-                "retries": 0,
+                "timeout_seconds": request_defaults.get("timeout_seconds", SAFE_TIMEOUT_SECONDS),
+                "retries": request_defaults.get("retries", 0),
                 "assertions": {"expected_status_codes": [200]},
             }
         )

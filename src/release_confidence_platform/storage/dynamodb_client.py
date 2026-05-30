@@ -4,11 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError, ParamValidationError
 
 from release_confidence_platform.core.constants.engine import RUN_STATUSES
 from release_confidence_platform.core.exceptions import DuplicateRunIdError, StorageError
 from release_confidence_platform.sanitization.sanitizer import sanitize
+from release_confidence_platform.storage.dynamodb_codec import (
+    decode_dynamodb_response,
+    encode_dynamodb_call_kwargs,
+    storage_error_from_dynamodb_client_error,
+    storage_error_from_dynamodb_request_error,
+)
 
 
 class DynamoDBMetadataClient:
@@ -29,6 +35,7 @@ class DynamoDBMetadataClient:
         try:
             self._call(
                 "put_item",
+                preserve_client_error_codes={"ConditionalCheckFailedException"},
                 Item=sanitize(item),
                 ConditionExpression="attribute_not_exists(PK) AND attribute_not_exists(SK)",
             )
@@ -52,9 +59,23 @@ class DynamoDBMetadataClient:
             ConditionExpression="attribute_exists(PK) AND attribute_exists(SK)",
         )
 
-    def _call(self, method_name: str, **kwargs: Any) -> dict[str, Any]:
+    def _call(
+        self,
+        method_name: str,
+        *,
+        preserve_client_error_codes: set[str] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         method = getattr(self.dynamodb_client, method_name)
+        encoded_kwargs = encode_dynamodb_call_kwargs(kwargs)
         try:
-            return method(TableName=self.table_name, **kwargs)
+            return decode_dynamodb_response(method(TableName=self.table_name, **encoded_kwargs))
         except TypeError:
-            return method(**kwargs)
+            return decode_dynamodb_response(method(**kwargs))
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code")
+            if code in (preserve_client_error_codes or set()):
+                raise
+            raise storage_error_from_dynamodb_client_error(exc, operation=method_name) from exc
+        except (ParamValidationError, BotoCoreError) as exc:
+            raise storage_error_from_dynamodb_request_error(exc, operation=method_name) from exc

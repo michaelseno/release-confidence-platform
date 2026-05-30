@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -35,6 +35,20 @@ class ScheduleDefinition:
     expression: str
     target_payload: dict[str, Any]
     metadata: dict[str, Any]
+    schedule_expression_timezone: str | None = None
+
+
+def eventbridge_scheduler_at_datetime(
+    value: str | datetime, *, schedule_expression_timezone: str | None = None
+) -> str:
+    """Format an EventBridge Scheduler at() datetime without fractions or timezone suffix."""
+
+    parsed = parse_iso_datetime(value) if isinstance(value, str) else value
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    if schedule_expression_timezone:
+        parsed = parsed.astimezone(ZoneInfo(schedule_expression_timezone))
+    return parsed.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def _stable_hash(value: str) -> str:
@@ -157,11 +171,22 @@ class ScheduleBuilder:
         payload["burst"] = {
             "request_count": window["request_count"],
             "concurrency": window["concurrency"],
+            "window_id": window.get("window_id") or window.get("id"),
             "window_start": isoformat_z(start),
             "window_end": isoformat_z(end),
         }
+        expression_timezone = self._schedule_expression_timezone(audit_window)
+        expression_time = eventbridge_scheduler_at_datetime(
+            start, schedule_expression_timezone=expression_timezone
+        )
         return self._definition(
-            name, SCHEDULE_TYPE_BURST, scenario_type, f"at({isoformat_z(start)})", payload, suffix
+            name,
+            SCHEDULE_TYPE_BURST,
+            scenario_type,
+            f"at({expression_time})",
+            payload,
+            suffix,
+            schedule_expression_timezone=expression_timezone,
         )
 
     def build_repeated(
@@ -196,8 +221,18 @@ class ScheduleBuilder:
             "iteration_count": repeated["iteration_count"],
             "execution_mode": "sequential",
         }
+        expression_timezone = self._schedule_expression_timezone(audit_window)
+        expression_time = eventbridge_scheduler_at_datetime(
+            scheduled_at, schedule_expression_timezone=expression_timezone
+        )
         return self._definition(
-            name, SCHEDULE_TYPE_REPEATED, scenario_type, f"at({scheduled_at})", payload, suffix
+            name,
+            SCHEDULE_TYPE_REPEATED,
+            scenario_type,
+            f"at({expression_time})",
+            payload,
+            suffix,
+            schedule_expression_timezone=expression_timezone,
         )
 
     def build_finalization(
@@ -221,13 +256,18 @@ class ScheduleBuilder:
             "audit_window_end": audit_window["end_time"],
             "schedule_occurrence_id": f"finalization#{audit_window['end_time']}",
         }
+        expression_timezone = self._schedule_expression_timezone(audit_window)
+        expression_time = eventbridge_scheduler_at_datetime(
+            audit_window["end_time"], schedule_expression_timezone=expression_timezone
+        )
         return self._definition(
             name,
             SCHEDULE_TYPE_FINALIZATION,
             "finalization",
-            f"at({audit_window['end_time']})",
+            f"at({expression_time})",
             payload,
             suffix,
+            schedule_expression_timezone=expression_timezone,
         )
 
     def _execution_payload(
@@ -266,6 +306,8 @@ class ScheduleBuilder:
         expression: str,
         payload: dict[str, Any],
         hash_suffix: str | None,
+        *,
+        schedule_expression_timezone: str | None = None,
     ) -> ScheduleDefinition:
         if "run_id" in payload:
             raise ValidationError("Schedule payload must omit run_id", "INVALID_SCHEDULE_EVENT")
@@ -280,12 +322,24 @@ class ScheduleBuilder:
             else None,
             "status": "planned",
             "schedule_expression_summary": expression,
+            "schedule_expression_timezone": schedule_expression_timezone,
             "target_handler": "audit_finalization_handler"
             if schedule_type == SCHEDULE_TYPE_FINALIZATION
             else "scheduled_execution_handler",
             "name_hash_suffix": hash_suffix,
         }
-        return ScheduleDefinition(name, schedule_type, scenario_type, expression, payload, metadata)
+        return ScheduleDefinition(
+            name,
+            schedule_type,
+            scenario_type,
+            expression,
+            payload,
+            metadata,
+            schedule_expression_timezone,
+        )
+
+    def _schedule_expression_timezone(self, audit_window: dict[str, Any]) -> str:
+        return str(audit_window.get("timezone") or "UTC")
 
     def _burst_window_times(
         self, audit_window: dict[str, Any], window: dict[str, Any]

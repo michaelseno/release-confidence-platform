@@ -151,6 +151,7 @@ The following are explicitly excluded from Phase 3:
 - AI insights or AI-generated recommendations.
 - Reliability scoring as a product feature.
 - Analytics or report generation beyond emitting/recording the finalization event boundary.
+- Response fingerprint comparison analytics, response-consistency verdict calculation, or response-consistency status generation.
 - Automatic transition from `FINALIZING` to `ANALYZING`, from `ANALYZING` to `REPORTING`, or from `REPORTING` to `COMPLETED`.
 - Advanced observability, distributed tracing, operational dashboards, or metrics products.
 - Load testing, stress testing, uptime monitor clone behavior, synthetic monitoring product features, or chaos engineering.
@@ -364,6 +365,8 @@ The system must accept only the following Phase 3 scenario taxonomy values:
 - `response_consistency`
 
 Scenario taxonomy values must be treated as operational reliability dimensions, not generic test case names.
+
+`response_consistency` is an operational scenario taxonomy value for evidence collection only in Phase 3. It labels ordinary scheduled runner execution and raw response fingerprint persistence; it does not require Phase 3 to calculate response consistency analytics, verdicts, or statuses. Consistency analytics and verdict calculation are downstream reporting/aggregation work after finalization.
 
 ### FR-011: Reliability Category Grouping
 

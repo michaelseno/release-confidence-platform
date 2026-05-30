@@ -101,6 +101,9 @@ class ScheduledExecutionHandler:
                         "audit_id": validated["audit_id"],
                         "scenario_type": validated["scenario_type"],
                         "triggered_by": validated["triggered_by"],
+                        "schedule_type": validated["schedule_type"],
+                        "scheduled_at": validated["scheduled_at"],
+                        "burst": validated.get("burst"),
                     }
                 )
                 run_id = result.get("run_id")

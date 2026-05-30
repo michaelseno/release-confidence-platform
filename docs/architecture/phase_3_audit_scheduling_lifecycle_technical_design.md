@@ -886,6 +886,8 @@ Reliability category mapping:
 
 Unknown scenario values or missing mappings fail validation before scheduling or execution.
 
+The scenario taxonomy mapping does not imply built-in scenario-specific verdict computation in Phase 3. `response_consistency` uses ordinary runner execution and raw `response_fingerprint` persistence; Phase 3 must not compare fingerprints or emit response-consistency verdict/status fields. Fingerprint comparison analytics are deferred to downstream reporting/aggregation after finalization.
+
 ## 11. File Structure
 
 Suggested backend additions:

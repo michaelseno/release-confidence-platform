@@ -1,0 +1,54 @@
+{
+  "profile_name": "dev",
+  "profile_schema_version": "v1",
+  "target_environment": "dev",
+  "operator_defaults": {
+    "output_dir": ".local-configs",
+    "timezone": "UTC",
+    "output": "text"
+  },
+  "request_defaults": {
+    "timeout_seconds": 10,
+    "retries": 0
+  },
+  "rate_limits": {
+    "max_concurrency": 5,
+    "max_requests_per_run": 100
+  },
+  "payload_safety": {
+    "allow_generated_payloads": false,
+    "allow_data_pool_reuse": false,
+    "destructive_operation": false,
+    "allow_destructive_operation": false
+  },
+  "production_safeguards": {
+    "allow_production_execution": false,
+    "allow_destructive_operation": false
+  },
+  "schedule_defaults": {
+    "audit_window": {"duration_hours": 48},
+    "baseline_schedule": {
+      "enabled": true,
+      "interval_minutes": 15,
+      "scenario_type": "baseline_health",
+      "requests_per_run": 1
+    },
+    "burst_schedule": {
+      "enabled": false,
+      "windows": [],
+      "manual_burst_defaults": {"enabled": true, "request_count": 10, "concurrency": 2}
+    },
+    "repeated_schedule": {
+      "enabled": true,
+      "runs_per_day": 1,
+      "iteration_count": 1,
+      "scenario_type": "repeated_stability"
+    },
+    "finalization_schedule": {"enabled": true}
+  },
+  "retention_defaults": {
+    "evidence_retention_days": 30,
+    "config_retention_days": 90
+  },
+  "sample_endpoints": []
+}
