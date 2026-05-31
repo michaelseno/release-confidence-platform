@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 from typing import Any
 
@@ -28,6 +30,40 @@ from packages.storage.s3_client import S3StorageClient
 from packages.storage.secrets_client import SecretsManagerClient
 
 
+def configure_logging() -> None:
+    """Configure Lambda-visible structured logging for the scheduled entrypoint."""
+
+    level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    root_logger = logging.getLogger()
+    app_logger = logging.getLogger("release-confidence-platform")
+    if not root_logger.handlers:
+        logging.basicConfig(level=level)
+    root_logger.setLevel(level)
+    for handler in root_logger.handlers:
+        handler.setLevel(level)
+    app_logger.setLevel(level)
+    app_logger.propagate = True
+
+
+configure_logging()
+
+
+def _emit_handler_started(event: Any) -> None:
+    record = sanitize(
+        {
+            "timestamp": utc_now_iso(),
+            "level": "INFO",
+            "message": "scheduled_execution_handler_started",
+            "service": "release-confidence-platform",
+            "event_type": "scheduled_execution_handler_started",
+            "event_keys": list(event.keys()) if isinstance(event, dict) else [],
+            "input_type": type(event).__name__,
+        }
+    )
+    print(json.dumps(record, sort_keys=True))
+
+
 class ScheduledExecutionHandler:
     def __init__(
         self, *, repository: Any, orchestrator: Any, logger: StructuredLogger | None = None
@@ -39,11 +75,13 @@ class ScheduledExecutionHandler:
 
     def handle(self, event: dict[str, Any]) -> dict[str, Any]:
         validated = validate_scheduled_execution_event(event)
+        self._log("event_contract_validated", validated)
         audit = self.repository.get_audit_metadata(validated["client_id"], validated["audit_id"])
         claim_key = self.repository.occurrence_keys(
             validated["client_id"], validated["audit_id"], validated["schedule_occurrence_id"]
         )
         try:
+            self._log("occurrence_claim_attempted", validated)
             self.repository.claim_occurrence(
                 {
                     **claim_key,
@@ -61,9 +99,10 @@ class ScheduledExecutionHandler:
                     "last_duplicate_at": None,
                 }
             )
+            self._log("occurrence_claim_created", validated)
         except DuplicateOccurrenceClaimError:
             self.logger.log(
-                "audit_schedule_duplicate_delivery",
+                "duplicate_occurrence_skipped",
                 log_category=LOG_CATEGORY_CLIENT_SAFE,
                 client_id=validated["client_id"],
                 audit_id=validated["audit_id"],
@@ -90,11 +129,14 @@ class ScheduledExecutionHandler:
                     )
                 )
             if validated["schedule_type"] == SCHEDULE_TYPE_REPEATED:
+                self._log("orchestrator_execution_started", validated)
                 results = RepeatedExecutionCoordinator(self.orchestrator).run(
                     audit=audit, event=validated
                 )
                 run_id = results[-1].get("run_id") if results else None
+                self._log("orchestrator_execution_completed", validated, run_id=run_id)
             else:
+                self._log("orchestrator_execution_started", validated)
                 result = self.orchestrator.run(
                     {
                         "client_id": validated["client_id"],
@@ -107,6 +149,11 @@ class ScheduledExecutionHandler:
                     }
                 )
                 run_id = result.get("run_id")
+                self._log("orchestrator_execution_completed", validated, run_id=run_id)
+                if result.get("raw_result_s3_key"):
+                    self._log("raw_results_written", validated, run_id=run_id)
+                if result.get("status"):
+                    self._log("run_metadata_written", validated, run_id=run_id)
             self.repository.update_occurrence(
                 claim_key,
                 {"claim_status": "completed", "run_id": run_id, "completed_at": utc_now_iso()},
@@ -122,6 +169,12 @@ class ScheduledExecutionHandler:
                 {**self._base_response(validated), "status": "accepted", "run_id": run_id}
             )
         except EngineError as exc:
+            self._log(
+                "scheduled_execution_failed",
+                validated,
+                level="ERROR",
+                error_type=exc.error_type,
+            )
             self.repository.update_occurrence(
                 claim_key,
                 {
@@ -139,6 +192,10 @@ class ScheduledExecutionHandler:
                 }
             )
 
+        except Exception:
+            self._log("scheduled_execution_failed", validated, level="ERROR")
+            raise
+
     def _base_response(self, event: dict[str, Any]) -> dict[str, Any]:
         return {
             "client_id": event["client_id"],
@@ -146,8 +203,27 @@ class ScheduledExecutionHandler:
             "schedule_type": event["schedule_type"],
         }
 
+    def _log(
+        self, message: str, event: dict[str, Any], *, level: str = "INFO", **fields: Any
+    ) -> None:
+        self.logger.log(
+            message,
+            log_category=LOG_CATEGORY_CLIENT_SAFE,
+            level=level,
+            client_id=event.get("client_id"),
+            audit_id=event.get("audit_id"),
+            schedule_name=event.get("schedule_name"),
+            schedule_type=event.get("schedule_type"),
+            scenario_type=event.get("scenario_type"),
+            schedule_occurrence_id=event.get("schedule_occurrence_id"),
+            scheduled_at=event.get("scheduled_at"),
+            **fields,
+        )
+
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: ARG001
+    configure_logging()
+    _emit_handler_started(event)
     table = boto3.resource("dynamodb").Table(os.environ["METADATA_TABLE"])
     repository = AuditMetadataRepository(os.environ["METADATA_TABLE"], table)
     metadata = DynamoDBMetadataClient(os.environ["METADATA_TABLE"], table)

@@ -49,8 +49,7 @@ class DiscoveryListService:
         page = self.repository.list_audits_for_client(client_id, limit=effective_limit)
         items = []
         for item in page.get("items", []):
-            sk = item.get("SK", "")
-            if isinstance(sk, str) and "#OCCURRENCE#" in sk:
+            if not _is_canonical_audit_item(item, client_id):
                 continue
             items.append(_safe_audit(item))
             if len(items) >= effective_limit:
@@ -205,6 +204,17 @@ def _safe_audit(item: dict[str, Any]) -> dict[str, Any]:
         data["target_environment"] = data["execution_environment"].get("target_environment")
     data.pop("execution_environment", None)
     return {k: v for k, v in data.items() if v is not None}
+
+
+def _is_canonical_audit_item(item: dict[str, Any], client_id: str) -> bool:
+    pk = item.get("PK")
+    sk = item.get("SK")
+    if pk is not None and pk != f"CLIENT#{client_id}":
+        return False
+    if not isinstance(sk, str) or not sk.startswith("AUDIT#"):
+        return False
+    audit_id = sk.removeprefix("AUDIT#")
+    return bool(audit_id) and "#" not in audit_id
 
 
 def _pick(item: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:

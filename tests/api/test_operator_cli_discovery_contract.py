@@ -4,7 +4,7 @@ from release_confidence_platform.operator_cli.discovery_service import Discovery
 from release_confidence_platform.storage.audit_metadata_client import AuditMetadataRepository
 
 
-def test_audit_list_unmarshals_dynamodb_client_items_and_filters_occurrences():
+def test_audit_list_unmarshals_dynamodb_client_items_and_filters_child_records():
     class FakeDdb:
         def query(self, **kwargs):
             return {
@@ -19,8 +19,17 @@ def test_audit_list_unmarshals_dynamodb_client_items_and_filters_occurrences():
                     },
                     {
                         "PK": {"S": "CLIENT#client1"},
+                        "SK": {"S": "AUDIT#audit1#RUN#run1"},
+                        "status": {"S": "SUCCEEDED"},
+                    },
+                    {
+                        "PK": {"S": "CLIENT#client1"},
                         "SK": {"S": "AUDIT#audit1#OCCURRENCE#001"},
                         "lifecycle_state": {"S": "RUNNING"},
+                    },
+                    {
+                        "PK": {"S": "CLIENT#client1"},
+                        "SK": {"S": "AUDIT#audit1#UNKNOWN#child1"},
                     },
                 ]
             }

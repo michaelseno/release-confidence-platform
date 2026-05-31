@@ -1,4 +1,7 @@
-from apps.backend.handlers.scheduled_execution_handler import ScheduledExecutionHandler
+from apps.backend.handlers.scheduled_execution_handler import (
+    ScheduledExecutionHandler,
+    _emit_handler_started,
+)
 
 
 class Repo:
@@ -41,7 +44,20 @@ class Orchestrator:
 
     def run(self, event):
         self.events.append(event)
-        return {"run_id": "generated-run-id", "status": "COMPLETED"}
+        return {
+            "run_id": "generated-run-id",
+            "status": "COMPLETED",
+            "raw_result_s3_key": "raw-results/client123/audit456/generated-run-id/results.json",
+        }
+
+
+class CaptureLogger:
+    def __init__(self):
+        self.records = []
+
+    def log(self, message, **fields):
+        self.records.append({"message": message, **fields})
+        return self.records[-1]
 
 
 def schedule_event(**overrides):
@@ -71,6 +87,34 @@ def test_accepted_occurrence_claims_before_orchestrator_and_omits_run_id():
     claim = next(iter(repo.claims.values()))
     assert claim["SK"].startswith("AUDIT#audit456#OCCURRENCE#")
     assert claim["run_id"] == "generated-run-id"
+
+
+def test_scheduled_handler_emits_startup_claim_orchestration_logs():
+    repo = Repo()
+    orch = Orchestrator()
+    logger = CaptureLogger()
+    result = ScheduledExecutionHandler(
+        repository=repo, orchestrator=orch, logger=logger
+    ).handle(schedule_event())
+
+    assert result["status"] == "accepted"
+    messages = [record["message"] for record in logger.records]
+    assert "event_contract_validated" in messages
+    assert "occurrence_claim_attempted" in messages
+    assert "occurrence_claim_created" in messages
+    assert "orchestrator_execution_started" in messages
+    assert "orchestrator_execution_completed" in messages
+    assert "raw_results_written" in messages
+    assert "run_metadata_written" in messages
+    assert all("token" not in record for record in logger.records)
+
+
+def test_scheduled_entrypoint_startup_log_is_lambda_visible(capsys):
+    _emit_handler_started(schedule_event())
+
+    captured = capsys.readouterr()
+    assert "scheduled_execution_handler_started" in captured.out
+    assert "schedule_occurrence_id" in captured.out
 
 
 def test_scheduled_burst_metadata_is_preserved_for_orchestrator():

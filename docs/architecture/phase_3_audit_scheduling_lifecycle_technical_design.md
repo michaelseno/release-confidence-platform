@@ -4,6 +4,8 @@
 
 Phase 3 adds a backend-only audit scheduling and lifecycle layer on top of the merged Phase 1 execution engine and Phase 2 payload controls. It introduces deterministic audit lifecycle state management, EventBridge Scheduler-backed baseline/burst/repeated execution triggers, a one-time finalization trigger at audit-window completion, scenario taxonomy validation, operational caps, production restrictions, audit expiration handling, cancellation cleanup, temporary-token reference validation, and confirmed DynamoDB key shapes for audit metadata, occurrence claims, and run metadata.
 
+**Scheduled execution occurrence identity update:** ADR `docs/architecture/adr_scheduled_execution_occurrence_identity.md` supersedes the original recurring baseline `rate(...)` shape. Baseline scheduling must now create bounded discrete `at(...)` occurrence schedules inside the audit window. `schedule_occurrence_id` identifies an intended occurrence, not a recurring schedule definition.
+
 This design is scoped to branch `feature/phase_3_audit_scheduling_lifecycle` and is based on `docs/product/phase_3_audit_scheduling_lifecycle_product_spec.md`. Phase 3 must not replace Phase 1 orchestrator/runner behavior or Phase 2 payload behavior; scheduled events are another invocation source for the existing execution contract.
 
 ## 2. Product Requirements Summary
@@ -15,7 +17,7 @@ Phase 3 must provide:
 - Append-only lifecycle history plus schedule metadata persisted in DynamoDB under the audit-level item key `PK = CLIENT#{client_id}`, `SK = AUDIT#{audit_id}`.
 - EventBridge Scheduler integration for `baseline`, `burst`, `repeated`, and `finalization` schedule types.
 - Deterministic schedule naming using `rcp-{stage}-{client_id}-{audit_id}-{schedule_type}-{scenario_type}` and `rcp-{stage}-{client_id}-{audit_id}-finalization`, with deterministic hash suffix truncation when AWS limits require it.
-- Baseline cadence defaulting to every 15 minutes during an audit window.
+- Baseline cadence defaulting to every 15 minutes during an audit window, implemented as bounded discrete `at(...)` occurrence schedules rather than a recurring `rate(...)` schedule.
 - MVP audit window default and maximum of 48 hours.
 - Burst windows configured under `burst_schedule.windows[]` with audit-timezone interpretation when provided, otherwise UTC.
 - Repeated sequential executions with configurable iteration counts, subject to caps; Phase 3 validates estimated execution limits and fails scheduling when unsafe rather than creating chained/follow-up executions.
@@ -37,7 +39,7 @@ Phase 3 must provide:
 | FR-003, AC-002A, AC-006B, final key-shape confirmation | Store audit metadata items at `PK = CLIENT#{client_id}`, `SK = AUDIT#{audit_id}` with `lifecycle_state`, append-only `lifecycle_history`, and `schedules` metadata. Use conditional DynamoDB updates to avoid invalid partial updates. |
 | FR-004, AC-005, AC-005A, AC-014 | Add audit window validation, default 48-hour window, max 48-hour cap, and execution-time expiration guard. |
 | FR-005, AC-006, AC-007 | Add EventBridge Scheduler wrapper and schedule builder for minimal, secret-free target events. |
-| FR-006 | Build baseline schedule with default 15-minute interval and bounded execution by audit-window checks. |
+| FR-006 | Build baseline schedule occurrences with default 15-minute interval and bounded execution by audit-window checks; per ADR `adr_scheduled_execution_occurrence_identity`, each intended occurrence is a discrete `at(...)` schedule with its own deterministic occurrence ID. |
 | FR-007, AC-009, AC-010 | Validate burst windows, request count, and concurrency against non-production or production caps before schedule creation and execution. |
 | Confirmed burst config | Accept burst configuration as `burst_schedule.enabled` plus `burst_schedule.windows[]`; interpret `start_time` in audit timezone when supplied, otherwise UTC. |
 | FR-008, AC-011, AC-012, confirmed repeated limit policy | Build repeated schedule events that invoke a sequential repeated execution wrapper; reject iteration counts above cap and reject schedules whose estimated runtime/request limits are unsafe. Do not create chained/follow-up executions in Phase 3. |
@@ -49,7 +51,7 @@ Phase 3 must provide:
 | FR-016, AC-021 | Cancellation service deletes or disables all associated schedules, records cleanup status, and then transitions to `CANCELLED` when valid. |
 | FR-017, AC-018 | Store temporary token metadata by reference and expiration only; execution is blocked if expired. |
 | Confirmed schedule failure policy | Schedule creation is all-or-fail. Partial success triggers rollback attempts, controlled failure metadata, and lifecycle transition to `FAILED`. |
-| Confirmed duplicate delivery policy | Include `schedule_occurrence_id` in each scheduled event, claim the occurrence in DynamoDB using `PK = CLIENT#{client_id}`, `SK = AUDIT#{audit_id}#OCCURRENCE#{schedule_occurrence_id}` and a conditional write, and skip/log sanitized duplicate deliveries. |
+| Confirmed duplicate delivery policy | Include `schedule_occurrence_id` in each scheduled event, claim the occurrence in DynamoDB using `PK = CLIENT#{client_id}`, `SK = AUDIT#{audit_id}#OCCURRENCE#{schedule_occurrence_id}` and a conditional write, and skip/log sanitized duplicate deliveries. The ID represents the intended occurrence time and schedule context, not the schedule definition. |
 
 ## 4. Technical Scope
 
@@ -61,7 +63,7 @@ Phase 3 implementation includes:
 - Audit scheduling service that validates configuration and creates EventBridge Scheduler schedules.
 - EventBridge Scheduler wrapper boundary for `create_schedule`, `delete_schedule`, `disable_schedule`, and schedule metadata normalization.
 - Schedule builders for baseline, burst, repeated, and finalization schedule types.
-- Scheduler target handlers for recurring execution and finalization events.
+- Scheduler target handlers for scheduled execution and finalization events.
 - Execution guard that loads audit metadata before invoking the existing Phase 1 orchestrator.
 - DynamoDB-backed schedule occurrence claims for duplicate EventBridge delivery suppression.
 - Sequential repeated execution coordinator that invokes the existing orchestrator one iteration at a time.
@@ -102,7 +104,7 @@ Phase 3 must not implement:
 1. A backend caller submits or constructs a scheduled audit configuration. Phase 3 does not define a public API/UI for this; implementation may expose an internal function/handler for tests and operator tooling.
 2. `AuditSchedulingService` validates identifiers, lifecycle state, audit window, schedule configuration, scenario taxonomy, temporary token metadata, environment restrictions, and operational caps.
 3. If the audit is new, metadata is initialized in DynamoDB with `lifecycle_state = DRAFT`, an empty or seed lifecycle history, audit window metadata, safeguard config, token metadata, and no created schedules.
-4. Schedule builders construct deterministic schedule definitions and minimal target payloads for applicable baseline, burst, repeated, and finalization schedules. Schedule names use the confirmed `rcp-{stage}-...` convention and only apply safe truncation with deterministic hash suffix when AWS length limits require it.
+4. Schedule builders construct deterministic schedule definitions and minimal target payloads for applicable baseline, burst, repeated, and finalization schedules. Baseline builders enumerate each intended occurrence in the audit window and emit one `at(...)` schedule per occurrence. Schedule names use the confirmed `rcp-{stage}-...` convention and only apply safe truncation with deterministic hash suffix when AWS length limits require it; for discrete baseline occurrences, the occurrence time must participate in the name/hash input.
 5. EventBridge Scheduler wrapper creates schedules. Created schedule metadata is accumulated in memory and persisted only as sanitized metadata.
 6. If all required schedules are created, lifecycle transitions `DRAFT -> SCHEDULED`, appending a history entry and schedule metadata.
 7. If any required schedule fails to create, rollback attempts are made for already-created schedules. Cleanup outcomes are recorded, and the audit transitions to `FAILED`; no `SCHEDULED_WITH_ERRORS` state exists.
@@ -118,6 +120,16 @@ Phase 3 must not implement:
 7. For `baseline` and `burst`, handler creates a Phase 1 orchestrator event with `client_id`, `audit_id`, `scenario_type`, and `triggered_by = "eventbridge_scheduler"`. The scheduler event and the derived orchestrator event must omit `run_id`; Phase 1 generates a new `run_id` for each accepted scheduled occurrence.
 8. For `repeated`, the repeated coordinator invokes the orchestrator sequentially for each configured iteration. The next iteration starts only after the previous orchestrator invocation completes. Each accepted orchestrator invocation omits caller-supplied `run_id`.
 9. Run metadata remains under Phase 1 DynamoDB run keys. Audit-level metadata may increment safe execution counters and record schedule occurrence metadata without raw results or secrets.
+
+### Baseline Occurrence Scheduling Update
+
+- Do not create recurring baseline `rate(...)` schedules for the current fix.
+- Enumerate intended baseline occurrence times from `audit_window.start_time` using `interval_minutes` until the audit execution boundary. Occurrences must be inside the audit window and must not rely on Lambda wall-clock bucketing.
+- Each occurrence uses `expression = at(<scheduled_at formatted for EventBridge Scheduler>)` and a target payload whose `scheduled_at` is the canonical intended UTC occurrence time.
+- Each occurrence has a deterministic `schedule_occurrence_id` over `{client_id, audit_id, schedule_type, scenario_type, scheduled_at_iso}` or a deterministic hash of those canonical fields if the clear-text value is too long.
+- EventBridge duplicate delivery/retry of the same occurrence reuses the same target payload and must skip through the existing conditional occurrence claim.
+- Distinct baseline occurrence schedules must never share `schedule_occurrence_id`, even when schedule names are truncated.
+- Manual `rcp audit run` and Phase 1 run ID generation remain unchanged.
 
 ### Finalization Flow
 
@@ -232,6 +244,8 @@ The wrapper is the only module that directly imports/uses boto3 EventBridge Sche
 - Enforce schedule-type defaults and shape.
 - Return definitions without performing AWS calls.
 
+**Baseline occurrence guidance:** `build_baseline` may become `build_baseline_occurrences` or return multiple baseline `ScheduleDefinition` instances through `build_all`. The generated schedule name should include an occurrence token derived from `scheduled_at` where possible, or include occurrence fields in the stable hash input when truncation is needed. Existing tests that assert `rate(15 minutes)` must be updated to assert multiple bounded `at(...)` definitions for the audit window.
+
 ### ScheduledExecutionHandler
 
 **Suggested location:** `apps/backend/handlers/scheduled_execution_handler.py`
@@ -280,6 +294,7 @@ The wrapper is the only module that directly imports/uses boto3 EventBridge Sche
 
 - Validate current state is cancellable through state machine.
 - Delete or disable all associated schedules.
+- Treat each discrete baseline occurrence schedule as an associated schedule; cleanup must iterate persisted schedule metadata rather than assuming one baseline schedule per audit.
 - Retry cleanup using bounded internal retry policy.
 - Record cleanup outcome per schedule.
 - Transition to `CANCELLED` when lifecycle transition is valid, even if cleanup had recorded cleanup failures that require operator follow-up.
@@ -390,6 +405,8 @@ Created in `planned` memory state, persisted as `created` after successful AWS c
 
 Stores one conditional claim per scheduled occurrence so duplicate EventBridge deliveries do not create duplicate Phase 1 runs. Phase 3 scheduler execution events always omit `run_id`; `schedule_occurrence_id` is the idempotency key for the scheduler delivery, while Phase 1 generates a new `run_id` for the accepted execution result set.
 
+Per ADR `adr_scheduled_execution_occurrence_identity`, `schedule_occurrence_id` must be interpreted as an intended occurrence identity. It must not be reused across multiple baseline fires from a recurring schedule definition.
+
 ### Primary Key
 
 - `PK = CLIENT#{client_id}`
@@ -423,7 +440,7 @@ Occurrence claims are scoped by `client_id`, `audit_id`, and `schedule_occurrenc
 - Successful claim permits execution guard and orchestrator invocation to continue.
 - The occurrence claim is keyed by `PK = CLIENT#{client_id}`, `SK = AUDIT#{audit_id}#OCCURRENCE#{schedule_occurrence_id}` and is separate from both audit-level metadata (`SK = AUDIT#{audit_id}`) and run metadata (`SK = AUDIT#{audit_id}#RUN#{run_id}`).
 - The scheduled payload must not include `run_id`; after successful orchestration, the handler may update the claim with the Phase 1-generated `run_id` for traceability.
-- Conditional failure means the occurrence was already claimed; handler must skip orchestrator invocation, increment safe duplicate metadata where possible, and log `audit_schedule_duplicate_delivery` with sanitized identifiers only.
+- Conditional failure means the occurrence was already claimed; handler must skip orchestrator invocation, increment safe duplicate metadata where possible, and log `duplicate_occurrence_skipped` with sanitized identifiers only.
 - Claim records must not contain raw payloads, response bodies, tokens, credentials, PII, or unsanitized AWS errors.
 
 ## TemporaryTokenMetadata
@@ -626,7 +643,7 @@ For repeated events, include:
 
 - Payload contains metadata only: no secrets, no raw tokens, no raw client credentials, no raw payloads, no PII.
 - Validate identifiers using existing project identifier rules before DynamoDB/log usage.
-- `schedule_occurrence_id` is required for every scheduled execution event and must be stable for a specific schedule firing.
+- `schedule_occurrence_id` is required for every scheduled execution event and must be stable for a specific intended schedule occurrence. For baseline occurrence schedules, it must differ across distinct `scheduled_at` values and remain identical for duplicate delivery/retry of the same `at(...)` schedule.
 - `run_id` is forbidden in EventBridge Scheduler execution event payloads. If present, reject the event as invalid before occurrence claim or orchestrator invocation.
 - Validate `scenario_type` and category mapping.
 - Enforce audit-window, lifecycle terminal-state, environment, cap, and token expiration checks before orchestrator invocation.
@@ -640,7 +657,7 @@ For repeated events, include:
 
 ### Idempotency / Duplicate Handling
 
-Duplicate scheduler deliveries must not create multiple Phase 1 result sets. Because the final design requires scheduler execution events to omit `run_id`, Phase 3 must use occurrence claims keyed by `PK = CLIENT#{client_id}`, `SK = AUDIT#{audit_id}#OCCURRENCE#{schedule_occurrence_id}` with a conditional write before orchestrator invocation. If the claim already exists, skip execution and log `audit_schedule_duplicate_delivery` with sanitized `client_id`, `audit_id`, `schedule_name`, `schedule_type`, and `schedule_occurrence_id` only.
+Duplicate scheduler deliveries must not create multiple Phase 1 result sets. Because the final design requires scheduler execution events to omit `run_id`, Phase 3 must use occurrence claims keyed by `PK = CLIENT#{client_id}`, `SK = AUDIT#{audit_id}#OCCURRENCE#{schedule_occurrence_id}` with a conditional write before orchestrator invocation. If the claim already exists, skip execution and log `duplicate_occurrence_skipped` with sanitized `client_id`, `audit_id`, `schedule_name`, `schedule_type`, and `schedule_occurrence_id` only. This duplicate path must not call `CoreEngineOrchestrator.run(...)`.
 
 ## Contract: Finalization Event
 
@@ -800,6 +817,7 @@ Use deterministic, path/log-safe names:
 
 ```text
 rcp-{stage}-{client_id}-{audit_id}-{schedule_type}-{scenario_type}
+rcp-{stage}-{client_id}-{audit_id}-{schedule_type}-{scenario_type}-{occurrence_token}
 rcp-{stage}-{client_id}-{audit_id}-finalization
 ```
 
@@ -807,15 +825,15 @@ rcp-{stage}-{client_id}-{audit_id}-finalization
 - `client_id` and `audit_id` must be validated identifiers and may need normalization to EventBridge Scheduler allowed characters. Do not silently accept invalid identifiers.
 - `schedule_type` is one of `baseline`, `burst`, or `repeated` for execution schedules. Finalization uses the dedicated finalization name and does not append `scenario_type`.
 - `scenario_type` is the approved scenario taxonomy value for the schedule.
-- If multiple schedules would otherwise produce the same name for the same audit/stage/type/scenario, append a deterministic short hash derived from stable schedule config before applying length enforcement.
+- If multiple schedules would otherwise produce the same name for the same audit/stage/type/scenario, append a deterministic short hash derived from stable schedule config before applying length enforcement. For discrete baseline occurrence schedules, include `scheduled_at` or an occurrence token in the full intended name/hash input.
 - Keep names within EventBridge Scheduler length limits. If the full confirmed pattern exceeds the AWS limit, safely truncate variable segments and append a deterministic hash suffix. The hash input must include the untruncated full intended name plus stable schedule config so collisions are deterministic and traceable.
 - Persist the final schedule name plus enough schedule metadata to map it back to `stage`, `client_id`, `audit_id`, `schedule_type`, `scenario_type`, and the stable schedule config.
 
 #### Baseline
 
-- Create one recurring schedule with `rate(15 minutes)` unless a validated interval override is supplied.
-- Since EventBridge Scheduler rate expressions cannot inherently enforce the audit end for all runtime paths, execution guard must always enforce window bounds.
-- Target payload includes schedule metadata and `schedule_occurrence_id` only; it must omit `run_id`.
+- Create one discrete `at(...)` schedule per intended baseline occurrence using the default `15` minute interval unless a validated interval override is supplied.
+- Enumerate only bounded occurrence times inside the audit window; execution guard must still enforce window bounds at runtime.
+- Target payload includes schedule metadata, canonical `scheduled_at`, and deterministic per-occurrence `schedule_occurrence_id` only; it must omit `run_id`.
 
 #### Burst
 
@@ -992,7 +1010,8 @@ Phase 3 does not add user authentication. Internal handlers/tooling must be prot
 ### Logging / Monitoring
 
 - Use existing structured logging categories.
-- Log safe event categories: `audit_schedule_created`, `audit_schedule_failed`, `audit_lifecycle_transition`, `audit_execution_skipped`, `audit_schedule_duplicate_delivery`, `audit_cancelled`, `audit_finalization_triggered`.
+- Log safe event categories: `audit_schedule_created`, `audit_schedule_failed`, `audit_lifecycle_transition`, `audit_execution_skipped`, `duplicate_occurrence_skipped`, `audit_cancelled`, `audit_finalization_triggered`.
+- Scheduled execution handler logs must be Lambda-visible at INFO level and include: `scheduled_execution_handler_started`, `event_contract_validated`, `occurrence_claim_attempted`, `occurrence_claim_created`, `duplicate_occurrence_skipped`, `orchestrator_execution_started`, `orchestrator_execution_completed`, `raw_results_written`, `run_metadata_written`, and `scheduled_execution_failed`.
 - Never log raw tokens, raw target payloads, raw client payloads, unsanitized responses, PII, cookies, or credentials.
 - Advanced observability/dashboards/distributed tracing are out of scope.
 
@@ -1063,6 +1082,7 @@ Phase 3 does not add user authentication. Internal handlers/tooling must be prot
 
 - Test schedule name generation for:
   - `rcp-{stage}-{client_id}-{audit_id}-{schedule_type}-{scenario_type}` execution schedules,
+  - deterministic discrete baseline occurrence names/IDs that differ for two distinct `scheduled_at` values,
   - `rcp-{stage}-{client_id}-{audit_id}-finalization`,
   - deterministic uniqueness for repeated/burst schedules with the same type/scenario,
   - AWS length-limit truncation with deterministic hash suffix.
@@ -1071,6 +1091,9 @@ Phase 3 does not add user authentication. Internal handlers/tooling must be prot
 - Test the derived Phase 1 orchestrator event omits `run_id` and that the accepted occurrence results in a Phase 1-generated run metadata item shaped as `PK = CLIENT#{client_id}`, `SK = AUDIT#{audit_id}#RUN#{run_id}`.
 - Test audit metadata reads/writes use `PK = CLIENT#{client_id}`, `SK = AUDIT#{audit_id}` and occurrence claims use `PK = CLIENT#{client_id}`, `SK = AUDIT#{audit_id}#OCCURRENCE#{schedule_occurrence_id}`.
 - Test duplicate EventBridge delivery by sending the same `schedule_occurrence_id` twice; assert only the first call invokes the orchestrator and the second records/logs sanitized duplicate delivery metadata.
+- Test scheduled handler invokes `CoreEngineOrchestrator.run(...)` for a successfully claimed scheduled occurrence and that raw result plus run metadata side effects are produced through the existing Phase 1 path.
+- Test scheduled handler emits the required startup, validation, claim, orchestration, raw-result, run-metadata, duplicate-skip, and failure log events with sanitized fields.
+- Test schedule cleanup/cancellation handles multiple discrete baseline occurrence schedules, not only one logical baseline schedule.
 - Test occurrence claim conditional-write race behavior with mocked DynamoDB conditional failure.
 - Test burst config validation for the confirmed `burst_schedule.windows[]` shape, timezone interpretation with `audit_window.timezone`, UTC fallback, caps, and audit-window bounds.
 - Test repeated execution schedule-time validation for cap exceedance and unsafe estimated runtime/request limits; assert no chained/follow-up schedule or continuation artifact is created.

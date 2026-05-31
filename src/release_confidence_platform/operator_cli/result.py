@@ -359,6 +359,16 @@ def _error_next_step(code: str, message: str, stage: str | None) -> str:
             "have confirmed there are no active orphaned schedules. Do not manually mutate "
             "lifecycle metadata except during controlled dev/test remediation."
         )
+    if code == "FORCE_RECREATE_BLOCKED":
+        stage_name = stage or "<stage>"
+        return (
+            "force recreate is allowed only when existing metadata lifecycle_state is DRAFT or "
+            "FAILED. Inspect current state with rcp audit list --client-id <client_id> --stage "
+            f"{stage_name} --output json. In Phase 3, use a fresh audit ID/config bundle as "
+            "the safest recovery path for FINALIZING, SCHEDULED, RUNNING, ANALYZING, "
+            "REPORTING, COMPLETED, or CANCELLED audits. Do not manually mutate DynamoDB "
+            "lifecycle metadata as normal recovery."
+        )
     if code == "AWS_PROFILE_ERROR":
         stage_name = stage or "<stage>"
         return (
