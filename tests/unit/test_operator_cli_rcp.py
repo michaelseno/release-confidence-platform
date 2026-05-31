@@ -668,6 +668,31 @@ def test_scheduler_client_includes_schedule_expression_timezone_from_metadata():
 
     assert aws_scheduler.calls[0]["ScheduleExpression"] == "at(2026-05-30T09:00:00)"
     assert aws_scheduler.calls[0]["ScheduleExpressionTimezone"] == "Asia/Hong_Kong"
+    assert aws_scheduler.calls[0]["ActionAfterCompletion"] == "DELETE"
+
+
+@pytest.mark.parametrize("expression", ["rate(15 minutes)", "cron(0 12 * * ? *)"])
+def test_scheduler_client_does_not_set_auto_delete_for_recurring_expressions(expression):
+    class FakeAwsScheduler:
+        def __init__(self):
+            self.calls = []
+
+        def create_schedule(self, **kwargs):
+            self.calls.append(kwargs)
+            return {}
+
+    class Definition:
+        name = "rcp-dev-client-audit-baseline"
+        schedule_type = "baseline"
+        target_payload = {"event_type": "audit_schedule_execution"}
+        metadata = {"schedule_type": "baseline"}
+
+    Definition.expression = expression
+
+    aws_scheduler = FakeAwsScheduler()
+    EventBridgeSchedulerClient(aws_scheduler).create_schedule(Definition())
+
+    assert "ActionAfterCompletion" not in aws_scheduler.calls[0]
 
 
 def test_scheduler_client_serializes_sanitized_target_input_json():
@@ -812,6 +837,7 @@ def test_scheduler_validation_error_includes_sanitized_provider_message_and_requ
         "group_name",
         "schedule_expression",
         "schedule_expression_timezone",
+        "action_after_completion",
         "start_date",
         "end_date",
         "target_arn",
@@ -824,6 +850,7 @@ def test_scheduler_validation_error_includes_sanitized_provider_message_and_requ
         "group_name": "rcp-dev-schedules",
         "schedule_expression": "rate(fifteen minutes)",
         "schedule_expression_timezone": None,
+        "action_after_completion": None,
         "start_date": None,
         "end_date": None,
         "target_arn": "arn:aws:lambda:us-east-1:123:function:execution",
@@ -899,6 +926,7 @@ def test_scheduler_request_shape_exposes_input_keys_only_and_handles_malformed_i
         "group_name",
         "schedule_expression",
         "schedule_expression_timezone",
+        "action_after_completion",
         "start_date",
         "end_date",
         "target_arn",
