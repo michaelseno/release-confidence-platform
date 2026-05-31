@@ -1,3 +1,5 @@
+import pytest
+
 from apps.backend.handlers.audit_finalization_handler import AuditFinalizationHandler
 from packages.audit_lifecycle.cancellation import AuditCancellationService
 
@@ -78,6 +80,28 @@ def test_finalization_with_zero_executions_fails_after_finalizing():
     ]
 
 
+@pytest.mark.parametrize("state", ["FINALIZING", "COMPLETED", "FAILED", "CANCELLED"])
+def test_duplicate_finalization_delivery_skips_existing_finalizing_or_terminal_state(state):
+    repo = Repo(state=state, executions=1)
+    existing_finalization = {
+        "execution_count": 1,
+        "schedule_occurrence_id": "finalization#2026-05-21T00:00:00Z",
+    }
+    repo.audit["finalization"] = existing_finalization.copy()
+
+    result = AuditFinalizationHandler(repository=repo).handle(finalization_event())
+
+    assert result == {
+        "client_id": "client123",
+        "audit_id": "audit456",
+        "status": "skipped",
+        "lifecycle_state": state,
+    }
+    assert repo.audit["lifecycle_state"] == state
+    assert repo.audit["lifecycle_history"] == []
+    assert repo.audit["finalization"] == existing_finalization
+
+
 def test_cancellation_cleanup_errors_recorded_but_cancelled():
     repo = Repo(state="SCHEDULED")
     result = AuditCancellationService(
@@ -85,3 +109,20 @@ def test_cancellation_cleanup_errors_recorded_but_cancelled():
     ).cancel(client_id="client123", audit_id="audit456")
     assert result["lifecycle_state"] == "CANCELLED"
     assert repo.audit["cleanup_errors"][0]["error_code"] == "SCHEDULE_CLEANUP_FAILED"
+
+
+def test_cancellation_cleanup_iterates_multiple_discrete_baseline_schedules():
+    repo = Repo(state="SCHEDULED")
+    repo.audit["schedules"] = [
+        {"schedule_name": "baseline-001", "schedule_type": "baseline"},
+        {"schedule_name": "baseline-002", "schedule_type": "baseline"},
+        {"schedule_name": "finalization", "schedule_type": "finalization"},
+    ]
+    scheduler = Scheduler()
+
+    result = AuditCancellationService(repository=repo, scheduler_client=scheduler).cancel(
+        client_id="client123", audit_id="audit456"
+    )
+
+    assert result["lifecycle_state"] == "CANCELLED"
+    assert scheduler.deleted == ["baseline-001", "baseline-002", "finalization"]

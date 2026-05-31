@@ -3,7 +3,12 @@ import pytest
 from apps.backend.handlers.scheduled_execution_handler import ScheduledExecutionHandler
 from packages.core.exceptions import ValidationError
 from packages.storage.audit_metadata_client import DuplicateOccurrenceClaimError
-from tests.integration.test_phase3_scheduled_execution import Orchestrator, Repo, schedule_event
+from tests.integration.test_phase3_scheduled_execution import (
+    CaptureLogger,
+    Orchestrator,
+    Repo,
+    schedule_event,
+)
 
 
 class DuplicateRepo(Repo):
@@ -13,11 +18,14 @@ class DuplicateRepo(Repo):
 
 def test_duplicate_delivery_skips_execution():
     orch = Orchestrator()
-    result = ScheduledExecutionHandler(repository=DuplicateRepo(), orchestrator=orch).handle(
-        schedule_event()
+    logger = CaptureLogger()
+    handler = ScheduledExecutionHandler(
+        repository=DuplicateRepo(), orchestrator=orch, logger=logger
     )
+    result = handler.handle(schedule_event())
     assert result["status"] == "duplicate_skipped"
     assert orch.events == []
+    assert "duplicate_occurrence_skipped" in [record["message"] for record in logger.records]
 
 
 def test_malformed_event_with_run_id_rejected_before_claim():

@@ -48,27 +48,44 @@ class AuditMetadataRepository:
     def list_audits_for_client(
         self, client_id: str, *, limit: int, exclusive_start_key: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        """List audit metadata records for a client using a bounded DynamoDB query."""
+        """List canonical audit metadata records for a client.
 
-        kwargs: dict[str, Any] = {
-            "KeyConditionExpression": "PK = :pk AND begins_with(SK, :sk_prefix)",
-            "ExpressionAttributeValues": {
-                ":pk": {"S": f"CLIENT#{client_id}"},
-                ":sk_prefix": {"S": "AUDIT#"},
-            },
-            "Limit": limit,
-        }
-        if exclusive_start_key:
-            kwargs["ExclusiveStartKey"] = exclusive_start_key
-        try:
-            response = self._call("query", **kwargs)
-        except Exception as exc:
-            if isinstance(exc, StorageError):
-                raise
-            raise StorageError("DynamoDB audit query failed", "STORAGE_ERROR") from exc
+        Audit child records share the same ``AUDIT#`` sort-key prefix, so query pages are
+        positively filtered to the canonical ``AUDIT#<audit_id>`` shape. Pagination continues
+        until the requested number of canonical rows is collected or DynamoDB is exhausted.
+        """
+
+        items: list[dict[str, Any]] = []
+        last_evaluated_key = exclusive_start_key
+        while len(items) < limit:
+            kwargs: dict[str, Any] = {
+                "KeyConditionExpression": "PK = :pk AND begins_with(SK, :sk_prefix)",
+                "ExpressionAttributeValues": {
+                    ":pk": {"S": f"CLIENT#{client_id}"},
+                    ":sk_prefix": {"S": "AUDIT#"},
+                },
+                "Limit": limit,
+            }
+            if last_evaluated_key:
+                kwargs["ExclusiveStartKey"] = last_evaluated_key
+            try:
+                response = self._call("query", **kwargs)
+            except Exception as exc:
+                if isinstance(exc, StorageError):
+                    raise
+                raise StorageError("DynamoDB audit query failed", "STORAGE_ERROR") from exc
+            for raw_item in response.get("Items", []):
+                item = _unmarshal_ddb_item(raw_item)
+                if _is_canonical_audit_metadata_item(item, client_id):
+                    items.append(item)
+                    if len(items) >= limit:
+                        break
+            last_evaluated_key = response.get("LastEvaluatedKey")
+            if not last_evaluated_key:
+                break
         return {
-            "items": [_unmarshal_ddb_item(item) for item in response.get("Items", [])],
-            "last_evaluated_key": response.get("LastEvaluatedKey"),
+            "items": items,
+            "last_evaluated_key": last_evaluated_key,
         }
 
     def list_clients_from_registry(
@@ -331,6 +348,17 @@ def _client_id_from_item(item: dict[str, Any]) -> str | None:
     if isinstance(pk, str) and pk.startswith("CLIENT#"):
         return pk.removeprefix("CLIENT#")
     return None
+
+
+def _is_canonical_audit_metadata_item(item: dict[str, Any], client_id: str) -> bool:
+    pk = _ddb_scalar(item.get("PK"))
+    sk = _ddb_scalar(item.get("SK"))
+    if pk != f"CLIENT#{client_id}" or not isinstance(sk, str):
+        return False
+    if not sk.startswith("AUDIT#"):
+        return False
+    audit_id = sk.removeprefix("AUDIT#")
+    return bool(audit_id) and "#" not in audit_id
 
 
 def _ddb_scalar(value: Any) -> Any:

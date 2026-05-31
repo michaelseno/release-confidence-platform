@@ -162,12 +162,14 @@ def test_client_list_uses_registry_when_available():
     assert data["fallback"] == "client_registry"
 
 
-def test_audit_list_queries_by_client_and_filters_occurrences():
+def test_audit_list_queries_by_client_and_filters_child_records():
     repo = FakeRepository()
     repo.audit_page = {
         "items": [
             {"SK": "AUDIT#audit1", "lifecycle_state": "DRAFT", "created_at": "now"},
+            {"SK": "AUDIT#audit1#RUN#run1", "status": "SUCCEEDED"},
             {"SK": "AUDIT#audit1#OCCURRENCE#1", "lifecycle_state": "RUNNING"},
+            {"SK": "AUDIT#audit1#UNKNOWN#child1", "payload": "ignored"},
         ]
     }
 
@@ -209,6 +211,48 @@ def test_audit_metadata_repository_query_and_scan_are_bounded():
     assert ddb.calls[0][1]["Limit"] == 7
     assert ddb.calls[1][0] == "scan"
     assert ddb.calls[1][1]["Limit"] == 3
+
+
+def test_audit_metadata_repository_filters_canonical_rows_across_query_pages():
+    class FakeDdb:
+        def __init__(self):
+            self.calls = []
+
+        def query(self, **kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                return {
+                    "Items": [
+                        {"PK": "CLIENT#client1", "SK": "AUDIT#audit1#RUN#run1"},
+                        {"PK": "CLIENT#client1", "SK": "AUDIT#audit1#OCCURRENCE#occ1"},
+                    ],
+                    "LastEvaluatedKey": {"PK": "CLIENT#client1", "SK": "AUDIT#audit1#OCCURRENCE#occ1"},
+                }
+            return {
+                "Items": [
+                    {
+                        "PK": "CLIENT#client1",
+                        "SK": "AUDIT#audit1",
+                        "lifecycle_state": "DRAFT",
+                    },
+                    {"PK": "CLIENT#client1", "SK": "AUDIT#audit1#UNKNOWN#child1"},
+                ]
+            }
+
+    ddb = FakeDdb()
+    repo = AuditMetadataRepository("table", ddb)
+
+    page = repo.list_audits_for_client("client1", limit=2)
+
+    assert page == {
+        "items": [{"PK": "CLIENT#client1", "SK": "AUDIT#audit1", "lifecycle_state": "DRAFT"}],
+        "last_evaluated_key": None,
+    }
+    assert len(ddb.calls) == 2
+    assert ddb.calls[1]["ExclusiveStartKey"] == {
+        "PK": {"S": "CLIENT#client1"},
+        "SK": {"S": "AUDIT#audit1#OCCURRENCE#occ1"},
+    }
 
 
 def _s3_storage(objects: dict[str, str]) -> tuple[S3StorageClient, FakeS3Client]:

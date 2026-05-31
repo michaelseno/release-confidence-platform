@@ -44,11 +44,40 @@ def test_schedule_name_truncation_is_deterministic_and_distinct():
 
 def test_builder_payloads_omit_run_id_and_baseline_defaults():
     config = {"client_id": "client123", "audit_id": "audit456"}
-    window = {"start_time": "2026-05-19T00:00:00Z", "end_time": "2026-05-21T00:00:00Z"}
-    definition = ScheduleBuilder(stage="dev").build_baseline(config, window)
-    assert definition.expression == "rate(15 minutes)"
-    assert "run_id" not in definition.target_payload
-    assert definition.target_payload["schedule_occurrence_id"].startswith("baseline#")
+    window = {"start_time": "2026-05-19T00:00:00Z", "end_time": "2026-05-19T00:30:00Z"}
+    definitions = ScheduleBuilder(stage="dev").build_baseline(config, window)
+    assert [definition.expression for definition in definitions] == [
+        "at(2026-05-19T00:00:00)",
+        "at(2026-05-19T00:15:00)",
+    ]
+    assert all("run_id" not in definition.target_payload for definition in definitions)
+    occurrence_ids = [
+        definition.target_payload["schedule_occurrence_id"] for definition in definitions
+    ]
+    assert occurrence_ids == [
+        "client123:audit456:baseline:baseline_health:2026-05-19T00:00:00Z",
+        "client123:audit456:baseline:baseline_health:2026-05-19T00:15:00Z",
+    ]
+    assert len({definition.name for definition in definitions}) == 2
+
+
+def test_baseline_occurrence_ids_are_distinct_and_deterministic():
+    config = {"client_id": "client123", "audit_id": "audit456"}
+    window = {"start_time": "2026-05-19T00:00:00Z", "end_time": "2026-05-19T00:30:00Z"}
+    first = ScheduleBuilder(stage="dev").build_baseline(config, window)
+    second = ScheduleBuilder(stage="dev").build_baseline(config, window)
+    first_ids = [definition.target_payload["schedule_occurrence_id"] for definition in first]
+    second_ids = [definition.target_payload["schedule_occurrence_id"] for definition in second]
+    assert first_ids == second_ids
+    assert len(set(first_ids)) == 2
+
+
+def test_baseline_cadence_guardrail_rejects_explosive_schedule_count():
+    config = {"client_id": "client123", "audit_id": "audit456", "baseline": {"interval_minutes": 1}}
+    window = {"start_time": "2026-05-19T00:00:00Z", "end_time": "2026-05-19T04:00:00Z"}
+    with pytest.raises(ValidationError) as exc:
+        ScheduleBuilder(stage="dev").build_baseline(config, window)
+    assert exc.value.error_type == "CAP_EXCEEDED"
 
 
 def test_burst_timezone_and_invalid_identifier():

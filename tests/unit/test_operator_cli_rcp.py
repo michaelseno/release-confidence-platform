@@ -1320,6 +1320,48 @@ def test_create_force_rejects_scheduled_before_mutation(tmp_path, stage_config):
     assert repo.force_updates == []
 
 
+@pytest.mark.parametrize("state", ["DRAFT", "FAILED"])
+def test_create_force_succeeds_only_for_draft_or_failed(tmp_path, stage_config, state):
+    c, a, e = write_configs(tmp_path)
+    repo = FakeRepo({"client_id": "client1", "audit_id": "audit1", "lifecycle_state": state})
+    s3 = FakeS3()
+
+    result = AuditCreationService(
+        stage_config=stage_config, s3_storage=s3, repository=repo
+    ).create_from_files(
+        client_config_path=str(c),
+        audit_config_path=str(a),
+        endpoints_config_path=str(e),
+        force=True,
+    )
+
+    assert result["status"] == "success"
+    assert result["force"] is True
+    assert len(repo.force_updates) == 1
+    assert all(write[2] is True for write in s3.writes)
+
+
+@pytest.mark.parametrize("state", ["FINALIZING", "SCHEDULED", "RUNNING", "COMPLETED"])
+def test_create_force_blocks_ineligible_lifecycle_states(tmp_path, stage_config, state):
+    c, a, e = write_configs(tmp_path)
+    repo = FakeRepo({"client_id": "client1", "audit_id": "audit1", "lifecycle_state": state})
+    s3 = FakeS3()
+
+    with pytest.raises(EngineError) as exc:
+        AuditCreationService(
+            stage_config=stage_config, s3_storage=s3, repository=repo
+        ).create_from_files(
+            client_config_path=str(c),
+            audit_config_path=str(a),
+            endpoints_config_path=str(e),
+            force=True,
+        )
+
+    assert exc.value.error_type == "FORCE_RECREATE_BLOCKED"
+    assert repo.force_updates == []
+    assert s3.writes == []
+
+
 def test_schedule_non_draft_lifecycle_error_includes_state_context(stage_config):
     _, audit, _ = configs()
     repo = FakeRepo(
@@ -1398,7 +1440,7 @@ def test_schedule_dry_run_skips_missing_disabled_blocks(stage_config):
         dry_run=True,
     )
     names = [s["schedule_type"] for s in result["planned_schedules"]]
-    assert names == ["baseline", "finalization"]
+    assert names == (["baseline"] * 96) + ["finalization"]
     assert scheduler.created == []
 
 
@@ -1428,7 +1470,7 @@ def test_schedule_from_draft_lifecycle_behavior_unchanged(stage_config):
     assert result["status"] == "success"
     assert result["lifecycle_state"] == "SCHEDULED"
     assert repo.item["lifecycle_state"] == "SCHEDULED"
-    assert len(scheduler.created) == 2
+    assert len(scheduler.created) == 97
 
 
 def test_schedule_dry_run_does_not_infer_missing_finalization(stage_config):
@@ -1454,7 +1496,7 @@ def test_schedule_dry_run_does_not_infer_missing_finalization(stage_config):
         dry_run=True,
     )
 
-    assert [s["schedule_type"] for s in result["planned_schedules"]] == ["baseline"]
+    assert [s["schedule_type"] for s in result["planned_schedules"]] == ["baseline"] * 96
 
 
 def test_schedule_prod_requires_allow_production(stage_config):

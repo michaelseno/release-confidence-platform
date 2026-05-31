@@ -107,4 +107,8 @@ def test_schedule_missing_finalization_block_does_not_infer_finalization_schedul
     )
 
     planned_types = [schedule["schedule_type"] for schedule in result["planned_schedules"]]
-    assert planned_types == ["baseline"]
+    assert planned_types == ["baseline"] * 4
+    assert all(
+        schedule["schedule_expression_summary"].startswith("at(")
+        for schedule in result["planned_schedules"]
+    )

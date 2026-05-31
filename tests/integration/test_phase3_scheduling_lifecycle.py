@@ -93,11 +93,19 @@ def test_successful_full_scheduling_path():
     ).schedule_audit(valid_config())
     item = repo.get_audit_metadata("client123", "audit456")
     assert result["lifecycle_state"] == "SCHEDULED"
-    assert len(scheduler.created) == 4
+    assert len(scheduler.created) == 195
     assert item["PK"] == "CLIENT#client123"
     assert item["SK"] == "AUDIT#audit456"
     assert item["lifecycle_history"][-1]["to_state"] == "SCHEDULED"
     assert all("run_id" not in schedule for schedule in item["schedules"])
+    baseline_schedules = [
+        schedule for schedule in item["schedules"] if schedule["schedule_type"] == "baseline"
+    ]
+    assert len(baseline_schedules) == 192
+    assert all(
+        schedule["schedule_expression_summary"].startswith("at(")
+        for schedule in baseline_schedules
+    )
 
 
 def test_scheduling_validation_blocks_before_aws_calls():

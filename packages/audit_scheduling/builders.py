@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from packages.audit_scheduling.constants import (
     BASELINE_DEFAULT_INTERVAL_MINUTES,
+    MAX_BASELINE_OCCURRENCES_PER_AUDIT,
     SCENARIO_BASELINE_HEALTH,
     SCENARIO_BURST_STABILITY,
     SCENARIO_REPEATED_STABILITY,
@@ -97,7 +98,7 @@ class ScheduleBuilder:
     ) -> list[ScheduleDefinition]:
         definitions: list[ScheduleDefinition] = []
         if config.get("baseline", {"enabled": True}).get("enabled", True):
-            definitions.append(self.build_baseline(config, audit_window))
+            definitions.extend(self.build_baseline(config, audit_window))
         for index, window in enumerate((config.get("burst_schedule") or {}).get("windows", [])):
             if (config.get("burst_schedule") or {}).get("enabled"):
                 definitions.append(self.build_burst(config, audit_window, window, index))
@@ -110,7 +111,7 @@ class ScheduleBuilder:
 
     def build_baseline(
         self, config: dict[str, Any], audit_window: dict[str, Any]
-    ) -> ScheduleDefinition:
+    ) -> list[ScheduleDefinition]:
         baseline = config.get("baseline") or {}
         scenario_type = validate_scenario_type(
             baseline.get("scenario_type", SCENARIO_BASELINE_HEALTH)
@@ -118,27 +119,54 @@ class ScheduleBuilder:
         interval = baseline.get("interval_minutes", BASELINE_DEFAULT_INTERVAL_MINUTES)
         if not isinstance(interval, int) or interval <= 0:
             raise ValidationError("Invalid baseline interval", "INVALID_SCHEDULE_CONFIG")
-        name, suffix = schedule_name(
-            stage=self.stage,
-            client_id=config["client_id"],
-            audit_id=config["audit_id"],
-            schedule_type=SCHEDULE_TYPE_BASELINE,
-            scenario_type=scenario_type,
-            stable_config=baseline,
-            name_prefix=self.name_prefix,
-        )
-        scheduled_at = audit_window["start_time"]
-        payload = self._execution_payload(
-            config, name, SCHEDULE_TYPE_BASELINE, scenario_type, scheduled_at
-        )
-        return self._definition(
-            name,
-            SCHEDULE_TYPE_BASELINE,
-            scenario_type,
-            f"rate({interval} minutes)",
-            payload,
-            suffix,
-        )
+        occurrence_times = self._baseline_occurrence_times(audit_window, interval)
+        if len(occurrence_times) > MAX_BASELINE_OCCURRENCES_PER_AUDIT:
+            # Guardrail: the approved audit window is bounded to 48 hours and the default
+            # 15-minute cadence yields 192 baseline schedules. Reject smaller cadences that
+            # would unexpectedly expand per-audit EventBridge Scheduler resource usage.
+            raise ValidationError("Baseline occurrence cap exceeded", "CAP_EXCEEDED")
+        expression_timezone = self._schedule_expression_timezone(audit_window)
+        definitions: list[ScheduleDefinition] = []
+        for scheduled_at_dt in occurrence_times:
+            scheduled_at = isoformat_z(scheduled_at_dt)
+            occurrence_token = scheduled_at_dt.strftime("%Y%m%dT%H%M%SZ")
+            name, suffix = schedule_name(
+                stage=self.stage,
+                client_id=config["client_id"],
+                audit_id=config["audit_id"],
+                schedule_type=SCHEDULE_TYPE_BASELINE,
+                scenario_type=scenario_type,
+                stable_config={**baseline, "scheduled_at": scheduled_at},
+                name_prefix=self.name_prefix,
+            )
+            if suffix is None:
+                name, suffix = schedule_name(
+                    stage=self.stage,
+                    client_id=config["client_id"],
+                    audit_id=config["audit_id"],
+                    schedule_type=SCHEDULE_TYPE_BASELINE,
+                    scenario_type=scenario_type,
+                    stable_config={**baseline, "scheduled_at": scheduled_at},
+                    name_prefix=f"{self.name_prefix or f'rcp-{self.stage}'}-{occurrence_token}",
+                )
+            payload = self._execution_payload(
+                config, name, SCHEDULE_TYPE_BASELINE, scenario_type, scheduled_at
+            )
+            expression_time = eventbridge_scheduler_at_datetime(
+                scheduled_at_dt, schedule_expression_timezone=expression_timezone
+            )
+            definitions.append(
+                self._definition(
+                    name,
+                    SCHEDULE_TYPE_BASELINE,
+                    scenario_type,
+                    f"at({expression_time})",
+                    payload,
+                    suffix,
+                    schedule_expression_timezone=expression_timezone,
+                )
+            )
+        return definitions
 
     def build_burst(
         self,
@@ -280,7 +308,12 @@ class ScheduleBuilder:
         *,
         occurrence_suffix: str | None = None,
     ) -> dict[str, Any]:
-        occurrence_id = f"{schedule_type}#{scheduled_at}"
+        occurrence_id = self._occurrence_id(
+            config=config,
+            schedule_type=schedule_type,
+            scenario_type=scenario_type,
+            scheduled_at=scheduled_at,
+        )
         if occurrence_suffix:
             occurrence_id = f"{occurrence_id}#{occurrence_suffix}"
         return {
@@ -297,6 +330,38 @@ class ScheduleBuilder:
             "burst": None,
             "repeated": None,
         }
+
+    def _occurrence_id(
+        self,
+        *,
+        config: dict[str, Any],
+        schedule_type: str,
+        scenario_type: str,
+        scheduled_at: str,
+    ) -> str:
+        canonical = ":".join(
+            [config["client_id"], config["audit_id"], schedule_type, scenario_type, scheduled_at]
+        )
+        if len(canonical) <= 256:
+            return canonical
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return f"occurrence:{_stable_hash(canonical)}:{digest}"
+
+    def _baseline_occurrence_times(
+        self, audit_window: dict[str, Any], interval_minutes: int
+    ) -> list[datetime]:
+        start = parse_iso_datetime(audit_window["start_time"])
+        end = parse_iso_datetime(audit_window["end_time"])
+        current = start
+        occurrences: list[datetime] = []
+        while current < end:
+            occurrences.append(current)
+            current = current + timedelta(minutes=interval_minutes)
+        if not occurrences:
+            raise ValidationError(
+                "No baseline occurrences in audit window", "INVALID_SCHEDULE_CONFIG"
+            )
+        return occurrences
 
     def _definition(
         self,
