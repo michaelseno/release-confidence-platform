@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from decimal import Decimal
 from typing import Any
 
 import boto3
@@ -48,7 +49,9 @@ class AuditFinalizationHandler:
         if current_state == LIFECYCLE_STATE_FINALIZING:
             return self._handle_finalizing_retry(validated, audit)
 
-        execution_count = (audit.get("execution_counters") or {}).get("total_completed", 0)
+        execution_count = _normalize_execution_count(
+            (audit.get("execution_counters") or {}).get("total_completed", 0)
+        )
         metadata = {
             "client_id": validated["client_id"],
             "audit_id": validated["audit_id"],
@@ -231,7 +234,33 @@ class AuditFinalizationHandler:
 def _finalization_execution_count(audit: dict[str, Any]) -> int | None:
     finalization = audit.get("finalization") or {}
     execution_count = finalization.get("execution_count")
-    return execution_count if isinstance(execution_count, int) else None
+    if not _is_integer_count(execution_count):
+        return None
+    return _normalize_execution_count(execution_count)
+
+
+def _is_integer_count(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    if isinstance(value, Decimal):
+        return value == value.to_integral_value()
+    return False
+
+
+def _normalize_execution_count(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, Decimal):
+        if value != value.to_integral_value():
+            raise ValueError("execution_count must be a whole number")
+        return int(value)
+    return value
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: ARG001

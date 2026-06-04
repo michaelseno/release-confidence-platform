@@ -9,10 +9,13 @@ Implement approved Phase 3 finalization cleanup fixes: one-time schedule auto-de
 - Update audit finalization handler to complete nonzero finalizations through `AuditLifecycleService.transition(...)` and preserve zero-execution failure behavior.
 - Preserve idempotent skips for terminal states and complete retried `FINALIZING` audits when prior finalization metadata shows a nonzero execution count.
 - Add safe structured auditFinalization logs.
+- HITL blocker follow-up: make audit finalization logging and finalization metadata paths safe when DynamoDB returns numeric counters as `Decimal` values.
 
 ## 3. Source Inputs
 - `docs/bugs/phase_3_finalization_cleanup_bug_report.md`
+- `docs/bugs/hitl_phase_3_running_after_window_bug_report.md`
 - `docs/architecture/phase_3_audit_scheduling_lifecycle_technical_design.md`
+- `docs/architecture/adr_phase_3_finalization_completion_cleanup.md`
 - User-approved architecture guardrails in the implementation request.
 - Existing handler, lifecycle, scheduler wrapper, and test patterns.
 
@@ -20,10 +23,12 @@ Implement approved Phase 3 finalization cleanup fixes: one-time schedule auto-de
 No public API contract changes. Internal Lambda handler response status changes from `finalizing` to `completed` for successful nonzero finalization.
 
 ## 5. Data Models / Storage Affected
-No schema changes. Existing audit metadata `lifecycle_state`, `lifecycle_history`, and `finalization` fields are updated using existing repository methods.
+No schema changes. Existing audit metadata `lifecycle_state`, `lifecycle_history`, and `finalization` fields are updated using existing repository methods. DynamoDB `Decimal` execution counters are normalized to integer counts before finalization logging and metadata writes.
 
 ## 6. Files Expected to Change
 - `apps/backend/handlers/audit_finalization_handler.py`
+- `packages/sanitization/sanitizer.py`
+- `src/release_confidence_platform/sanitization/sanitizer.py`
 - `packages/audit_lifecycle/constants.py`
 - `src/release_confidence_platform/audit_lifecycle/constants.py`
 - `packages/storage/eventbridge_scheduler_client.py`
@@ -43,4 +48,5 @@ No new dependencies. Do not implement Phase 4 aggregation, `ANALYZING`, `REPORTI
 
 ## 10. Validation Plan
 - Run targeted scheduler wrapper and finalization tests with `pytest`.
+- Run targeted structured logging/sanitizer regression tests with `pytest`.
 - Run broader related Phase 3 tests if feasible.
