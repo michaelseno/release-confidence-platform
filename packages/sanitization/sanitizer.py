@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from decimal import Decimal
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -81,4 +82,6 @@ def sanitize(value: Any) -> Any:
         return _sanitize_string(value)
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [sanitize(item) for item in value]
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
     return value

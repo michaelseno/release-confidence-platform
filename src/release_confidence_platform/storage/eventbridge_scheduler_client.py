@@ -42,6 +42,8 @@ class EventBridgeSchedulerClient:
             "ScheduleExpression": definition.expression,
             "FlexibleTimeWindow": {"Mode": "OFF"},
         }
+        if _is_one_time_at_expression(definition.expression):
+            payload["ActionAfterCompletion"] = "DELETE"
         if self.group_name:
             payload["GroupName"] = self.group_name
         schedule_expression_timezone = _schedule_expression_timezone(definition)
@@ -118,6 +120,10 @@ def _schedule_expression_timezone(definition: Any) -> str | None:
     if isinstance(metadata, Mapping) and metadata.get("schedule_expression_timezone"):
         return str(metadata["schedule_expression_timezone"])
     return None
+
+
+def _is_one_time_at_expression(expression: Any) -> bool:
+    return isinstance(expression, str) and expression.strip().lower().startswith("at(")
 
 
 def _raise_scheduler_error(
@@ -203,6 +209,7 @@ def _create_schedule_request_shape(payload: Mapping[str, Any]) -> dict[str, Any]
         "group_name": payload.get("GroupName"),
         "schedule_expression": payload.get("ScheduleExpression"),
         "schedule_expression_timezone": payload.get("ScheduleExpressionTimezone"),
+        "action_after_completion": payload.get("ActionAfterCompletion"),
         "start_date": payload.get("StartDate"),
         "end_date": payload.get("EndDate"),
         "target_arn": target.get("Arn"),

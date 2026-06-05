@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 import pytest
 
 from apps.backend.handlers.audit_finalization_handler import AuditFinalizationHandler
@@ -62,12 +64,31 @@ def finalization_event():
     }
 
 
-def test_finalization_with_executions_remains_finalizing():
+def test_finalization_with_executions_completes_after_finalizing():
     repo = Repo(executions=1)
     result = AuditFinalizationHandler(repository=repo).handle(finalization_event())
-    assert result["lifecycle_state"] == "FINALIZING"
+    assert result["lifecycle_state"] == "COMPLETED"
+    assert result["status"] == "completed"
     assert repo.audit["finalization"]["execution_count"] == 1
-    assert len(repo.audit["lifecycle_history"]) == 1
+    assert [entry["to_state"] for entry in repo.audit["lifecycle_history"]] == [
+        "FINALIZING",
+        "COMPLETED",
+    ]
+
+
+def test_finalization_with_decimal_execution_counter_completes_after_logging():
+    repo = Repo(executions=Decimal("13"))
+
+    result = AuditFinalizationHandler(repository=repo).handle(finalization_event())
+
+    assert result["lifecycle_state"] == "COMPLETED"
+    assert result["status"] == "completed"
+    assert repo.audit["finalization"]["execution_count"] == 13
+    assert [entry["to_state"] for entry in repo.audit["lifecycle_history"]] == [
+        "FINALIZING",
+        "COMPLETED",
+    ]
+    assert repo.audit["lifecycle_history"][0]["metadata"]["execution_count"] == 13
 
 
 def test_finalization_with_zero_executions_fails_after_finalizing():
@@ -80,8 +101,22 @@ def test_finalization_with_zero_executions_fails_after_finalizing():
     ]
 
 
-@pytest.mark.parametrize("state", ["FINALIZING", "COMPLETED", "FAILED", "CANCELLED"])
-def test_duplicate_finalization_delivery_skips_existing_finalizing_or_terminal_state(state):
+def test_finalization_with_decimal_zero_execution_counter_still_fails():
+    repo = Repo(executions=Decimal("0"))
+
+    result = AuditFinalizationHandler(repository=repo).handle(finalization_event())
+
+    assert result["lifecycle_state"] == "FAILED"
+    assert result["status"] == "failed"
+    assert repo.audit["finalization"]["execution_count"] == 0
+    assert [entry["to_state"] for entry in repo.audit["lifecycle_history"]] == [
+        "FINALIZING",
+        "FAILED",
+    ]
+
+
+@pytest.mark.parametrize("state", ["COMPLETED", "FAILED", "CANCELLED"])
+def test_duplicate_finalization_delivery_skips_terminal_state(state):
     repo = Repo(state=state, executions=1)
     existing_finalization = {
         "execution_count": 1,
@@ -100,6 +135,53 @@ def test_duplicate_finalization_delivery_skips_existing_finalizing_or_terminal_s
     assert repo.audit["lifecycle_state"] == state
     assert repo.audit["lifecycle_history"] == []
     assert repo.audit["finalization"] == existing_finalization
+
+
+def test_finalization_retry_from_finalizing_with_nonzero_metadata_completes():
+    repo = Repo(state="FINALIZING", executions=1)
+    repo.audit["finalization"] = {
+        "execution_count": 1,
+        "schedule_occurrence_id": "finalization#2026-05-21T00:00:00Z",
+    }
+
+    result = AuditFinalizationHandler(repository=repo).handle(finalization_event())
+
+    assert result == {
+        "client_id": "client123",
+        "audit_id": "audit456",
+        "status": "completed",
+        "lifecycle_state": "COMPLETED",
+    }
+    assert repo.audit["lifecycle_state"] == "COMPLETED"
+    assert [entry["to_state"] for entry in repo.audit["lifecycle_history"]] == ["COMPLETED"]
+
+
+def test_finalization_retry_from_finalizing_with_decimal_metadata_completes():
+    repo = Repo(state="FINALIZING", executions=Decimal("13"))
+    repo.audit["finalization"] = {
+        "execution_count": Decimal("13"),
+        "schedule_occurrence_id": "finalization#2026-05-21T00:00:00Z",
+    }
+
+    result = AuditFinalizationHandler(repository=repo).handle(finalization_event())
+
+    assert result["lifecycle_state"] == "COMPLETED"
+    assert repo.audit["lifecycle_state"] == "COMPLETED"
+    assert repo.audit["lifecycle_history"][0]["metadata"]["execution_count"] == 13
+
+
+def test_finalization_retry_from_finalizing_with_zero_metadata_fails():
+    repo = Repo(state="FINALIZING", executions=0)
+    repo.audit["finalization"] = {
+        "execution_count": 0,
+        "schedule_occurrence_id": "finalization#2026-05-21T00:00:00Z",
+    }
+
+    result = AuditFinalizationHandler(repository=repo).handle(finalization_event())
+
+    assert result["lifecycle_state"] == "FAILED"
+    assert repo.audit["lifecycle_state"] == "FAILED"
+    assert [entry["to_state"] for entry in repo.audit["lifecycle_history"]] == ["FAILED"]
 
 
 def test_cancellation_cleanup_errors_recorded_but_cancelled():
