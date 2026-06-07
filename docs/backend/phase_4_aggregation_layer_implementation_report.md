@@ -50,4 +50,4 @@ Handler/orchestrator logs sanitized aggregation outcomes with safe IDs, job ID, 
 - Serverless currently uses shared provider IAM. A future IaC pass should isolate the aggregation Lambda role to read-only raw S3 and Phase 4 metadata prefixes.
 
 ## 12. Commit Status
-Pending commit at report creation time.
+Implementation commit created: `8822752` (`feat(backend): implement phase 4 aggregation layer`).
