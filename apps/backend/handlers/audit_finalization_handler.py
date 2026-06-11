@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import uuid
 from decimal import Decimal
@@ -17,12 +19,13 @@ from packages.audit_lifecycle.constants import (
 )
 from packages.audit_lifecycle.service import AuditLifecycleService, LifecycleTransition
 from packages.audit_scheduling.events import validate_finalization_event
-from packages.core.constants.engine import LOG_CATEGORY_CLIENT_SAFE
+from packages.core.constants.engine import LOG_CATEGORY_CLIENT_SAFE, RUN_STATUS_STARTED
 from packages.core.logging import StructuredLogger
 from packages.core.time import utc_now_iso
 from packages.sanitization.sanitizer import sanitize
 from packages.storage.audit_metadata_client import AuditMetadataRepository
 from packages.storage.lambda_client import LambdaInvocationClient
+from packages.storage.s3_client import S3StorageClient
 from release_confidence_platform.aggregation.constants import (
     AGGREGATION_EVENT_SCHEMA_VERSION,
     AGGREGATION_EVENT_TYPE,
@@ -32,6 +35,10 @@ from release_confidence_platform.aggregation.constants import (
     JOB_STATUS_INVOCATION_FAILED,
     JOB_STATUS_INVOCATION_REQUESTED,
 )
+from release_confidence_platform.audit_lifecycle.finalization_gate import (
+    FinalizationGateError,
+    finalization_integrity_gate,
+)
 
 
 class AuditFinalizationHandler:
@@ -39,11 +46,13 @@ class AuditFinalizationHandler:
         self,
         *,
         repository: Any,
+        s3_storage: Any | None = None,
         logger: StructuredLogger | None = None,
         aggregation_invoker: Any | None = None,
         aggregation_function_name: str | None = None,
     ):
         self.repository = repository
+        self.s3_storage = s3_storage
         self.logger = logger or StructuredLogger()
         self.lifecycle = AuditLifecycleService(repository)
         self.aggregation_invoker = aggregation_invoker
@@ -119,6 +128,7 @@ class AuditFinalizationHandler:
 
         self._complete_finalization(
             validated,
+            audit=audit,
             expected_current_state=LIFECYCLE_STATE_FINALIZING,
             execution_count=execution_count,
             reason="finalization_completed",
@@ -135,6 +145,7 @@ class AuditFinalizationHandler:
         if existing_execution_count and existing_execution_count > 0:
             self._complete_finalization(
                 event,
+                audit=audit,
                 expected_current_state=LIFECYCLE_STATE_FINALIZING,
                 execution_count=existing_execution_count,
                 reason="finalization_retry_completed",
@@ -167,14 +178,67 @@ class AuditFinalizationHandler:
         self,
         event: dict[str, Any],
         *,
+        audit: dict[str, Any],
         expected_current_state: str,
         execution_count: int,
         reason: str,
     ) -> None:
+        client_id = event["client_id"]
+        audit_id = event["audit_id"]
+
+        # --- Finalization integrity gate ---
+        # Load RUN records and S3 evidence keys to feed the gate.
+        run_records = self.repository.list_run_records(client_id, audit_id)
+        s3_keys: list[str] = (
+            self.s3_storage.list_raw_evidence_keys(client_id, audit_id)
+            if self.s3_storage is not None
+            else []
+        )
+
+        # Set finalization.execution_count from the actual terminal RUN count
+        # (not from execution_counters.total_completed).
+        # If terminal_count is 0, use execution_count so the gate still runs
+        # and Check 1 / Check 2 surface the inconsistency.
+        terminal_count = len([r for r in run_records if r.get("status") != RUN_STATUS_STARTED])
+        gate_execution_count = terminal_count if terminal_count > 0 else execution_count
+        finalization = dict(audit.get("finalization") or {})
+        finalization["execution_count"] = gate_execution_count
+        audit_for_gate = dict(audit)
+        audit_for_gate["finalization"] = finalization
+
+        gate_result = finalization_integrity_gate(
+            audit=audit_for_gate,
+            run_records=run_records,
+            s3_evidence_keys=s3_keys,
+            client_id=client_id,
+            audit_id=audit_id,
+        )
+
+        if not gate_result.passed:
+            failure_payload = {
+                "type": "FINALIZATION_INTEGRITY_GATE_FAILURE",
+                "auditId": audit_id,
+                "timestamp": gate_result.timestamp,
+                "failedChecks": [
+                    {
+                        "check": f.check,
+                        "expected": f.expected,
+                        "actual": f.actual,
+                        "detail": f.detail,
+                    }
+                    for f in gate_result.failures
+                ],
+            }
+            # Gate failure payload logged via direct JSON — do not route through
+            # StructuredLogger without sanitize=False support (see design section 13).
+            logging.getLogger(__name__).error(json.dumps(failure_payload))
+            raise FinalizationGateError(failure_payload)
+        # --- Gate passed — proceed with COMPLETED transition ---
+
         self.lifecycle.transition(
             LifecycleTransition(
-                client_id=event["client_id"],
-                audit_id=event["audit_id"],
+                client_id=client_id,
+                audit_id=audit_id,
                 expected_current_state=expected_current_state,
                 next_state=LIFECYCLE_STATE_COMPLETED,
                 reason=reason,
@@ -399,8 +463,13 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: ARG
     aggregation_invoker = (
         LambdaInvocationClient(boto3.client("lambda")) if aggregation_function_name else None
     )
+    evidence_bucket = os.environ.get("EVIDENCE_BUCKET")
+    s3_storage = (
+        S3StorageClient(evidence_bucket, boto3.client("s3")) if evidence_bucket else None
+    )
     return AuditFinalizationHandler(
         repository=repository,
+        s3_storage=s3_storage,
         aggregation_invoker=aggregation_invoker,
         aggregation_function_name=aggregation_function_name,
     ).handle(event)

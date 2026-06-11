@@ -8,7 +8,6 @@ from botocore.exceptions import BotoCoreError, ClientError, ParamValidationError
 
 from release_confidence_platform.core.constants.engine import RUN_STATUSES
 from release_confidence_platform.core.exceptions import DuplicateRunIdError, StorageError
-from release_confidence_platform.sanitization.sanitizer import sanitize
 from release_confidence_platform.storage.dynamodb_codec import (
     decode_dynamodb_response,
     encode_dynamodb_call_kwargs,
@@ -36,7 +35,7 @@ class DynamoDBMetadataClient:
             self._call(
                 "put_item",
                 preserve_client_error_codes={"ConditionalCheckFailedException"},
-                Item=sanitize(item),
+                Item=item,
                 ConditionExpression="attribute_not_exists(PK) AND attribute_not_exists(SK)",
             )
         except ClientError as exc:
@@ -48,7 +47,7 @@ class DynamoDBMetadataClient:
         if updates.get("status") not in RUN_STATUSES:
             raise StorageError("Invalid run status", "STORAGE_ERROR")
         expression_names = {f"#k{i}": k for i, k in enumerate(updates)}
-        expression_values = {f":v{i}": v for i, v in enumerate(sanitize(updates).values())}
+        expression_values = {f":v{i}": v for i, v in enumerate(updates.values())}
         assignments = ", ".join(f"{name} = :v{i}" for i, name in enumerate(expression_names))
         self._call(
             "update_item",

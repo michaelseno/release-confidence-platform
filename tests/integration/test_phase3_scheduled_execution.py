@@ -155,3 +155,112 @@ def test_repeated_execution_is_sequential_and_omits_run_id():
     assert [event["iteration"] for event in orch.events] == [1, 2, 3]
     assert [event["repeated"]["iteration_count"] for event in orch.events] == [3, 3, 3]
     assert all("run_id" not in event for event in orch.events)
+
+
+# ---------------------------------------------------------------------------
+# B-01: completed orchestrator result increments total_completed
+# ---------------------------------------------------------------------------
+
+def test_scheduler_increments_total_completed_on_orchestrator_completed():
+    """B-01: single execution with COMPLETED status → total_completed incremented, total_failed=0."""
+    repo = Repo()
+
+    class CompletedOrchestrator:
+        def run(self, event):  # noqa: ARG002
+            return {"run_id": "run-completed-01", "status": "COMPLETED"}
+
+    ScheduledExecutionHandler(repository=repo, orchestrator=CompletedOrchestrator()).handle(
+        schedule_event()
+    )
+
+    counters = repo.audit["execution_counters"]
+    assert counters["total_started"] == 1
+    assert counters["total_completed"] == 1
+    assert counters.get("total_failed", 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# B-02: failed orchestrator result does NOT increment total_completed
+# ---------------------------------------------------------------------------
+
+def test_scheduler_does_not_increment_total_completed_on_orchestrator_failed():
+    """B-02: single execution with FAILED status → total_completed NOT incremented, total_failed=1."""
+    repo = Repo()
+
+    class FailedOrchestrator:
+        def run(self, event):  # noqa: ARG002
+            return {"run_id": "run-failed-01", "status": "FAILED"}
+
+    ScheduledExecutionHandler(repository=repo, orchestrator=FailedOrchestrator()).handle(
+        schedule_event()
+    )
+
+    counters = repo.audit["execution_counters"]
+    assert counters["total_started"] == 1
+    assert counters.get("total_completed", 0) == 0
+    assert counters["total_failed"] == 1
+
+
+# ---------------------------------------------------------------------------
+# B-03: failed orchestrator result marks occurrence claim_status=failed
+# ---------------------------------------------------------------------------
+
+def test_scheduler_marks_occurrence_failed_when_orchestrator_returns_failed():
+    """B-03: single execution with FAILED status → occurrence claim_status set to 'failed'."""
+    repo = Repo()
+
+    class FailedOrchestrator:
+        def run(self, event):  # noqa: ARG002
+            return {"run_id": "run-failed-02", "status": "FAILED"}
+
+    ScheduledExecutionHandler(repository=repo, orchestrator=FailedOrchestrator()).handle(
+        schedule_event()
+    )
+
+    claim = next(iter(repo.claims.values()))
+    assert claim["claim_status"] == "failed"
+    assert claim["run_id"] == "run-failed-02"
+
+
+# ---------------------------------------------------------------------------
+# B-04: mixed sequence of 4 COMPLETED + 1 FAILED across separate occurrences
+# ---------------------------------------------------------------------------
+
+def test_scheduler_counter_consistency_after_mixed_execution_sequence():
+    """B-04: 4 COMPLETED + 1 FAILED → total_completed=4, total_failed=1, total_started=5."""
+    call_count = 0
+
+    class MixedOrchestrator:
+        def run(self, event):  # noqa: ARG002
+            nonlocal call_count
+            call_count += 1
+            status = "FAILED" if call_count == 3 else "COMPLETED"
+            return {"run_id": f"run-mix-{call_count:02d}", "status": status}
+
+    # Use a shared Repo that accumulates counters across five invocations.
+    repo = Repo()
+    # Override get_audit_metadata to always return the live audit dict so that
+    # each subsequent call picks up counters written by the previous call.
+    original_get = repo.get_audit_metadata
+
+    def get_live_audit(client_id, audit_id):  # noqa: ARG001
+        return repo.audit
+
+    repo.get_audit_metadata = get_live_audit
+
+    orch = MixedOrchestrator()
+    occurrence_ids = [
+        "baseline#2026-05-19T00:15:00Z",
+        "baseline#2026-05-19T00:30:00Z",
+        "baseline#2026-05-19T00:45:00Z",
+        "baseline#2026-05-19T01:00:00Z",
+        "baseline#2026-05-19T01:15:00Z",
+    ]
+    handler = ScheduledExecutionHandler(repository=repo, orchestrator=orch)
+    for occ_id in occurrence_ids:
+        handler.handle(schedule_event(schedule_occurrence_id=occ_id))
+
+    counters = repo.audit["execution_counters"]
+    assert counters["total_started"] == 5
+    assert counters["total_completed"] == 4
+    assert counters["total_failed"] == 1
