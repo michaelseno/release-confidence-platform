@@ -39,6 +39,9 @@ class AuditMetadataRepository:
             "SK": f"AUDIT#{audit_id}#OCCURRENCE#{schedule_occurrence_id}",
         }
 
+    def aggregation_job_keys(self, client_id: str, audit_id: str, job_id: str) -> dict[str, str]:
+        return {"PK": f"CLIENT#{client_id}", "SK": f"AUDIT#{audit_id}#AGGJOB#{job_id}"}
+
     def get_audit_metadata(self, client_id: str, audit_id: str) -> dict[str, Any]:
         response = self._call("get_item", Key=self.audit_keys(client_id, audit_id))
         if "Item" not in response:
@@ -257,6 +260,17 @@ class AuditMetadataRepository:
 
     def record_finalization(self, client_id: str, audit_id: str, metadata: dict[str, Any]) -> None:
         self._set_fields(client_id, audit_id, {"finalization": sanitize(metadata)})
+
+    def put_aggregation_job_intent_once(self, item: dict[str, Any]) -> None:
+        self._put_conditional(
+            item,
+            error=StorageError(
+                "Aggregation job intent exists", "AGGREGATION_JOB_INTENT_EXISTS"
+            ),
+        )
+
+    def update_aggregation_job_intent(self, key: dict[str, str], updates: dict[str, Any]) -> None:
+        self.update_occurrence(key, updates)
 
     def record_cleanup_errors(
         self, client_id: str, audit_id: str, cleanup_errors: list[dict[str, Any]]

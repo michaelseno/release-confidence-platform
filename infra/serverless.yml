@@ -125,13 +125,25 @@ functions:
     handler: apps.backend.handlers.audit_finalization_handler.handler
     timeout: 60
     memorySize: 256
+    role:
+      Fn::GetAtt:
+        - AuditFinalizationLambdaRole
+        - Arn
+    environment:
+      AGGREGATION_FUNCTION_NAME:
+        Ref: AuditAggregationLambdaFunction
   auditAggregation:
     handler: apps.backend.handlers.aggregation_handler.handler
     timeout: 300
     memorySize: 512
+    role:
+      Fn::GetAtt:
+        - AuditAggregationLambdaRole
+        - Arn
 
 resources:
   - ${file(resources/s3.yml)}
   - ${file(resources/dynamodb.yml)}
   - ${file(resources/iam.yml)}
+  - ${file(resources/phase4-aggregation-iam.yml)}
   - ${file(resources/scheduler.yml)}

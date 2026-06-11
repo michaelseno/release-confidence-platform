@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from botocore.exceptions import ClientError
 
+from release_confidence_platform.aggregation.constants import MAX_AGGREGATE_TRANSACTION_BYTES
 from release_confidence_platform.core.exceptions import StorageError
 from release_confidence_platform.sanitization.sanitizer import sanitize
 from release_confidence_platform.storage.dynamodb_codec import (
     decode_dynamodb_response,
     encode_dynamodb_call_kwargs,
+    encode_item,
     storage_error_from_dynamodb_client_error,
     storage_error_from_dynamodb_request_error,
 )
@@ -70,6 +73,9 @@ class AggregationRepository:
             ConditionExpression="attribute_exists(PK) AND attribute_exists(SK)",
         )
 
+    def get_job(self, key: dict[str, str]) -> dict[str, Any] | None:
+        return self._call("get_item", Key=key).get("Item")
+
     def list_completed_runs(self, client_id: str, audit_id: str) -> list[dict[str, Any]]:
         response = self._call(
             "query",
@@ -92,15 +98,76 @@ class AggregationRepository:
     def aggregate_set_exists(
         self, client_id: str, audit_id: str, exec_id: str, cfg: str, ver: str
     ) -> bool:
-        key = {
-            "PK": f"CLIENT#{client_id}",
-            "SK": f"{self.aggregate_prefix(client_id, audit_id, exec_id, cfg, ver)}#AUDIT",
-        }
-        return "Item" in self._call("get_item", Key=key)
+        pk = f"CLIENT#{client_id}"
+        prefix = self.aggregate_prefix(client_id, audit_id, exec_id, cfg, ver)
+        marker = self._call("get_item", Key={"PK": pk, "SK": f"{prefix}#SET"}).get("Item")
+        if not marker or marker.get("completion_status") != "COMPLETE":
+            return False
+        required_sort_keys = [
+            f"{prefix}#LINEAGE#audit",
+            f"{prefix}#AUDIT",
+            f"{prefix}#FAILURE_CLASSIFICATION",
+        ]
+        endpoint_count = marker.get("endpoint_aggregate_count")
+        aggregate_count = marker.get("aggregate_record_count")
+        if not isinstance(endpoint_count, int) or not isinstance(aggregate_count, int):
+            return False
+        found_aggregates = 0
+        for sk in required_sort_keys:
+            if "Item" not in self._call("get_item", Key={"PK": pk, "SK": sk}):
+                return False
+            found_aggregates += 1 if not sk.endswith("LINEAGE#audit") else 0
+        response = self._call(
+            "query",
+            KeyConditionExpression="PK = :pk AND begins_with(SK, :sk_prefix)",
+            ExpressionAttributeValues={":pk": pk, ":sk_prefix": f"{prefix}#ENDPOINT#"},
+        )
+        endpoint_records = [
+            item for item in response.get("Items", []) if item.get("record_kind") == "aggregate"
+        ]
+        endpoint_aggregates = [
+            item
+            for item in endpoint_records
+            if item.get("aggregate_type") == "endpoint"
+        ]
+        if len(endpoint_aggregates) != endpoint_count:
+            return False
+        found_aggregates += len(endpoint_records)
+        return found_aggregates == aggregate_count
 
     def put_records_once(self, records: list[dict[str, Any]]) -> None:
-        for item in records:
-            self._put_once(item)
+        sanitized_records = [sanitize(item) for item in records]
+        total_bytes = sum(
+            len(json.dumps(item, sort_keys=True, default=str).encode("utf-8"))
+            for item in sanitized_records
+        )
+        if total_bytes > MAX_AGGREGATE_TRANSACTION_BYTES:
+            raise StorageError("Aggregate transaction too large", "AGGREGATE_SET_TOO_LARGE")
+        transact_items = [
+            {
+                "Put": {
+                    "TableName": self.table_name,
+                    "Item": encode_item(item),
+                    "ConditionExpression": "attribute_not_exists(PK) AND attribute_not_exists(SK)",
+                }
+            }
+            for item in sanitized_records
+        ]
+        try:
+            self.dynamodb_client.transact_write_items(TransactItems=transact_items)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in {
+                "ConditionalCheckFailedException",
+                "TransactionCanceledException",
+            }:
+                raise ConditionalWriteError() from exc
+            raise storage_error_from_dynamodb_client_error(
+                exc, operation="transact_write_items"
+            ) from exc
+        except Exception as exc:
+            raise storage_error_from_dynamodb_request_error(
+                exc, operation="transact_write_items"
+            ) from exc
 
     def _put_once(self, item: dict[str, Any]) -> None:
         try:

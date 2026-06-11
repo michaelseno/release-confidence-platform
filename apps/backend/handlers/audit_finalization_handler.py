@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from decimal import Decimal
 from typing import Any
 
@@ -21,13 +22,32 @@ from packages.core.logging import StructuredLogger
 from packages.core.time import utc_now_iso
 from packages.sanitization.sanitizer import sanitize
 from packages.storage.audit_metadata_client import AuditMetadataRepository
+from packages.storage.lambda_client import LambdaInvocationClient
+from release_confidence_platform.aggregation.constants import (
+    AGGREGATION_EVENT_SCHEMA_VERSION,
+    AGGREGATION_EVENT_TYPE,
+    AGGREGATION_VERSION,
+    FAILURE_CATEGORY_EVIDENCE_TRANSFORMING,
+    JOB_STATUS_INTENT_RECORDED,
+    JOB_STATUS_INVOCATION_FAILED,
+    JOB_STATUS_INVOCATION_REQUESTED,
+)
 
 
 class AuditFinalizationHandler:
-    def __init__(self, *, repository: Any, logger: StructuredLogger | None = None):
+    def __init__(
+        self,
+        *,
+        repository: Any,
+        logger: StructuredLogger | None = None,
+        aggregation_invoker: Any | None = None,
+        aggregation_function_name: str | None = None,
+    ):
         self.repository = repository
         self.logger = logger or StructuredLogger()
         self.lifecycle = AuditLifecycleService(repository)
+        self.aggregation_invoker = aggregation_invoker
+        self.aggregation_function_name = aggregation_function_name
 
     def handle(self, event: dict[str, Any]) -> dict[str, Any]:
         validated = validate_finalization_event(event)
@@ -93,7 +113,9 @@ class AuditFinalizationHandler:
                 expected_current_state=LIFECYCLE_STATE_FINALIZING,
                 reason="zero_executions_at_finalization",
             )
-            return self._response(validated, status="failed", lifecycle_state=LIFECYCLE_STATE_FAILED)
+            return self._response(
+                validated, status="failed", lifecycle_state=LIFECYCLE_STATE_FAILED
+            )
 
         self._complete_finalization(
             validated,
@@ -101,7 +123,10 @@ class AuditFinalizationHandler:
             execution_count=execution_count,
             reason="finalization_completed",
         )
-        return self._response(validated, status="completed", lifecycle_state=LIFECYCLE_STATE_COMPLETED)
+        self._trigger_aggregation_after_finalization(validated)
+        return self._response(
+            validated, status="completed", lifecycle_state=LIFECYCLE_STATE_COMPLETED
+        )
 
     def _handle_finalizing_retry(
         self, event: dict[str, Any], audit: dict[str, Any]
@@ -114,7 +139,10 @@ class AuditFinalizationHandler:
                 execution_count=existing_execution_count,
                 reason="finalization_retry_completed",
             )
-            return self._response(event, status="completed", lifecycle_state=LIFECYCLE_STATE_COMPLETED)
+            self._trigger_aggregation_after_finalization(event)
+            return self._response(
+                event, status="completed", lifecycle_state=LIFECYCLE_STATE_COMPLETED
+            )
         if existing_execution_count == 0:
             self._fail_zero_execution_finalization(
                 event,
@@ -205,6 +233,107 @@ class AuditFinalizationHandler:
             }
         )
 
+    def _trigger_aggregation_after_finalization(self, event: dict[str, Any]) -> None:
+        job_id = f"aggjob_{uuid.uuid4().hex}"
+        intent_key = self.repository.aggregation_job_keys(
+            event["client_id"], event["audit_id"], job_id
+        )
+        now = utc_now_iso()
+        self.repository.put_aggregation_job_intent_once(
+            {
+                **intent_key,
+                "client_id": event["client_id"],
+                "audit_id": event["audit_id"],
+                "aggregation_job_id": job_id,
+                "aggregation_version": AGGREGATION_VERSION,
+                "status": JOB_STATUS_INTENT_RECORDED,
+                "trigger_invocation_status": "NOT_REQUESTED",
+                "intent_recorded_at": now,
+                "started_at": None,
+                "completed_at": None,
+                "reason_code": None,
+                "failure_category": None,
+                "finalization_correlation": {
+                    "schedule_name": event.get("schedule_name"),
+                    "schedule_occurrence_id": event.get("schedule_occurrence_id"),
+                },
+            }
+        )
+        if self.aggregation_invoker is None or not self.aggregation_function_name:
+            self._log_finalization(
+                "auditFinalization_aggregation_trigger_not_configured",
+                event,
+                execution_count=None,
+                previous_state=LIFECYCLE_STATE_COMPLETED,
+                next_state=LIFECYCLE_STATE_COMPLETED,
+                reason="aggregation_trigger_not_configured",
+                status="skipped",
+            )
+            return
+        self.repository.update_aggregation_job_intent(
+            intent_key,
+            {
+                "status": JOB_STATUS_INVOCATION_REQUESTED,
+                "trigger_invocation_status": "REQUESTED",
+                "trigger_invocation_attempted_at": utc_now_iso(),
+            },
+        )
+        payload = {
+            "event_type": AGGREGATION_EVENT_TYPE,
+            "schema_version": AGGREGATION_EVENT_SCHEMA_VERSION,
+            "client_id": event["client_id"],
+            "audit_id": event["audit_id"],
+            "aggregation_version": AGGREGATION_VERSION,
+            "aggregation_job_id": job_id,
+        }
+        try:
+            self.aggregation_invoker.invoke(
+                function_name=self.aggregation_function_name,
+                payload=payload,
+                invocation_type="Event",
+            )
+        except Exception:
+            self.repository.update_aggregation_job_intent(
+                intent_key,
+                {
+                    "status": JOB_STATUS_INVOCATION_FAILED,
+                    "trigger_invocation_status": "FAILED",
+                    "failure_category": FAILURE_CATEGORY_EVIDENCE_TRANSFORMING,
+                    "reason_code": "AGGREGATION_TRIGGER_INVOCATION_FAILED",
+                    "completed_at": utc_now_iso(),
+                    "error_summary": {
+                        "reason_code": "AGGREGATION_TRIGGER_INVOCATION_FAILED",
+                        "component": "AuditFinalizationHandler",
+                    },
+                },
+            )
+            self._log_finalization(
+                "auditFinalization_aggregation_trigger_failed",
+                event,
+                execution_count=None,
+                previous_state=LIFECYCLE_STATE_COMPLETED,
+                next_state=LIFECYCLE_STATE_COMPLETED,
+                reason="aggregation_trigger_failed",
+                status="failed",
+            )
+            return
+        self.repository.update_aggregation_job_intent(
+            intent_key,
+            {
+                "trigger_invocation_status": "ACCEPTED",
+                "trigger_invocation_accepted_at": utc_now_iso(),
+            },
+        )
+        self._log_finalization(
+            "auditFinalization_aggregation_triggered",
+            event,
+            execution_count=None,
+            previous_state=LIFECYCLE_STATE_COMPLETED,
+            next_state=LIFECYCLE_STATE_COMPLETED,
+            reason="aggregation_triggered",
+            status="triggered",
+        )
+
     def _log_finalization(
         self,
         message: str,
@@ -266,4 +395,12 @@ def _normalize_execution_count(value: Any) -> int:
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: ARG001
     table = boto3.resource("dynamodb").Table(os.environ["METADATA_TABLE"])
     repository = AuditMetadataRepository(os.environ["METADATA_TABLE"], table)
-    return AuditFinalizationHandler(repository=repository).handle(event)
+    aggregation_function_name = os.environ.get("AGGREGATION_FUNCTION_NAME")
+    aggregation_invoker = (
+        LambdaInvocationClient(boto3.client("lambda")) if aggregation_function_name else None
+    )
+    return AuditFinalizationHandler(
+        repository=repository,
+        aggregation_invoker=aggregation_invoker,
+        aggregation_function_name=aggregation_function_name,
+    ).handle(event)
