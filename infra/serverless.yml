@@ -103,6 +103,12 @@ package:
     - '../packages/data_generation/**'
     - '../packages/sanitization/**'
     - '../packages/storage/**'
+    - '../src/release_confidence_platform/__init__.py'
+    - '../src/release_confidence_platform/aggregation/**'
+    - '../src/release_confidence_platform/storage/**'
+    - '../src/release_confidence_platform/core/**'
+    - '../src/release_confidence_platform/audit_lifecycle/**'
+    - '../src/release_confidence_platform/sanitization/**'
     - '!../packages/**/__pycache__/**'
     - '!../packages/**/*.pyc'
 
@@ -119,9 +125,25 @@ functions:
     handler: apps.backend.handlers.audit_finalization_handler.handler
     timeout: 60
     memorySize: 256
+    role:
+      Fn::GetAtt:
+        - AuditFinalizationLambdaRole
+        - Arn
+    environment:
+      AGGREGATION_FUNCTION_NAME:
+        Ref: AuditAggregationLambdaFunction
+  auditAggregation:
+    handler: apps.backend.handlers.aggregation_handler.handler
+    timeout: 300
+    memorySize: 512
+    role:
+      Fn::GetAtt:
+        - AuditAggregationLambdaRole
+        - Arn
 
 resources:
   - ${file(resources/s3.yml)}
   - ${file(resources/dynamodb.yml)}
   - ${file(resources/iam.yml)}
+  - ${file(resources/phase4-aggregation-iam.yml)}
   - ${file(resources/scheduler.yml)}

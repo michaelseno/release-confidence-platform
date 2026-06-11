@@ -21,6 +21,7 @@ class Repo:
                 {"schedule_name": "schedule-two", "schedule_type": "finalization"},
             ],
         }
+        self.items = {}
 
     def get_audit_metadata(self, client_id, audit_id):  # noqa: ARG002
         return self.audit
@@ -34,6 +35,15 @@ class Repo:
 
     def record_cleanup_errors(self, client_id, audit_id, errors):  # noqa: ARG002
         self.audit["cleanup_errors"] = errors
+
+    def aggregation_job_keys(self, client_id, audit_id, job_id):
+        return {"PK": f"CLIENT#{client_id}", "SK": f"AUDIT#{audit_id}#AGGJOB#{job_id}"}
+
+    def put_aggregation_job_intent_once(self, item):
+        self.items[(item["PK"], item["SK"])] = item
+
+    def update_aggregation_job_intent(self, key, updates):
+        self.items[(key["PK"], key["SK"])].update(updates)
 
 
 class Scheduler:
@@ -49,6 +59,24 @@ class Scheduler:
     def disable_schedule(self, name, group=None):  # noqa: ARG002
         if self.fail and name == "schedule-two":
             raise RuntimeError("disable failed")
+
+
+class AggregationInvoker:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.invocations = []
+
+    def invoke(self, *, function_name, payload, invocation_type="Event"):
+        if self.fail:
+            raise RuntimeError("invoke failed")
+        self.invocations.append(
+            {
+                "function_name": function_name,
+                "payload": payload,
+                "invocation_type": invocation_type,
+            }
+        )
+        return {"accepted_async_invocation": True}
 
 
 def finalization_event():
@@ -74,6 +102,62 @@ def test_finalization_with_executions_completes_after_finalizing():
         "FINALIZING",
         "COMPLETED",
     ]
+
+
+def test_successful_finalization_triggers_internal_aggregation_event():
+    repo = Repo(executions=1)
+    invoker = AggregationInvoker()
+
+    result = AuditFinalizationHandler(
+        repository=repo,
+        aggregation_invoker=invoker,
+        aggregation_function_name="auditAggregationFunction",
+    ).handle(finalization_event())
+
+    assert result["status"] == "completed"
+    assert len(invoker.invocations) == 1
+    assert invoker.invocations[0]["function_name"] == "auditAggregationFunction"
+    assert invoker.invocations[0]["invocation_type"] == "Event"
+    assert invoker.invocations[0]["payload"] | {"aggregation_job_id": "ignored"} == {
+        "event_type": "aggregate_audit",
+        "schema_version": "phase4.aggregation_event.v1",
+        "client_id": "client123",
+        "audit_id": "audit456",
+        "aggregation_version": "agg_v1",
+        "aggregation_job_id": "ignored",
+    }
+    assert next(iter(repo.items.values()))["trigger_invocation_status"] == "ACCEPTED"
+
+
+def test_aggregation_trigger_failure_persists_durable_job_intent():
+    repo = Repo(executions=1)
+    invoker = AggregationInvoker(fail=True)
+
+    result = AuditFinalizationHandler(
+        repository=repo,
+        aggregation_invoker=invoker,
+        aggregation_function_name="auditAggregationFunction",
+    ).handle(finalization_event())
+
+    assert result["status"] == "completed"
+    intent = next(iter(repo.items.values()))
+    assert intent["status"] == "INVOCATION_FAILED"
+    assert intent["failure_category"] == "EVIDENCE_TRANSFORMING"
+    assert intent["reason_code"] == "AGGREGATION_TRIGGER_INVOCATION_FAILED"
+
+
+def test_zero_execution_finalization_does_not_trigger_aggregation():
+    repo = Repo(executions=0)
+    invoker = AggregationInvoker()
+
+    result = AuditFinalizationHandler(
+        repository=repo,
+        aggregation_invoker=invoker,
+        aggregation_function_name="auditAggregationFunction",
+    ).handle(finalization_event())
+
+    assert result["status"] == "failed"
+    assert invoker.invocations == []
 
 
 def test_finalization_with_decimal_execution_counter_completes_after_logging():
