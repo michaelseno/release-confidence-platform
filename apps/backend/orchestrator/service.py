@@ -596,22 +596,20 @@ class CoreEngineOrchestrator:
 
     def _started_item(self, event: OrchestratorEvent) -> dict[str, Any]:
         started_at = utc_now_iso()
-        return sanitize(
-            {
-                **self.metadata_storage.keys(event.client_id, event.audit_id, event.run_id),
-                "client_id": event.client_id,
-                "audit_id": event.audit_id,
-                "run_id": event.run_id,
-                "scenario_type": event.scenario_type,
-                "triggered_by": event.triggered_by,
-                "status": RUN_STATUS_STARTED,
-                "raw_result_s3_key": None,
-                "raw_result_version": RAW_RESULT_VERSION,
-                "started_at": started_at,
-                "completed_at": None,
-                "failure_summary": None,
-            }
-        )
+        return {
+            **self.metadata_storage.keys(event.client_id, event.audit_id, event.run_id),
+            "client_id": event.client_id,
+            "audit_id": event.audit_id,
+            "run_id": event.run_id,
+            "scenario_type": event.scenario_type,
+            "triggered_by": event.triggered_by,
+            "status": RUN_STATUS_STARTED,
+            "raw_result_s3_key": None,
+            "raw_result_version": RAW_RESULT_VERSION,
+            "started_at": started_at,
+            "completed_at": None,
+            "failure_summary": None,
+        }
 
     def _failure_response(
         self,

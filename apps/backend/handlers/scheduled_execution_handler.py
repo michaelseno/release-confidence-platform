@@ -16,7 +16,11 @@ from packages.audit_scheduling.constants import SCHEDULE_TYPE_REPEATED
 from packages.audit_scheduling.events import validate_scheduled_execution_event
 from packages.audit_scheduling.repeated import RepeatedExecutionCoordinator
 from packages.audit_scheduling.safeguards import ensure_execution_allowed
-from packages.core.constants.engine import LOG_CATEGORY_CLIENT_SAFE
+from packages.core.constants.engine import (
+    LOG_CATEGORY_CLIENT_SAFE,
+    RUN_STATUS_COMPLETED,
+    RUN_STATUS_FAILED,
+)
 from packages.core.exceptions import EngineError, ValidationError
 from packages.core.logging import StructuredLogger
 from packages.core.time import utc_now_iso
@@ -130,11 +134,24 @@ class ScheduledExecutionHandler:
                 )
             if validated["schedule_type"] == SCHEDULE_TYPE_REPEATED:
                 self._log("orchestrator_execution_started", validated)
+                # RepeatedExecutionCoordinator.run() returns a list of individual result dicts.
                 results = RepeatedExecutionCoordinator(self.orchestrator).run(
                     audit=audit, event=validated
                 )
                 run_id = results[-1].get("run_id") if results else None
                 self._log("orchestrator_execution_completed", validated, run_id=run_id)
+                # Count completed and failed outcomes across all individual results.
+                num_completed = sum(
+                    1 for r in results if r.get("status") == RUN_STATUS_COMPLETED
+                )
+                num_failed = sum(
+                    1 for r in results if r.get("status") == RUN_STATUS_FAILED
+                )
+                # Derive aggregate claim status: all-completed, all-failed, or mixed→failed.
+                if num_failed == 0:
+                    occurrence_claim_status = "completed"
+                else:
+                    occurrence_claim_status = "failed"
             else:
                 self._log("orchestrator_execution_started", validated)
                 result = self.orchestrator.run(
@@ -154,13 +171,33 @@ class ScheduledExecutionHandler:
                     self._log("raw_results_written", validated, run_id=run_id)
                 if result.get("status"):
                     self._log("run_metadata_written", validated, run_id=run_id)
+                # Counters track occurrence handler path outcomes, not terminal RUN record states.
+                # The finalization integrity gate is the canonical authority for lifecycle completion.
+                result_status = result.get("status")
+                if result_status == RUN_STATUS_COMPLETED:
+                    num_completed = 1
+                    num_failed = 0
+                    occurrence_claim_status = "completed"
+                elif result_status == RUN_STATUS_FAILED:
+                    num_completed = 0
+                    num_failed = 1
+                    occurrence_claim_status = "failed"
+                else:
+                    num_completed = 0
+                    num_failed = 0
+                    occurrence_claim_status = "failed"
             self.repository.update_occurrence(
                 claim_key,
-                {"claim_status": "completed", "run_id": run_id, "completed_at": utc_now_iso()},
+                {
+                    "claim_status": occurrence_claim_status,
+                    "run_id": run_id,
+                    "completed_at": utc_now_iso(),
+                },
             )
             counters = dict(audit.get("execution_counters") or {})
             counters["total_started"] = counters.get("total_started", 0) + 1
-            counters["total_completed"] = counters.get("total_completed", 0) + 1
+            counters["total_completed"] = counters.get("total_completed", 0) + num_completed
+            counters["total_failed"] = counters.get("total_failed", 0) + num_failed
             counters["last_execution_at"] = utc_now_iso()
             self.repository.update_execution_counters(
                 validated["client_id"], validated["audit_id"], counters

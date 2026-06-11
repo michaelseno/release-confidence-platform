@@ -59,6 +59,31 @@ class S3StorageClient:
     def build_raw_result_key(self, client_id: str, audit_id: str, run_id: str) -> str:
         return RAW_RESULT_KEY_TEMPLATE.format(client_id=client_id, audit_id=audit_id, run_id=run_id)
 
+    def list_raw_evidence_keys(self, client_id: str, audit_id: str) -> list[str]:
+        """List all S3 object keys under raw-results/{client_id}/{audit_id}/.
+
+        Follows ContinuationToken pagination to return the complete result set.
+        """
+        prefix = f"raw-results/{client_id}/{audit_id}/"
+        keys: list[str] = []
+        kwargs: dict[str, Any] = {"Bucket": self.bucket_name, "Prefix": prefix}
+        while True:
+            try:
+                response = self.s3_client.list_objects_v2(**kwargs)
+            except ClientError as exc:
+                raise _storage_error_from_s3_client_error(
+                    exc, key=prefix, operation="list_objects_v2"
+                ) from exc
+            for obj in response.get("Contents", []):
+                keys.append(obj["Key"])
+            if not response.get("IsTruncated"):
+                break
+            continuation = response.get("NextContinuationToken")
+            if not continuation:
+                break
+            kwargs["ContinuationToken"] = continuation
+        return keys
+
     def write_raw_results_once(self, key: str, payload: dict[str, Any]) -> None:
         if self.object_exists(key):
             raise DuplicateRunIdError()
@@ -120,6 +145,8 @@ def _required_permission(operation: str) -> str:
         return "s3:GetObject+s3:ListBucket"
     if operation == "put_object":
         return "s3:PutObject"
+    if operation == "list_objects_v2":
+        return "s3:ListBucket"
     return "s3:GetObject"
 
 
