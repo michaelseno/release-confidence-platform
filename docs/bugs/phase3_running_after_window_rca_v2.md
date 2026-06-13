@@ -347,3 +347,141 @@ The most likely root cause (stale Lambda deployment) is an infrastructure/deploy
 If after Lambda redeployment the next validation audit still gets stuck in `RUNNING`, escalate to investigate a new pre-transition failure mode (H3) with CloudWatch logs as primary evidence.
 
 The secondary code fix (top-level `FinalizationGateError` handler in `handle()`) should be routed to the backend developer as a separate, non-urgent improvement.
+
+---
+
+## Round 3 Update — Lambda Packaging Root Cause Confirmed
+
+**Updated:** 2026-06-13
+**Status:** Root cause confirmed via direct CloudWatch evidence. Supersedes the Round 2 stale-deployment hypothesis.
+
+---
+
+### Summary
+
+The Round 2 hypothesis (stale Lambda deployment, Decimal serialization failure) was directionally correct in identifying that the `auditFinalization` Lambda was not working, but did not identify the specific defect. CloudWatch logs obtained after Round 2 provide direct, unambiguous evidence of the actual failure mechanism: the Lambda crashes at **module import time** due to a PYTHONPATH packaging defect, before any application logic executes.
+
+The root cause is that `apps/backend/handlers/audit_finalization_handler.py` has no `sys.path` manipulation at module level, and the Lambda deployment does not set `PYTHONPATH=/var/task/src`, so `import release_confidence_platform` fails immediately on every invocation.
+
+---
+
+### CloudWatch Evidence
+
+CloudWatch logs for the `auditFinalization` Lambda show the following error on **every invocation** after the audit window ended:
+
+```
+Runtime.ImportModuleError:
+Unable to import module 'apps.backend.handlers.audit_finalization_handler'
+No module named 'release_confidence_platform'
+```
+
+This error occurs at the Python module initialization stage — before the `handler()` function is entered, before `validate_finalization_event()` is called, and before any DynamoDB reads or lifecycle transitions execute. No application logic runs on any invocation.
+
+**Affected audit (Round 3):**
+- `client_id`: `client_rca_fix_v3_8f494019`
+- `audit_id`: `audit_20260613_f9414534`
+- `audit_window.end`: `2026-06-13T04:52:08.476253Z`
+- `lifecycle_state`: `RUNNING` (stuck)
+- `updated_at`: `2026-06-13T04:47:36.794650Z`
+
+---
+
+### Packaging Analysis
+
+**File:** `/Users/mjseno/Documents/Development/2026_fortfolio_projects/release-confidence-platform/infra/serverless.yml`
+
+The `package.patterns` configuration correctly includes:
+
+```yaml
+- '../src/release_confidence_platform/__init__.py'
+- '../src/release_confidence_platform/aggregation/**'
+- '../src/release_confidence_platform/audit_lifecycle/**'
+- '../src/release_confidence_platform/storage/**'
+- '../src/release_confidence_platform/core/**'
+- '../src/release_confidence_platform/sanitization/**'
+```
+
+These patterns deploy `release_confidence_platform` to `/var/task/src/release_confidence_platform/` inside the Lambda runtime.
+
+Lambda's default `sys.path` includes `/var/task` but NOT `/var/task/src`. When Python attempts `import release_confidence_platform`, it looks for `/var/task/release_confidence_platform/` — which does not exist. The package lives at `/var/task/src/release_confidence_platform/` and is therefore invisible to the Python import system.
+
+---
+
+### Why `aggregation_handler.py` Works But `audit_finalization_handler.py` Does Not
+
+`aggregation_handler.py` line 11 contains:
+
+```python
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../../src"))
+```
+
+This executes at module load time and inserts `/var/task/src` into `sys.path` **before** any `release_confidence_platform` imports are attempted. All subsequent imports succeed.
+
+`audit_finalization_handler.py` has no equivalent `sys.path` manipulation. The module-level imports at lines 30–42 (which include `from release_confidence_platform.audit_lifecycle import ...` and similar) execute before the `handler()` function runs. Python raises `ModuleNotFoundError: No module named 'release_confidence_platform'` during these module-level imports, which the Lambda runtime surfaces as `Runtime.ImportModuleError`. The Lambda terminates immediately.
+
+---
+
+### Why `scheduled_execution_handler.py` and `orchestrator_handler.py` Are Unaffected
+
+Both handlers import exclusively from `packages.*` and `apps.backend.*`. These modules are deployed under `/var/task/packages/` and `/var/task/apps/` respectively, both of which are on the default Lambda `sys.path` under `/var/task`. Neither handler imports from `release_confidence_platform` at module level, so neither is affected by the missing `/var/task/src` path entry.
+
+---
+
+### Fix Strategy
+
+#### Primary fix (systemic — infrastructure owner)
+
+Add `PYTHONPATH: /var/task/src` to the Lambda provider environment block in `infra/serverless.yml`:
+
+```yaml
+provider:
+  environment:
+    PYTHONPATH: /var/task/src
+```
+
+This ensures all Lambdas resolve `release_confidence_platform` regardless of which handler file they use. It applies globally at deploy time and cannot regress silently when new handlers are added. This is superior to per-handler `sys.path.insert` workarounds because it does not depend on handler authors remembering to add path manipulation code.
+
+#### Secondary cleanup (backend owner)
+
+Once `PYTHONPATH` is set in `serverless.yml`, remove the `sys.path.insert` workaround from `aggregation_handler.py` line 11. The workaround is no longer needed and leaving it in place creates confusing redundancy and obscures the true mechanism that makes imports work.
+
+- **File:** `apps/backend/handlers/aggregation_handler.py`
+- **Scope:** Remove `sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../../src"))` and the `import os`, `import sys` lines if they are unused after removal.
+
+---
+
+### DynamoDB Result Records — Not a Separate Defect
+
+A secondary question in the HITL brief asked whether DynamoDB result records (RUN records) are expected to exist before finalization runs.
+
+Based on code analysis:
+
+- RUN records are written during execution via `AuditMetadataRepository` during the orchestration path, not during finalization. They SHOULD be present before finalization if executions occurred.
+- The `audit_finalization_handler.py` calls `self.repository.list_run_records()` inside `_complete_finalization()`, which is reached only after the `RUNNING -> FINALIZING` lifecycle transition at line 105.
+- Because the `auditFinalization` Lambda crashes at import time (before `handler()` is entered), `list_run_records()` is never called on any invocation.
+
+**The absence of DynamoDB result observation during finalization is a consequence of the Lambda crash, not an independent defect.** There is no evidence of a separate data/fixture or persistence issue. This question is resolved: not a defect.
+
+---
+
+### Confidence Level: HIGH
+
+Round 2 confidence was Medium-High (circumstantial, no CloudWatch access). Round 3 confidence is **High** based on:
+
+- Direct CloudWatch error message: `Runtime.ImportModuleError: Unable to import module 'apps.backend.handlers.audit_finalization_handler' — No module named 'release_confidence_platform'`. This is deterministic, not intermittent.
+- Code-level confirmation: `audit_finalization_handler.py` has no `sys.path` manipulation; `aggregation_handler.py` does. The behavioral difference between the two handlers is fully explained by this structural difference.
+- Packaging analysis confirms `release_confidence_platform` is deployed under `/var/task/src/` (not `/var/task/`), and Lambda `sys.path` does not include `/var/task/src` by default.
+- The Round 2 `Decimal` serialization hypothesis is now superseded. The handler never reached the `_log_finalization()` call — it failed before `handler()` was entered.
+
+---
+
+### Updated Final Investigator Decision
+
+**Ready for developer fix — packaging defect confirmed.**
+
+Required actions:
+1. Add `PYTHONPATH: /var/task/src` to the `provider.environment` block in `infra/serverless.yml`.
+2. Deploy to the AWS dev environment (`sls deploy --stage dev`).
+3. Verify CloudWatch no longer shows `Runtime.ImportModuleError` for `auditFinalization` invocations.
+4. Run a fresh short-window audit and confirm end-to-end `RUNNING -> FINALIZING -> COMPLETED` lifecycle transition.
+5. As a follow-on cleanup, remove the `sys.path.insert` workaround from `aggregation_handler.py` once the `PYTHONPATH` fix is deployed and validated.

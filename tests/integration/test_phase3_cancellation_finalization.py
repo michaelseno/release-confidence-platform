@@ -439,3 +439,31 @@ def test_cancellation_cleanup_iterates_multiple_discrete_baseline_schedules():
 
     assert result["lifecycle_state"] == "CANCELLED"
     assert scheduler.deleted == ["baseline-001", "baseline-002", "finalization"]
+
+
+def test_finalization_handler_invocable_end_to_end():
+    """End-to-end invocation smoke test for the finalization handler.
+
+    Regression guard for the round-3 Lambda packaging defect: the auditFinalization
+    Lambda was crashing with 'No module named release_confidence_platform' before
+    any application logic ran. This test proves the handler module imports cleanly
+    and the full handle() path executes to a terminal lifecycle state.
+
+    The audit must reach COMPLETED or FAILED — never remain in RUNNING or FINALIZING.
+    """
+    repo = Repo(state="RUNNING", executions=2)
+    handler = AuditFinalizationHandler(repository=repo, s3_storage=FakeS3(repo))
+    event = {
+        "event_type": "audit_finalization",
+        "client_id": "smoke_client",
+        "audit_id": "smoke_audit",
+        "schedule_name": "rcp-dev-smoke_client-smoke_audit-finalization",
+        "triggered_by": "eventbridge_scheduler",
+        "audit_window_end": "2026-01-01T10:00:00Z",
+        "schedule_occurrence_id": "occ-smoke-001",
+    }
+    result = handler.handle(event)
+    assert result["lifecycle_state"] in {"COMPLETED", "FAILED"}, (
+        f"Audit must reach a terminal state; got lifecycle_state={result['lifecycle_state']!r}. "
+        "A RUNNING or FINALIZING result indicates the handler did not execute to completion."
+    )

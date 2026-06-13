@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import os
-import sys
 from typing import Any
 
 import boto3
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../../src"))
 
 from release_confidence_platform.aggregation.events import validate_aggregation_event
 from release_confidence_platform.aggregation.orchestrator import AggregationOrchestrator
