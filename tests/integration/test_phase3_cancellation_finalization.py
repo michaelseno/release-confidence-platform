@@ -326,9 +326,9 @@ def test_gate_failure_on_handle_returns_gate_failure_response_not_exception():
     )
     result = handler.handle(finalization_event())
     assert result["status"] == "gate_failure"
-    assert result["lifecycle_state"] == "FINALIZING"
-    # RUNNING->FINALIZING transition completed; gate blocked COMPLETED; audit stays FINALIZING
-    assert repo.audit["lifecycle_state"] == "FINALIZING"
+    assert result["lifecycle_state"] == "FAILED"
+    # RUNNING->FINALIZING transition completed; gate failure transitions audit to FAILED
+    assert repo.audit["lifecycle_state"] == "FAILED"
 
 
 def test_gate_failure_on_retry_path_returns_gate_failure_response():
@@ -344,8 +344,75 @@ def test_gate_failure_on_retry_path_returns_gate_failure_response():
     )
     result = handler.handle(finalization_event())
     assert result["status"] == "gate_failure"
-    assert result["lifecycle_state"] == "FINALIZING"
-    assert repo.audit["lifecycle_state"] == "FINALIZING"
+    assert result["lifecycle_state"] == "FAILED"
+    assert repo.audit["lifecycle_state"] == "FAILED"
+
+
+def test_gate_failure_transitions_to_failed_not_stuck_in_finalizing():
+    """After gate failure, audit must reach FAILED — never permanently stuck in FINALIZING.
+
+    Primary regression guard for the Phase 3 lifecycle determinism fix.
+    """
+    repo = Repo(executions=1)
+    handler = AuditFinalizationHandler(
+        repository=repo,
+        s3_storage=GateFailingS3(),
+    )
+    result = handler.handle(finalization_event())
+    assert result["status"] == "gate_failure"
+    assert result["lifecycle_state"] == "FAILED"
+    assert repo.audit["lifecycle_state"] == "FAILED"
+    states = [entry["to_state"] for entry in repo.audit["lifecycle_history"]]
+    assert states == ["FINALIZING", "FAILED"], f"Expected [FINALIZING, FAILED], got {states}"
+
+
+def test_gate_failure_on_retry_transitions_to_failed():
+    """Retry path (FINALIZING with existing metadata) must also transition to FAILED on gate failure."""
+    repo = Repo(state="FINALIZING", executions=1)
+    repo.audit["finalization"] = {
+        "execution_count": 1,
+        "schedule_occurrence_id": "finalization#2026-05-21T00:00:00Z",
+    }
+    handler = AuditFinalizationHandler(
+        repository=repo,
+        s3_storage=GateFailingS3(),
+    )
+    result = handler.handle(finalization_event())
+    assert result["status"] == "gate_failure"
+    assert result["lifecycle_state"] == "FAILED"
+    assert repo.audit["lifecycle_state"] == "FAILED"
+    states = [entry["to_state"] for entry in repo.audit["lifecycle_history"]]
+    assert states == ["FAILED"], f"Expected [FAILED], got {states}"
+
+
+def test_started_run_at_window_close_gate_failure_terminates_to_failed():
+    """Audit with one STARTED run at finalization time must reach FAILED, not stay in FINALIZING.
+
+    Directly reproduces the escalation scenario: a run in-flight at audit_window.end_time
+    causes gate Check 2 (NO_ORPHANED_STARTED_RECORDS) to fail. The audit must deterministically
+    exit FINALIZING to FAILED.
+    """
+    run_records = [
+        {"run_id": "run-completed-1", "status": "COMPLETED"},
+        {"run_id": "run-started-1", "status": "STARTED"},
+    ]
+    repo = Repo(executions=1, run_records=run_records)
+
+    class PartialS3:
+        def list_raw_evidence_keys(self, client_id, audit_id):  # noqa: ARG002
+            return [f"raw-results/{client_id}/{audit_id}/run-completed-1/results.json"]
+
+    handler = AuditFinalizationHandler(
+        repository=repo,
+        s3_storage=PartialS3(),
+    )
+    result = handler.handle(finalization_event())
+    assert result["status"] == "gate_failure"
+    assert result["lifecycle_state"] == "FAILED"
+    assert repo.audit["lifecycle_state"] == "FAILED"
+    states = [entry["to_state"] for entry in repo.audit["lifecycle_history"]]
+    assert "FINALIZING" in states
+    assert states[-1] == "FAILED", f"Final state must be FAILED, got {states}"
 
 
 def test_cancellation_cleanup_errors_recorded_but_cancelled():

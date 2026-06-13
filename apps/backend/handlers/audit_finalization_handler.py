@@ -134,9 +134,15 @@ class AuditFinalizationHandler:
                 execution_count=execution_count,
                 reason="finalization_completed",
             )
-        except FinalizationGateError:
+        except FinalizationGateError as exc:
+            self._fail_gate_failure_finalization(
+                validated,
+                expected_current_state=LIFECYCLE_STATE_FINALIZING,
+                reason="evidence_integrity_gate_failure",
+                gate_payload=exc.payload,
+            )
             return self._response(
-                validated, status="gate_failure", lifecycle_state=LIFECYCLE_STATE_FINALIZING
+                validated, status="gate_failure", lifecycle_state=LIFECYCLE_STATE_FAILED
             )
         self._trigger_aggregation_after_finalization(validated)
         return self._response(
@@ -156,9 +162,15 @@ class AuditFinalizationHandler:
                     execution_count=existing_execution_count,
                     reason="finalization_retry_completed",
                 )
-            except FinalizationGateError:
+            except FinalizationGateError as exc:
+                self._fail_gate_failure_finalization(
+                    event,
+                    expected_current_state=LIFECYCLE_STATE_FINALIZING,
+                    reason="evidence_integrity_gate_failure",
+                    gate_payload=exc.payload,
+                )
                 return self._response(
-                    event, status="gate_failure", lifecycle_state=LIFECYCLE_STATE_FINALIZING
+                    event, status="gate_failure", lifecycle_state=LIFECYCLE_STATE_FAILED
                 )
             self._trigger_aggregation_after_finalization(event)
             return self._response(
@@ -289,6 +301,41 @@ class AuditFinalizationHandler:
             "auditFinalization_failed_zero_executions",
             event,
             execution_count=execution_count,
+            previous_state=expected_current_state,
+            next_state=LIFECYCLE_STATE_FAILED,
+            reason=reason,
+            status="failed",
+        )
+
+    def _fail_gate_failure_finalization(
+        self,
+        event: dict[str, Any],
+        *,
+        expected_current_state: str,
+        reason: str,
+        gate_payload: dict[str, Any],
+    ) -> None:
+        self.lifecycle.transition(
+            LifecycleTransition(
+                client_id=event["client_id"],
+                audit_id=event["audit_id"],
+                expected_current_state=expected_current_state,
+                next_state=LIFECYCLE_STATE_FAILED,
+                reason=reason,
+                actor="finalization_handler",
+                metadata={
+                    "gate_failure": True,
+                    "failed_checks": [
+                        fc.get("check", "<unknown>")
+                        for fc in gate_payload.get("failedChecks", [])
+                    ],
+                },
+            )
+        )
+        self._log_finalization(
+            "auditFinalization_failed_gate_failure",
+            event,
+            execution_count=None,
             previous_state=expected_current_state,
             next_state=LIFECYCLE_STATE_FAILED,
             reason=reason,

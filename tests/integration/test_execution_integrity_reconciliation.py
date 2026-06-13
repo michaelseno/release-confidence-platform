@@ -133,14 +133,14 @@ def test_c01_finalization_blocked_when_started_run_exists():
 
     result = _make_handler(repo, s3).handle(_finalization_event())
 
-    # Handler catches FinalizationGateError and returns gate_failure response
+    # Handler catches FinalizationGateError, transitions to FAILED, returns gate_failure response
     assert result["status"] == "gate_failure"
-    assert result["lifecycle_state"] == "FINALIZING"
+    assert result["lifecycle_state"] == "FAILED"
 
     # Lifecycle must NOT have reached COMPLETED
     states = [e["to_state"] for e in repo.audit["lifecycle_history"]]
     assert "COMPLETED" not in states, f"COMPLETED must not appear in history: {states}"
-    assert repo.audit["lifecycle_state"] != "COMPLETED"
+    assert repo.audit["lifecycle_state"] == "FAILED"
 
 
 # ---------------------------------------------------------------------------
@@ -162,9 +162,9 @@ def test_c02_finalization_blocked_when_terminal_run_has_no_s3_evidence():
 
     result = _make_handler(repo, s3).handle(_finalization_event())
 
-    # Handler catches FinalizationGateError and returns gate_failure response
+    # Handler catches FinalizationGateError, transitions to FAILED, returns gate_failure response
     assert result["status"] == "gate_failure"
-    assert result["lifecycle_state"] == "FINALIZING"
+    assert result["lifecycle_state"] == "FAILED"
 
     states = [e["to_state"] for e in repo.audit["lifecycle_history"]]
     assert "COMPLETED" not in states
@@ -189,9 +189,9 @@ def test_c03_finalization_blocked_when_counter_exceeds_terminal_run_count():
 
     result = _make_handler(repo, s3).handle(_finalization_event())
 
-    # Handler catches FinalizationGateError and returns gate_failure response
+    # Handler catches FinalizationGateError, transitions to FAILED, returns gate_failure response
     assert result["status"] == "gate_failure"
-    assert result["lifecycle_state"] == "FINALIZING"
+    assert result["lifecycle_state"] == "FAILED"
 
     states = [e["to_state"] for e in repo.audit["lifecycle_history"]]
     assert "COMPLETED" not in states
@@ -217,9 +217,9 @@ def test_c04_finalization_blocked_when_counter_below_terminal_run_count():
 
     result = _make_handler(repo, s3).handle(_finalization_event())
 
-    # Handler catches FinalizationGateError and returns gate_failure response
+    # Handler catches FinalizationGateError, transitions to FAILED, returns gate_failure response
     assert result["status"] == "gate_failure"
-    assert result["lifecycle_state"] == "FINALIZING"
+    assert result["lifecycle_state"] == "FAILED"
 
     states = [e["to_state"] for e in repo.audit["lifecycle_history"]]
     assert "COMPLETED" not in states
@@ -299,14 +299,14 @@ def test_er02_incident_scenario_orphaned_started_run_blocks_completed():
 
     result = _make_handler(repo, s3).handle(_finalization_event())
 
-    # Handler catches FinalizationGateError and returns gate_failure response
+    # Handler catches FinalizationGateError, transitions to FAILED, returns gate_failure response
     assert result["status"] == "gate_failure"
-    assert result["lifecycle_state"] == "FINALIZING"
+    assert result["lifecycle_state"] == "FAILED"
 
     # Lifecycle must NOT have reached COMPLETED
     states = [e["to_state"] for e in repo.audit["lifecycle_history"]]
     assert "COMPLETED" not in states, f"COMPLETED must not appear in history: {states}"
-    assert repo.audit["lifecycle_state"] != "COMPLETED"
+    assert repo.audit["lifecycle_state"] == "FAILED"
 
 
 # ---------------------------------------------------------------------------
@@ -335,9 +335,9 @@ def test_retry_path_gate_also_blocks_when_started_run_exists():
 
     result = _make_handler(repo, s3).handle(_finalization_event())
 
-    # Handler catches FinalizationGateError and returns gate_failure response
+    # Handler catches FinalizationGateError, transitions to FAILED, returns gate_failure response
     assert result["status"] == "gate_failure"
-    assert result["lifecycle_state"] == "FINALIZING"
+    assert result["lifecycle_state"] == "FAILED"
 
     states = [e["to_state"] for e in repo.audit["lifecycle_history"]]
     assert "COMPLETED" not in states
