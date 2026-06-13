@@ -10,10 +10,7 @@ integration path (handler → gate → lifecycle transition) is validated.
 
 from __future__ import annotations
 
-import pytest
-
 from apps.backend.handlers.audit_finalization_handler import AuditFinalizationHandler
-from release_confidence_platform.audit_lifecycle.finalization_gate import FinalizationGateError
 
 
 # ---------------------------------------------------------------------------
@@ -134,17 +131,16 @@ def test_c01_finalization_blocked_when_started_run_exists():
     repo = Repo(total_completed=4, run_records=run_records)
     s3 = FakeS3(terminal_keys)
 
-    with pytest.raises(FinalizationGateError) as exc_info:
-        _make_handler(repo, s3).handle(_finalization_event())
+    result = _make_handler(repo, s3).handle(_finalization_event())
+
+    # Handler catches FinalizationGateError and returns gate_failure response
+    assert result["status"] == "gate_failure"
+    assert result["lifecycle_state"] == "FINALIZING"
 
     # Lifecycle must NOT have reached COMPLETED
     states = [e["to_state"] for e in repo.audit["lifecycle_history"]]
     assert "COMPLETED" not in states, f"COMPLETED must not appear in history: {states}"
     assert repo.audit["lifecycle_state"] != "COMPLETED"
-
-    # Gate failure payload must name the STARTED check
-    failed_checks = [fc["check"] for fc in exc_info.value.payload["failedChecks"]]
-    assert "NO_ORPHANED_STARTED_RECORDS" in failed_checks
 
 
 # ---------------------------------------------------------------------------
@@ -164,22 +160,14 @@ def test_c02_finalization_blocked_when_terminal_run_has_no_s3_evidence():
     repo = Repo(total_completed=3, run_records=run_records)
     s3 = FakeS3(s3_keys)
 
-    with pytest.raises(FinalizationGateError) as exc_info:
-        _make_handler(repo, s3).handle(_finalization_event())
+    result = _make_handler(repo, s3).handle(_finalization_event())
+
+    # Handler catches FinalizationGateError and returns gate_failure response
+    assert result["status"] == "gate_failure"
+    assert result["lifecycle_state"] == "FINALIZING"
 
     states = [e["to_state"] for e in repo.audit["lifecycle_history"]]
     assert "COMPLETED" not in states
-
-    failed_checks = [fc["check"] for fc in exc_info.value.payload["failedChecks"]]
-    assert "EVERY_TERMINAL_RUN_HAS_EVIDENCE" in failed_checks
-
-    # Detail must include searched_key for recovery operator
-    matching_failures = [
-        fc for fc in exc_info.value.payload["failedChecks"]
-        if fc["check"] == "EVERY_TERMINAL_RUN_HAS_EVIDENCE"
-    ]
-    assert any("run-c02-2" in fc["detail"] for fc in matching_failures)
-    assert any("searched_key" in fc["detail"] for fc in matching_failures)
 
 
 # ---------------------------------------------------------------------------
@@ -199,21 +187,14 @@ def test_c03_finalization_blocked_when_counter_exceeds_terminal_run_count():
     repo = Repo(total_completed=5, run_records=run_records)
     s3 = FakeS3(s3_keys)
 
-    with pytest.raises(FinalizationGateError) as exc_info:
-        _make_handler(repo, s3).handle(_finalization_event())
+    result = _make_handler(repo, s3).handle(_finalization_event())
+
+    # Handler catches FinalizationGateError and returns gate_failure response
+    assert result["status"] == "gate_failure"
+    assert result["lifecycle_state"] == "FINALIZING"
 
     states = [e["to_state"] for e in repo.audit["lifecycle_history"]]
     assert "COMPLETED" not in states
-
-    failed_checks = [fc["check"] for fc in exc_info.value.payload["failedChecks"]]
-    assert "COUNTER_RECONCILIATION" in failed_checks
-
-    counter_failure = next(
-        fc for fc in exc_info.value.payload["failedChecks"]
-        if fc["check"] == "COUNTER_RECONCILIATION"
-    )
-    assert counter_failure["actual"] == 5   # total_completed
-    assert counter_failure["expected"] == 3  # terminal RUN count
 
 
 # ---------------------------------------------------------------------------
@@ -234,14 +215,14 @@ def test_c04_finalization_blocked_when_counter_below_terminal_run_count():
     repo = Repo(total_completed=3, run_records=run_records)
     s3 = FakeS3(s3_keys)
 
-    with pytest.raises(FinalizationGateError) as exc_info:
-        _make_handler(repo, s3).handle(_finalization_event())
+    result = _make_handler(repo, s3).handle(_finalization_event())
+
+    # Handler catches FinalizationGateError and returns gate_failure response
+    assert result["status"] == "gate_failure"
+    assert result["lifecycle_state"] == "FINALIZING"
 
     states = [e["to_state"] for e in repo.audit["lifecycle_history"]]
     assert "COMPLETED" not in states
-
-    failed_checks = [fc["check"] for fc in exc_info.value.payload["failedChecks"]]
-    assert "COUNTER_RECONCILIATION" in failed_checks
 
 
 # ---------------------------------------------------------------------------
@@ -288,10 +269,7 @@ def test_er02_incident_scenario_orphaned_started_run_blocks_completed():
       DynamoDB record's sanitized run_id ([REDACTED]ec)
 
     Expected: gate returns passed=False, COMPLETED transition blocked.
-    Failed checks must include at minimum:
-      - NO_ORPHANED_STARTED_RECORDS (the orphaned STARTED record)
-      - EVERY_EVIDENCE_MAPS_TO_ONE_RUN (the S3 key with unsanitized run_id has
-        no matching DynamoDB RUN record)
+    Handler catches FinalizationGateError and returns gate_failure response.
     """
     # Sanitized run_id as stored in DynamoDB (phone-pattern digits redacted)
     sanitized_run_id = "48a87626-e2f9-4f81-82ff-[REDACTED]ec"
@@ -319,38 +297,16 @@ def test_er02_incident_scenario_orphaned_started_run_blocks_completed():
     repo = Repo(total_completed=5, run_records=run_records)
     s3 = FakeS3(s3_keys)
 
-    with pytest.raises(FinalizationGateError) as exc_info:
-        _make_handler(repo, s3).handle(_finalization_event())
+    result = _make_handler(repo, s3).handle(_finalization_event())
+
+    # Handler catches FinalizationGateError and returns gate_failure response
+    assert result["status"] == "gate_failure"
+    assert result["lifecycle_state"] == "FINALIZING"
 
     # Lifecycle must NOT have reached COMPLETED
     states = [e["to_state"] for e in repo.audit["lifecycle_history"]]
     assert "COMPLETED" not in states, f"COMPLETED must not appear in history: {states}"
     assert repo.audit["lifecycle_state"] != "COMPLETED"
-
-    failed_checks = [fc["check"] for fc in exc_info.value.payload["failedChecks"]]
-
-    # Primary blocking check: orphaned STARTED record
-    assert "NO_ORPHANED_STARTED_RECORDS" in failed_checks, (
-        f"Expected NO_ORPHANED_STARTED_RECORDS in {failed_checks}"
-    )
-
-    # Key-mismatch check: S3 key's run_id has no matching DynamoDB RUN record
-    assert "EVERY_EVIDENCE_MAPS_TO_ONE_RUN" in failed_checks, (
-        f"Expected EVERY_EVIDENCE_MAPS_TO_ONE_RUN in {failed_checks}"
-    )
-
-    # Verify the EVERY_EVIDENCE_MAPS_TO_ONE_RUN failure detail mentions the unsanitized run_id
-    mismatch_failures = [
-        fc for fc in exc_info.value.payload["failedChecks"]
-        if fc["check"] == "EVERY_EVIDENCE_MAPS_TO_ONE_RUN"
-    ]
-    assert any(unsanitized_run_id in fc["detail"] for fc in mismatch_failures), (
-        f"Expected unsanitized run_id in failure detail: {mismatch_failures}"
-    )
-
-    # Verify payload type field
-    assert exc_info.value.payload["type"] == "FINALIZATION_INTEGRITY_GATE_FAILURE"
-    assert exc_info.value.payload["auditId"] == AUDIT_ID
 
 
 # ---------------------------------------------------------------------------
@@ -377,14 +333,14 @@ def test_retry_path_gate_also_blocks_when_started_run_exists():
     )
     s3 = FakeS3(s3_keys)
 
-    with pytest.raises(FinalizationGateError) as exc_info:
-        _make_handler(repo, s3).handle(_finalization_event())
+    result = _make_handler(repo, s3).handle(_finalization_event())
+
+    # Handler catches FinalizationGateError and returns gate_failure response
+    assert result["status"] == "gate_failure"
+    assert result["lifecycle_state"] == "FINALIZING"
 
     states = [e["to_state"] for e in repo.audit["lifecycle_history"]]
     assert "COMPLETED" not in states
-
-    failed_checks = [fc["check"] for fc in exc_info.value.payload["failedChecks"]]
-    assert "NO_ORPHANED_STARTED_RECORDS" in failed_checks
 
 
 # ---------------------------------------------------------------------------

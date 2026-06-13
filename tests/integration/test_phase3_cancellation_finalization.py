@@ -310,6 +310,44 @@ def test_finalization_retry_from_finalizing_with_zero_metadata_fails():
     assert [entry["to_state"] for entry in repo.audit["lifecycle_history"]] == ["FAILED"]
 
 
+class GateFailingS3:
+    """S3 stub that returns no evidence keys, causing gate Check 3/4 failure."""
+
+    def list_raw_evidence_keys(self, client_id, audit_id):  # noqa: ARG002
+        return []
+
+
+def test_gate_failure_on_handle_returns_gate_failure_response_not_exception():
+    """FinalizationGateError must be caught and returned as gate_failure, not re-raised."""
+    repo = Repo(executions=1)  # Has 1 COMPLETED run record but GateFailingS3 returns no S3 keys
+    handler = AuditFinalizationHandler(
+        repository=repo,
+        s3_storage=GateFailingS3(),
+    )
+    result = handler.handle(finalization_event())
+    assert result["status"] == "gate_failure"
+    assert result["lifecycle_state"] == "FINALIZING"
+    # RUNNING->FINALIZING transition completed; gate blocked COMPLETED; audit stays FINALIZING
+    assert repo.audit["lifecycle_state"] == "FINALIZING"
+
+
+def test_gate_failure_on_retry_path_returns_gate_failure_response():
+    """Retry path (FINALIZING with existing metadata) must also catch FinalizationGateError."""
+    repo = Repo(state="FINALIZING", executions=1)
+    repo.audit["finalization"] = {
+        "execution_count": 1,
+        "schedule_occurrence_id": "finalization#2026-05-21T00:00:00Z",
+    }
+    handler = AuditFinalizationHandler(
+        repository=repo,
+        s3_storage=GateFailingS3(),
+    )
+    result = handler.handle(finalization_event())
+    assert result["status"] == "gate_failure"
+    assert result["lifecycle_state"] == "FINALIZING"
+    assert repo.audit["lifecycle_state"] == "FINALIZING"
+
+
 def test_cancellation_cleanup_errors_recorded_but_cancelled():
     repo = Repo(state="SCHEDULED")
     result = AuditCancellationService(

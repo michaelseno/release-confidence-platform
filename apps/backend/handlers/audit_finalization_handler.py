@@ -126,13 +126,18 @@ class AuditFinalizationHandler:
                 validated, status="failed", lifecycle_state=LIFECYCLE_STATE_FAILED
             )
 
-        self._complete_finalization(
-            validated,
-            audit=audit,
-            expected_current_state=LIFECYCLE_STATE_FINALIZING,
-            execution_count=execution_count,
-            reason="finalization_completed",
-        )
+        try:
+            self._complete_finalization(
+                validated,
+                audit=audit,
+                expected_current_state=LIFECYCLE_STATE_FINALIZING,
+                execution_count=execution_count,
+                reason="finalization_completed",
+            )
+        except FinalizationGateError:
+            return self._response(
+                validated, status="gate_failure", lifecycle_state=LIFECYCLE_STATE_FINALIZING
+            )
         self._trigger_aggregation_after_finalization(validated)
         return self._response(
             validated, status="completed", lifecycle_state=LIFECYCLE_STATE_COMPLETED
@@ -143,13 +148,18 @@ class AuditFinalizationHandler:
     ) -> dict[str, Any]:
         existing_execution_count = _finalization_execution_count(audit)
         if existing_execution_count and existing_execution_count > 0:
-            self._complete_finalization(
-                event,
-                audit=audit,
-                expected_current_state=LIFECYCLE_STATE_FINALIZING,
-                execution_count=existing_execution_count,
-                reason="finalization_retry_completed",
-            )
+            try:
+                self._complete_finalization(
+                    event,
+                    audit=audit,
+                    expected_current_state=LIFECYCLE_STATE_FINALIZING,
+                    execution_count=existing_execution_count,
+                    reason="finalization_retry_completed",
+                )
+            except FinalizationGateError:
+                return self._response(
+                    event, status="gate_failure", lifecycle_state=LIFECYCLE_STATE_FINALIZING
+                )
             self._trigger_aggregation_after_finalization(event)
             return self._response(
                 event, status="completed", lifecycle_state=LIFECYCLE_STATE_COMPLETED
