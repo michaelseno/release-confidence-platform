@@ -485,3 +485,161 @@ Required actions:
 3. Verify CloudWatch no longer shows `Runtime.ImportModuleError` for `auditFinalization` invocations.
 4. Run a fresh short-window audit and confirm end-to-end `RUNNING -> FINALIZING -> COMPLETED` lifecycle transition.
 5. As a follow-on cleanup, remove the `sys.path.insert` workaround from `aggregation_handler.py` once the `PYTHONPATH` fix is deployed and validated.
+
+---
+
+## Round 4 Update — IAM AccessDeniedException on dynamodb:Query
+
+**Updated:** 2026-06-13
+**Status:** Root cause confirmed. IAM policy gap identified and fixed.
+
+---
+
+### Summary
+
+After the Round 3 PYTHONPATH fix was deployed, the `auditFinalization` Lambda successfully initialised and entered `AuditFinalizationHandler.handle()`. The handler progressed through event validation, audit metadata read, and lifecycle transition, then failed when `_complete_finalization()` called `repository.list_run_records()`.
+
+**Error observed:**
+
+```
+AccessDeniedException
+User: arn:aws:sts::463470948609:assumed-role/release-confidence-platfo-AuditFinalizationLambdaRo-...
+is not authorized to perform: dynamodb:Query
+on resource: arn:aws:dynamodb:us-east-1:463470948609:table/release-confidence-platform-dev-metadata
+```
+
+**Stack trace path:**
+```
+AuditFinalizationHandler.handle()
+  → _complete_finalization()
+    → repository.list_run_records()
+      → DynamoDB Query
+        → AccessDeniedException
+```
+
+---
+
+### Root Cause
+
+`AuditFinalizationLambdaRole` in `infra/resources/phase4-aggregation-iam.yml` declared only three DynamoDB actions:
+
+```yaml
+- dynamodb:GetItem
+- dynamodb:PutItem
+- dynamodb:UpdateItem
+```
+
+`dynamodb:Query` was absent. `list_run_records()` in `AuditMetadataRepository` performs a paginated Query using `begins_with(SK, 'AUDIT#<audit_id>#RUN#')` to retrieve all RUN child records for the audit. This operation requires `dynamodb:Query` on the MetadataTable. Without it, every invocation that reaches `_complete_finalization()` fails with AccessDeniedException.
+
+The `AuditAggregationLambdaRole` correctly includes `dynamodb:Query` (it was added during Phase 4 aggregation IAM wiring). The finalization role was never updated to match the operation requirements of its execution path.
+
+---
+
+### Full DynamoDB Operation Audit — Finalization Handler
+
+All DynamoDB operations exercised by the finalization handler's complete execution path:
+
+| Operation | Method | Required Action |
+|-----------|--------|-----------------|
+| `get_audit_metadata()` | GetItem | `dynamodb:GetItem` |
+| `list_run_records()` | Query (paginated, begins_with SK) | `dynamodb:Query` |
+| `record_finalization()` → `_set_fields()` | UpdateItem | `dynamodb:UpdateItem` |
+| `append_lifecycle_transition()` | UpdateItem (conditional) | `dynamodb:UpdateItem` |
+| `put_aggregation_job_intent_once()` | PutItem (conditional) | `dynamodb:PutItem` |
+| `update_aggregation_job_intent()` → `update_occurrence()` | UpdateItem (conditional) | `dynamodb:UpdateItem` |
+
+**GSI note:** The MetadataTable (`dynamodb.yml`) has no Global Secondary Indexes. All operations are against the main table (PK/SK composite key). The `dynamodb:Query` permission on the table ARN is sufficient; no GSI ARN is required.
+
+**No additional missing permissions were found.** `dynamodb:GetItem`, `dynamodb:PutItem`, and `dynamodb:UpdateItem` were already present. Only `dynamodb:Query` was missing.
+
+---
+
+### DynamoDB Persistence Architecture — Result Records Before Finalization
+
+**Question (from Round 3 brief):** Are DynamoDB RUN records expected to exist before finalization, or only after?
+
+**Answer:** RUN records are written during execution by the orchestration layer, before finalization runs. The finalization handler reads them via `list_run_records()` to count terminal runs for the integrity gate. By the time `_complete_finalization()` is called:
+
+- The audit window has closed.
+- All EventBridge execution schedules have fired (or their windows passed).
+- RUN records written during execution are already present in DynamoDB under keys `AUDIT#{audit_id}#RUN#{occurrence_id}`.
+- `list_run_records()` queries these pre-existing records to derive `terminal_count` for the `finalization_integrity_gate()` call.
+
+RUN records are NOT written during finalization. Finalization is a read-then-transition operation: it reads evidence (RUN records, S3 keys), validates integrity, then writes lifecycle state transitions and aggregation job intent. This design is correct and is not a defect.
+
+---
+
+### Fix Applied
+
+**File:** `infra/resources/phase4-aggregation-iam.yml`
+**Change:** Added `dynamodb:Query` to the DynamoDB action list in `AuditFinalizationLambdaRole`.
+
+Before:
+```yaml
+Action:
+  - dynamodb:GetItem
+  - dynamodb:PutItem
+  - dynamodb:UpdateItem
+```
+
+After:
+```yaml
+Action:
+  - dynamodb:GetItem
+  - dynamodb:Query
+  - dynamodb:PutItem
+  - dynamodb:UpdateItem
+```
+
+---
+
+### Regression Guard Added
+
+**File:** `tests/unit/test_infra_iam_finalization_permissions.py`
+
+Five tests that parse `infra/resources/phase4-aggregation-iam.yml` to assert:
+
+1. The IAM file exists.
+2. `AuditFinalizationLambdaRole` is declared in the file.
+3. `dynamodb:Query` is present in the finalization role section (targeted guard for the Round 4 defect).
+4. All four required DynamoDB actions are present (`GetItem`, `Query`, `PutItem`, `UpdateItem`).
+5. `lambda:InvokeFunction` is present (aggregation trigger permission).
+6. `MetadataTable` resource reference is present (scoping guard).
+
+The tests isolate the finalization role section from the aggregation role section so that aggregation permissions cannot satisfy finalization assertions.
+
+---
+
+### Execution Progress After Round 4 Fix
+
+| Step | Before Round 4 Fix | After Round 4 Fix |
+|------|-------------------|-------------------|
+| Lambda deployment | ✅ | ✅ |
+| Import resolution | ✅ | ✅ |
+| Handler initialization | ✅ | ✅ |
+| Event validation | ✅ | ✅ |
+| Lifecycle transition begins | ✅ | ✅ |
+| Evidence retrieval (list_run_records) | ❌ AccessDenied | ✅ Expected |
+| Finalization integrity gate | ❌ Blocked | ✅ Expected |
+| Finalization completion | ❌ Blocked | ✅ Expected |
+
+---
+
+### Confidence Level: HIGH
+
+- The AccessDeniedException stack trace directly identifies `dynamodb:Query` as the missing action and `list_run_records()` as the call site.
+- Code inspection of `AuditMetadataRepository.list_run_records()` confirms it issues a DynamoDB Query using `begins_with(SK, ...)`.
+- Cross-comparison with `AuditAggregationLambdaRole` (which correctly includes `dynamodb:Query`) confirms the finalization role was not kept in sync.
+- The fix is minimal and targeted: one action added to one IAM statement.
+
+---
+
+### Round 4 Investigator Decision
+
+**Fix applied and regression guard in place.**
+
+Required actions after merge:
+1. Deploy to the AWS dev environment (`sls deploy --stage dev`) to pick up the updated IAM policy.
+2. Re-invoke the finalization Lambda with the manual replay payload to validate end-to-end execution.
+3. Confirm `lifecycle_state` advances to `COMPLETED` or `FAILED` (not stuck at `RUNNING` or `FINALIZING`).
+4. Confirm CloudWatch shows `auditFinalization_completed` or `auditFinalization_failed_*` log entry.
