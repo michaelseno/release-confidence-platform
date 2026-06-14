@@ -585,3 +585,163 @@ No previously passing test regressed.
 [QA SIGN-OFF APPROVED]
 
 The IAM `dynamodb:Query` gap in `AuditFinalizationLambdaRole` is the confirmed root cause of the Round 4 AccessDeniedException. The fix is minimal (one action added to one IAM statement), the full DynamoDB operation audit confirms no other permissions are missing, and 6 new regression guard tests prevent future IAM drift from reaching production silently. All 428 tests pass. The fix requires a `sls deploy --stage dev` to take effect in the AWS environment.
+
+---
+
+## Round 6 QA Update
+
+**Date:** 2026-06-14
+**Round:** 6 of HITL iteration on `bugfix/phase3-running-after-window-rca-v2`
+**Prior suite count:** 440 passed (Rounds 1-5 cumulative)
+**This round suite count:** 451 passed
+**Validation evidence:** audit_id `audit_20260614_9274a028`, client_id `client_rca_fix_v5_cf04e89f`
+
+---
+
+### R6.1 Positive Outcome from Round 5
+
+Round 5 fixes confirmed working in the live environment:
+- Finalization lifecycle reached `COMPLETED` for the first time end-to-end.
+- `lifecycle_state: COMPLETED` confirmed on the validation audit at `updated_at: 2026-06-14T11:34:53.877026Z`.
+
+### R6.2 Root Cause — Aggregation Trigger AttributeError
+
+**Error (runtime):**
+```
+AttributeError: 'AuditMetadataRepository' object has no attribute 'aggregation_job_keys'
+```
+
+**Location:** `apps/backend/handlers/audit_finalization_handler.py` line 437, method `_trigger_aggregation_after_finalization`.
+
+**Root cause:** The three aggregation methods — `aggregation_job_keys`, `put_aggregation_job_intent_once`, `update_aggregation_job_intent` — were added to the canonical `src/release_confidence_platform/storage/audit_metadata_client.py` but never backported to `packages/storage/audit_metadata_client.py`. The Lambda handler imports `AuditMetadataRepository` from `packages.storage.audit_metadata_client` (line 27), so it resolved to the older, incomplete class at runtime.
+
+**Test gap:** All integration tests that exercise `_trigger_aggregation_after_finalization` use hand-written stub repositories (e.g., `_SimpleRepo` in `tests/integration/test_phase3_lifecycle_determinism_regression.py`) that manually define the three aggregation methods. These stubs satisfied the attribute lookup at test time, concealing the gap on the real class. No test ever instantiated `packages.storage.audit_metadata_client.AuditMetadataRepository` and called `_trigger_aggregation_after_finalization` through it.
+
+**Lifecycle correctness:** Finalization correctly transitions to `COMPLETED` BEFORE the aggregation trigger (inside `_complete_finalization`). The aggregation trigger is best-effort for the lifecycle: a trigger failure logs `auditFinalization_aggregation_trigger_failed` and records the failure in the job intent record, but does NOT roll back the COMPLETED state. The aggregation trigger is required for the end-to-end platform chain (no trigger → no aggregation → no release confidence report).
+
+---
+
+### R6.3 Fix Applied
+
+**File:** `packages/storage/audit_metadata_client.py`
+
+Three methods added at lines 36-46:
+
+```python
+def aggregation_job_keys(self, client_id: str, audit_id: str, job_id: str) -> dict[str, str]:
+    return {"PK": f"CLIENT#{client_id}", "SK": f"AUDIT#{audit_id}#AGGJOB#{job_id}"}
+
+def put_aggregation_job_intent_once(self, item: dict[str, Any]) -> None:
+    self._put_conditional(
+        item,
+        error=StorageError("Aggregation job intent exists", "AGGREGATION_JOB_INTENT_EXISTS"),
+    )
+
+def update_aggregation_job_intent(self, key: dict[str, str], updates: dict[str, Any]) -> None:
+    self.update_occurrence(key, updates)
+```
+
+No other files changed. The fix is purely additive — no existing logic was modified. The `packages/` version's `_put_conditional` and `update_occurrence` methods already exist and are compatible with these new callers.
+
+**Verified:**
+```
+grep -n "aggregation_job_keys\|put_aggregation_job_intent_once\|update_aggregation_job_intent" \
+  packages/storage/audit_metadata_client.py
+36:    def aggregation_job_keys(...)
+39:    def put_aggregation_job_intent_once(...)
+45:    def update_aggregation_job_intent(...)
+```
+
+---
+
+### R6.4 Regression Test Added
+
+**File:** `tests/unit/test_aggregation_trigger_real_repository_wiring.py` (new file)
+
+11 tests across 4 test classes:
+
+| Class | Tests |
+|-------|-------|
+| `TestAggregationJobKeysOnRealRepository` | 2 — key shape and type correctness |
+| `TestPutAggregationJobIntentOnceOnRealRepository` | 2 — stores item, raises StorageError on duplicate |
+| `TestUpdateAggregationJobIntentOnRealRepository` | 1 — delegates to update_occurrence |
+| `TestTriggerAggregationAfterFinalizationWithRealRepository` | 6 — no AttributeError without invoker; intent written; INVOCATION_REQUESTED; ACCEPTED status; FAILED on invoke error; real class isinstance assertion |
+
+**Critical property:** Every test in this file uses the REAL `AuditMetadataRepository` class imported from `packages.storage.audit_metadata_client` backed by an in-memory DynamoDB fake — no stub repositories, no `MagicMock()` with auto-attribute creation. If `aggregation_job_keys`, `put_aggregation_job_intent_once`, or `update_aggregation_job_intent` are ever removed from the real class, these tests immediately raise `AttributeError` (the same error that surfaced in production), blocking CI.
+
+---
+
+### R6.5 RCA Document
+
+**File:** `docs/bugs/phase3_phase4_aggregation_trigger_attribute_error.md`
+
+Documents: defect title, severity (HIGH), component, error, root cause, validation evidence, fix, test gap analysis, regression test requirement.
+
+---
+
+### R6.6 Test Execution Evidence
+
+**Command:** `.venv/bin/pytest --tb=short -q`
+
+```
+451 passed in 1.07s
+```
+
+| Metric | Value |
+|--------|-------|
+| Total tests | 451 |
+| Passed | 451 |
+| Failed | 0 |
+| Errors | 0 |
+| New tests added this round | 11 |
+| Prior suite count (Round 5) | 440 |
+| Delta | +11 |
+| All prior tests preserved | Yes — zero regressions |
+
+---
+
+### R6.7 Regression Check
+
+| Test area | Round 5 count | Round 6 count | Delta | Result |
+|-----------|--------------|----------------|-------|--------|
+| Full suite | 440 | 451 | +11 | No regressions |
+| `test_aggregation_trigger_real_repository_wiring.py` | 0 (new file) | 11 | +11 | PASS |
+| All prior test files | 440 | 440 | 0 | PASS |
+
+---
+
+### R6.8 Acceptance Criteria — Round 6
+
+| AC | Criterion | Result |
+|----|-----------|--------|
+| AC-R6-1 | Root cause identified as backport gap: packages/ missing 3 aggregation methods | CONFIRMED |
+| AC-R6-2 | `aggregation_job_keys` added to `packages/storage/audit_metadata_client.py` | PASS |
+| AC-R6-3 | `put_aggregation_job_intent_once` added to `packages/storage/audit_metadata_client.py` | PASS |
+| AC-R6-4 | `update_aggregation_job_intent` added to `packages/storage/audit_metadata_client.py` | PASS |
+| AC-R6-5 | Regression test uses real class from packages/ — no auto-mocking | PASS (11/11) |
+| AC-R6-6 | AttributeError cannot recur silently — CI blocks on missing method | CONFIRMED |
+| AC-R6-7 | Aggregation trigger best-effort: lifecycle stays COMPLETED on invoke failure | CONFIRMED |
+| AC-R6-8 | Full suite passes with no regressions | PASS (451/451) |
+| AC-R6-9 | RCA document written under docs/bugs/ | PASS |
+| AC-R6-10 | Prior validation evidence preserved (audit_20260614_9274a028) | CONFIRMED |
+
+---
+
+### R6.9 QA Decision — Round 6
+
+| Evidence | Outcome |
+|----------|---------|
+| Root cause confirmed: 3 aggregation methods missing from packages/ AuditMetadataRepository | CONFIRMED |
+| Fix: 3 methods added to packages/storage/audit_metadata_client.py (lines 36-46) | CONFIRMED |
+| No other files changed — purely additive fix | CONFIRMED |
+| 11 new regression tests using real class, no auto-mocking | 11/11 PASS |
+| CI now blocks on AttributeError if methods are removed | CONFIRMED |
+| Full suite | 451/451 PASS |
+| Blocking defects | None |
+| Regressions | None |
+| Unresolved failures | None |
+| Lifecycle correctness (COMPLETED before trigger) | CONFIRMED |
+
+[QA SIGN-OFF APPROVED]
+
+The aggregation trigger `AttributeError` is confirmed as a method backport gap between `src/` and `packages/`. The fix adds the three missing methods to `packages/storage/audit_metadata_client.py`. Eleven new regression tests use the real `AuditMetadataRepository` class from `packages/` — the same class the Lambda handler imports — backed by an in-memory DynamoDB fake, with no auto-attribute mock. Any future removal of these methods from the real class immediately blocks CI with `AttributeError`. All 451 tests pass. The fix requires a `sls deploy --stage dev` to take effect in the AWS environment.
