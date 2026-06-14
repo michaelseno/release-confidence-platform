@@ -643,3 +643,114 @@ Required actions after merge:
 2. Re-invoke the finalization Lambda with the manual replay payload to validate end-to-end execution.
 3. Confirm `lifecycle_state` advances to `COMPLETED` or `FAILED` (not stuck at `RUNNING` or `FINALIZING`).
 4. Confirm CloudWatch shows `auditFinalization_completed` or `auditFinalization_failed_*` log entry.
+
+---
+
+## Round 5 Update — EVERY_TERMINAL_RUN_HAS_EVIDENCE Gate Failure on FAILED Runs
+
+**Updated:** 2026-06-14
+**Branch:** `bugfix/phase3-running-after-window-rca-v2`
+**Status:** Three root causes confirmed and fixed.
+
+---
+
+### Summary
+
+After the Round 4 `dynamodb:Query` fix was deployed, the `auditFinalization` Lambda successfully retrieved RUN records and entered the integrity gate (`finalization_integrity_gate()`). However, the gate fails with `EVERY_TERMINAL_RUN_HAS_EVIDENCE` for every audit that contains FAILED run records — which is any audit where at least one scheduled execution raised an exception. In production, FAILED runs are common (network errors, assertion failures, timeout). The gate was therefore always blocking finalization for realistic audits.
+
+Three root causes were identified and fixed in this round:
+
+---
+
+### Root Cause 1 (PRIMARY — confirmed): Gate logic incorrect for FAILED runs
+
+**File:** `src/release_confidence_platform/audit_lifecycle/finalization_gate.py`, Check 3 (lines 166–184, pre-fix)
+
+**Problem:** Check 3 (`EVERY_TERMINAL_RUN_HAS_EVIDENCE`) iterated ALL terminal runs (COMPLETED + FAILED) and required each to have a corresponding S3 object at `raw-results/{client_id}/{audit_id}/{run_id}/results.json`. FAILED runs never write S3 evidence by design: the orchestrator writes the S3 result immediately before updating DynamoDB status to COMPLETED. Any exception on or before the S3 write produces a FAILED DynamoDB record with `raw_result_s3_key=None` and no S3 object. The gate treated this absence of S3 evidence as a failure even though it is the expected terminal state for a failed run.
+
+**Fix (Fix A):** Check 3 now skips any run whose `status != COMPLETED`. Only COMPLETED runs must have S3 evidence. The fail-closed behavior for COMPLETED runs is unchanged.
+
+**Files changed:**
+- `src/release_confidence_platform/audit_lifecycle/finalization_gate.py`: Added `RUN_STATUS_COMPLETED` import; revised Check 3 to skip non-COMPLETED runs with an inline comment explaining the design invariant.
+
+---
+
+### Root Cause 2 (CONFIRMED): `EVIDENCE_BUCKET` env var name mismatch
+
+**File:** `apps/backend/handlers/audit_finalization_handler.py`, line 601 (pre-fix)
+
+**Problem:** The `handler()` entrypoint read `os.environ.get("EVIDENCE_BUCKET")` to determine the S3 bucket name. The system-wide env var set in `provider.environment` of `infra/serverless.yml` is `RAW_RESULTS_BUCKET`, not `EVIDENCE_BUCKET`. The `auditFinalization` function's `environment` block in `serverless.yml` (lines 133–135) only sets `AGGREGATION_FUNCTION_NAME`; it inherits `RAW_RESULTS_BUCKET` from the provider but not `EVIDENCE_BUCKET` (which is never set anywhere in the deployment config). When `EVIDENCE_BUCKET` is unset, `s3_storage` is `None`, and `_complete_finalization()` returns `s3_keys = []`. The gate then runs with an empty S3 key list, causing all COMPLETED runs to fail the evidence check.
+
+**Fix (Fix B):** Line 601 now reads `os.environ.get("RAW_RESULTS_BUCKET")`. No change to `serverless.yml` required — `RAW_RESULTS_BUCKET` is already set globally by `provider.environment`.
+
+**Files changed:**
+- `apps/backend/handlers/audit_finalization_handler.py`: line 601, env var name corrected.
+
+---
+
+### Root Cause 3 (CONFIRMED): Missing S3 IAM permissions in `AuditFinalizationLambdaRole`
+
+**File:** `infra/resources/phase4-aggregation-iam.yml`, `AuditFinalizationLambdaRole` policy (pre-fix)
+
+**Problem:** `AuditFinalizationLambdaRole` had no S3 grants at all. The finalization handler calls `S3StorageClient.list_raw_evidence_keys()` (which issues `list_objects_v2`) inside `_complete_finalization()` to collect S3 evidence keys for the gate. Without `s3:ListBucket`, this call raises `AccessDenied` → `StorageError` → unhandled exception → gate never runs. Additionally, `s3:GetObject` and `s3:HeadObject` are required for any per-key verification the client performs.
+
+The `AuditAggregationLambdaRole` in the same file correctly includes `s3:ListBucket`, `s3:GetObject`, `s3:GetObjectVersion`, and `s3:HeadObject` on the results bucket. The finalization role was never updated to match.
+
+**Fix (Fix C):** Added two IAM statements to `AuditFinalizationLambdaRole`:
+1. `s3:ListBucket` on the bucket ARN with a `StringLike s3:prefix: raw-results/*` condition.
+2. `s3:GetObject` and `s3:HeadObject` on `<bucket>/raw-results/*`.
+
+**Files changed:**
+- `infra/resources/phase4-aggregation-iam.yml`: two S3 statements added to `AuditFinalizationLambdaRole` between the DynamoDB statement and the existing `lambda:InvokeFunction` statement.
+
+---
+
+### Regression Tests Added
+
+**New file:** `tests/unit/test_evidence_integrity_gate_failed_runs.py`
+
+Tests EIG-01 through EIG-06 (9 test functions):
+
+| ID | Scenario | Expected outcome |
+|----|----------|-----------------|
+| EIG-01 | COMPLETED run, S3 evidence present | Gate passes |
+| EIG-02 | COMPLETED run, S3 evidence absent | Gate fails (EVERY_TERMINAL_RUN_HAS_EVIDENCE) |
+| EIG-03 | FAILED run, no S3 evidence | Gate passes — FAILED runs are exempt |
+| EIG-04 | 3 COMPLETED (all with evidence) + 2 FAILED (no evidence) | Gate passes |
+| EIG-05 | 3 COMPLETED (2 with evidence, 1 without) + 2 FAILED | Gate fails on missing COMPLETED evidence only |
+| EIG-06a | IAM: `s3:ListBucket` in finalization role | IAM file assertion passes |
+| EIG-06b | IAM: `s3:GetObject` in finalization role | IAM file assertion passes |
+| EIG-06c | IAM: `s3:HeadObject` in finalization role | IAM file assertion passes |
+| EIG-06d | IAM: S3 resource scoped to `raw-results/*` | IAM file assertion passes |
+
+**Updated file:** `tests/unit/test_infra_iam_finalization_permissions.py`
+
+Three new tests added for the Round 5 S3 permission additions:
+- `test_audit_finalization_role_grants_s3_list_bucket`
+- `test_audit_finalization_role_grants_s3_get_object`
+- `test_audit_finalization_role_grants_s3_head_object`
+
+---
+
+### Confidence Level: HIGH
+
+All three root causes are confirmed by direct code inspection:
+
+1. **Root Cause 1:** The pre-fix gate code at lines 168–184 iterates `terminal_runs` unconditionally and checks S3 presence for every entry. FAILED runs are in `terminal_runs` (FAILED ∈ `_TERMINAL_RUN_STATUSES`). The orchestrator code path (`service.py` lines 630–636) confirms FAILED runs never write S3 evidence. The invariant mismatch is deterministic.
+
+2. **Root Cause 2:** Handler line 601 `os.environ.get("EVIDENCE_BUCKET")` is unambiguous. `serverless.yml` global `provider.environment` sets `RAW_RESULTS_BUCKET` at line 18 and `EVIDENCE_BUCKET` appears nowhere in `serverless.yml` or any resources file. When the env var is absent, `s3_storage = None`, and `_complete_finalization()` line 249–252 returns `s3_keys = []`. Empty key list → all COMPLETED runs fail Check 3.
+
+3. **Root Cause 3:** `phase4-aggregation-iam.yml` lines 1–43 (pre-fix) contain no S3 statements for `AuditFinalizationLambdaRole`. `AuditAggregationLambdaRole` at lines 43–93 has the correct S3 grants, confirming the design intent exists but was not mirrored to the finalization role.
+
+---
+
+### Round 5 Final Investigator Decision
+
+**Fixes applied. Regression tests in place.**
+
+Required actions after merge:
+1. Deploy to the AWS dev environment (`sls deploy --stage dev`) to pick up Fix C (IAM S3 grants).
+2. Re-invoke the finalization Lambda (or wait for the next audit window to close naturally).
+3. Confirm CloudWatch shows `auditFinalization_completed` (or `auditFinalization_failed_gate_failure` if data integrity is genuinely compromised — which should not occur for well-formed audits).
+4. Confirm `lifecycle_state` in DynamoDB advances to `COMPLETED`.
+5. Run `pytest tests/unit/test_evidence_integrity_gate_failed_runs.py tests/unit/test_infra_iam_finalization_permissions.py -v` to confirm all new regression guards pass.

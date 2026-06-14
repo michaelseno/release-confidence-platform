@@ -138,3 +138,55 @@ def test_audit_finalization_role_metadata_table_resource_present() -> None:
         "MetadataTable resource reference not found in the AuditFinalizationLambdaRole "
         "DynamoDB statement. Use Fn::GetAtt: [MetadataTable, Arn] as the Resource."
     )
+
+
+# ---------------------------------------------------------------------------
+# S3 permissions — added in Round 5 (bugfix/phase3-running-after-window-rca-v2)
+#
+# Root Cause 3 from the Round 5 RCA: AuditFinalizationLambdaRole had no S3
+# grants at all.  The finalization handler calls
+# S3StorageClient.list_raw_evidence_keys() (list_objects_v2) inside
+# _complete_finalization() to gather evidence keys for the integrity gate.
+# Without s3:ListBucket the call raises AccessDenied and the gate never runs.
+# ---------------------------------------------------------------------------
+
+
+def test_audit_finalization_role_grants_s3_list_bucket() -> None:
+    """AuditFinalizationLambdaRole must include s3:ListBucket.
+
+    The finalization handler calls S3StorageClient.list_raw_evidence_keys()
+    which issues a list_objects_v2 API call.  Without this permission the call
+    raises AccessDenied, preventing the integrity gate from running at all.
+    """
+    policy_section = _read_finalization_role_policy()
+    assert "s3:ListBucket" in policy_section, (
+        "s3:ListBucket is missing from AuditFinalizationLambdaRole. "
+        "Add it to infra/resources/phase4-aggregation-iam.yml. "
+        "This permission is required by list_raw_evidence_keys() called from "
+        "_complete_finalization() in the finalization handler."
+    )
+
+
+def test_audit_finalization_role_grants_s3_get_object() -> None:
+    """AuditFinalizationLambdaRole must include s3:GetObject.
+
+    Required for the S3 evidence verification path in _complete_finalization().
+    Without it, evidence reads raise AccessDenied.
+    """
+    policy_section = _read_finalization_role_policy()
+    assert "s3:GetObject" in policy_section, (
+        "s3:GetObject is missing from AuditFinalizationLambdaRole. "
+        "Add it to infra/resources/phase4-aggregation-iam.yml."
+    )
+
+
+def test_audit_finalization_role_grants_s3_head_object() -> None:
+    """AuditFinalizationLambdaRole must include s3:HeadObject.
+
+    Pair with s3:GetObject — both are required for full S3 evidence verification.
+    """
+    policy_section = _read_finalization_role_policy()
+    assert "s3:HeadObject" in policy_section, (
+        "s3:HeadObject is missing from AuditFinalizationLambdaRole. "
+        "Add it to infra/resources/phase4-aggregation-iam.yml."
+    )
