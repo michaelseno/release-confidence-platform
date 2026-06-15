@@ -754,3 +754,121 @@ Required actions after merge:
 3. Confirm CloudWatch shows `auditFinalization_completed` (or `auditFinalization_failed_gate_failure` if data integrity is genuinely compromised — which should not occur for well-formed audits).
 4. Confirm `lifecycle_state` in DynamoDB advances to `COMPLETED`.
 5. Run `pytest tests/unit/test_evidence_integrity_gate_failed_runs.py tests/unit/test_infra_iam_finalization_permissions.py -v` to confirm all new regression guards pass.
+
+---
+
+## Round 7 Update — Self-Introduced Regression: `NameError: name 'os' is not defined`
+
+**Updated:** 2026-06-15
+**Branch:** `bugfix/phase3-running-after-window-rca-v2`
+**Validation audit:** client_id `client_rca_fix_v6_27e13843`, audit_id `audit_20260614_a996c083`
+**Status:** Root cause confirmed and fixed. Self-introduced regression from Fix 3 cleanup.
+
+---
+
+### Summary
+
+HITL Round 7 confirmed three positive outcomes before the failure:
+- Audit lifecycle reached `COMPLETED`.
+- `AuditFinalization` Lambda completed without exception.
+- Aggregation Lambda was invoked.
+
+The Aggregation Lambda then immediately raised:
+
+```
+NameError: name 'os' is not defined
+```
+
+**Location:** `apps/backend/handlers/aggregation_handler.py` line 43
+
+```python
+repository = AggregationRepository(os.environ["METADATA_TABLE"], dynamodb_client)
+```
+
+---
+
+### Root Cause
+
+**Self-introduced regression from Fix 3 (Round 3 cleanup).**
+
+Fix 3 removed the `sys.path.insert` workaround from `aggregation_handler.py` and described the removed imports as "now-unused `import sys` and `import os`." This description was incorrect. `import sys` was genuinely unused after the workaround removal, but `import os` was still required on lines 43–44, which reference `os.environ["METADATA_TABLE"]` and `os.environ["RAW_RESULTS_BUCKET"]`.
+
+The removal was not caught by the existing Round 3 smoke test (`test_aggregation_handler_callable`). That test imports the module at pytest collection time and checks that `handler` is callable — it does not call `handler()` with env vars set. The `NameError` inside `handler()` is only triggered when the function body executes. A callable check is a necessary but insufficient guard for this class of regression.
+
+**Fault classification:** Self-introduced regression. Incorrect import removal during cleanup. Human review error.
+
+**Confidence level:** HIGH. The `NameError` stack trace directly names `os` and the exact line. Code inspection confirms `import os` is absent from the file and `os.environ` is referenced on two lines within `handler()`. No alternative explanation exists.
+
+---
+
+### Full Import Audit — `aggregation_handler.py`
+
+All stdlib imports were audited against usages in the current file:
+
+| Import | Used where | Round 7 status |
+|--------|-----------|----------------|
+| `import os` | Lines 44–45: `os.environ["METADATA_TABLE"]`, `os.environ["RAW_RESULTS_BUCKET"]` | Restored |
+| `import sys` | Not used anywhere in the file | Correctly absent (removed in Fix 3) |
+
+No other imports were erroneously removed in Fix 3.
+
+---
+
+### Fix Applied
+
+**File:** `apps/backend/handlers/aggregation_handler.py`
+
+`import os` restored at line 5. No other changes to the file. Resulting import block:
+
+```python
+from __future__ import annotations
+
+import os
+from typing import Any
+
+import boto3
+```
+
+---
+
+### Regression Tests Added
+
+**File:** `tests/unit/test_handler_import_smoke.py` (extended — 4 → 6 tests)
+
+| Test | Purpose |
+|------|---------|
+| `test_aggregation_handler_os_environ_readable` | Calls `handler(event, None)` with `METADATA_TABLE` and `RAW_RESULTS_BUCKET` set via `monkeypatch.setenv`, AWS clients and aggregation classes patched. Asserts no `NameError` is raised and the return value is a `dict`. |
+| `test_aggregation_handler_repository_receives_metadata_table` | Captures the first positional argument to `AggregationRepository.__init__` and asserts it equals the value of `METADATA_TABLE` from the environment. |
+
+Both tests verify that the `handler()` entrypoint can read `os.environ` without raising `NameError`. They cover the specific regression introduced by Fix 3 and will fail immediately if `import os` is removed again.
+
+---
+
+### Test Execution Evidence
+
+**Command:** `.venv/bin/python -m pytest tests/ --tb=short -q`
+
+```
+453 passed in 1.04s
+```
+
+| Metric | Value |
+|--------|-------|
+| Total tests | 453 |
+| Passed | 453 |
+| Failed | 0 |
+| Errors | 0 |
+| New tests added this round | 2 |
+| Prior suite count (Round 6) | 451 |
+| Delta | +2 |
+| All prior tests preserved | Yes — zero regressions |
+
+---
+
+### Round 7 Final Investigator Decision
+
+**Fix applied. Regression guard extended.**
+
+`import os` is restored in `aggregation_handler.py`. The smoke test suite has been extended from 4 tests to 6, with two new tests that exercise `handler()` at the call-site level. Any future removal of `import os` from the handler will now fail these tests with an explicit `NameError` message before reaching the AWS environment.
+
+Required action after merge: deploy to AWS dev environment (`sls deploy --stage dev`) and run a new validation audit to confirm the Aggregation Lambda completes end-to-end without `NameError`.

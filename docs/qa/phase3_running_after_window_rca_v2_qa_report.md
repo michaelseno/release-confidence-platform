@@ -745,3 +745,120 @@ Documents: defect title, severity (HIGH), component, error, root cause, validati
 [QA SIGN-OFF APPROVED]
 
 The aggregation trigger `AttributeError` is confirmed as a method backport gap between `src/` and `packages/`. The fix adds the three missing methods to `packages/storage/audit_metadata_client.py`. Eleven new regression tests use the real `AuditMetadataRepository` class from `packages/` — the same class the Lambda handler imports — backed by an in-memory DynamoDB fake, with no auto-attribute mock. Any future removal of these methods from the real class immediately blocks CI with `AttributeError`. All 451 tests pass. The fix requires a `sls deploy --stage dev` to take effect in the AWS environment.
+
+---
+
+## Round 7 QA Update
+
+**Date:** 2026-06-15
+**Round:** 7 of HITL iteration on `bugfix/phase3-running-after-window-rca-v2`
+**Prior suite count:** 451 passed
+**This round suite count:** 453 passed
+**Validation evidence:** audit_id `audit_20260614_a996c083`, client_id `client_rca_fix_v6_27e13843`
+
+---
+
+### R7.1 Root Cause Confirmed
+
+HITL Round 7 reported `NameError: name 'os' is not defined` from the Aggregation Lambda immediately on cold-start invocation.
+
+**Root cause:** `import os` was incorrectly removed from `apps/backend/handlers/aggregation_handler.py` during Fix 3 (Round 3). Fix 3 removed the `sys.path.insert` workaround and described `import os` as "now-unused." This was incorrect — `os.environ` is referenced on lines 43–44 of `handler()`. `import sys` was correctly removed (it is unused). Only `import os` needed to be restored.
+
+**Self-introduced regression classification confirmed.** The regression was introduced by Fix 3, not by external changes.
+
+**Test gap identified:** The existing `test_aggregation_handler_callable` smoke test verified that the module imports without error and `handler` is callable. It did not call `handler()` with environment variables set, so the `NameError` inside the function body was never triggered. Collection-time import checks are insufficient guards for missing imports that are only used inside function bodies.
+
+---
+
+### R7.2 Fix Applied
+
+**File:** `apps/backend/handlers/aggregation_handler.py`
+
+`import os` restored at line 5. No other changes.
+
+**Verified:**
+```
+grep -n "import os" apps/backend/handlers/aggregation_handler.py
+5:import os
+```
+
+No `import sys` present (correctly absent).
+
+---
+
+### R7.3 Regression Tests Added
+
+**File:** `tests/unit/test_handler_import_smoke.py` (4 → 6 tests)
+
+| Test | What it proves |
+|------|----------------|
+| `test_aggregation_handler_os_environ_readable` | `handler()` can be called with env vars set without raising `NameError` |
+| `test_aggregation_handler_repository_receives_metadata_table` | `AggregationRepository` receives the value of `METADATA_TABLE` from `os.environ`, confirming `os` is accessible at entrypoint execution time |
+
+Both tests use `monkeypatch.setenv` for environment isolation and `unittest.mock.patch` for AWS clients and aggregation class construction. No real AWS connections are made.
+
+---
+
+### R7.4 Test Execution Evidence
+
+**Command:** `.venv/bin/python -m pytest tests/ --tb=short -q`
+
+```
+453 passed in 1.04s
+```
+
+| Metric | Value |
+|--------|-------|
+| Total tests | 453 |
+| Passed | 453 |
+| Failed | 0 |
+| Errors | 0 |
+| New tests added this round | 2 |
+| Prior suite count (Round 6) | 451 |
+| Delta | +2 |
+| All prior tests preserved | Yes — zero regressions |
+
+---
+
+### R7.5 Regression Check
+
+| Test area | Round 6 count | Round 7 count | Delta | Result |
+|-----------|--------------|----------------|-------|--------|
+| Full suite | 451 | 453 | +2 | No regressions |
+| `test_handler_import_smoke.py` | 4 | 6 | +2 | PASS |
+| All other prior test files | unchanged | unchanged | 0 | PASS |
+
+---
+
+### R7.6 Acceptance Criteria — Round 7
+
+| AC | Criterion | Result |
+|----|-----------|--------|
+| AC-R7-1 | Root cause identified as self-introduced Fix 3 regression: incorrect removal of `import os` | CONFIRMED |
+| AC-R7-2 | `import os` restored in `aggregation_handler.py` | PASS |
+| AC-R7-3 | `import sys` confirmed absent (correctly removed in Fix 3) | CONFIRMED |
+| AC-R7-4 | No other erroneously removed imports identified in the file | CONFIRMED |
+| AC-R7-5 | `test_aggregation_handler_os_environ_readable` added — catches NameError at entrypoint call | PASS |
+| AC-R7-6 | `test_aggregation_handler_repository_receives_metadata_table` added — confirms env read succeeds | PASS |
+| AC-R7-7 | Both new tests pass with patched AWS clients and no real network connections | PASS |
+| AC-R7-8 | Full suite passes with no regressions | PASS (453/453) |
+
+---
+
+### R7.7 QA Decision — Round 7
+
+| Evidence | Outcome |
+|----------|---------|
+| Root cause confirmed: `import os` removed by Fix 3, still used on lines 43–44 | CONFIRMED |
+| Fix: `import os` restored at line 5 of `aggregation_handler.py` | CONFIRMED |
+| Import audit: no other missing imports in handler file | CONFIRMED |
+| 2 new smoke tests exercise `handler()` entrypoint with env vars set | 2/2 PASS |
+| `NameError` cannot recur silently — new tests fail if `import os` is removed again | CONFIRMED |
+| Full suite | 453/453 PASS |
+| Blocking defects | None |
+| Regressions | None |
+| Unresolved failures | None |
+
+[QA SIGN-OFF APPROVED]
+
+Self-introduced regression from Fix 3 confirmed and remediated. `import os` is restored in `apps/backend/handlers/aggregation_handler.py`. The smoke test suite is extended with two entrypoint-level tests that exercise `handler()` at the function-call level, closing the gap that allowed the Fix 3 regression to reach the AWS environment undetected. All 453 tests pass with zero regressions. Deployment of the fix requires `sls deploy --stage dev`, after which a new validation audit should confirm the Aggregation Lambda completes end-to-end without `NameError`.
