@@ -379,13 +379,106 @@ They are explicitly decoupled in the handler (lines 212-215). When STARTED runs 
 
 ## 12. Final Investigator Decision
 
-**Ready for developer fix — architectural decision required first.**
+**FIXED on branch `bugfix/phase3-running-after-window-rca-v2` (2026-06-13).**
 
-The investigation confirms the architectural determinism gap:
+---
 
-1. `de3bdbb` is necessary but insufficient — it eliminates the Lambda crash but leaves the audit in a permanent `FINALIZING` dead-end.
-2. The core design flaw is that `gate_failure` returns 200, the one-time schedule is deleted, and no component re-triggers finalization.
-3. The state machine supports `FINALIZING → FAILED`, which is the correct terminal destination for audits that cannot complete evidence reconciliation.
-4. The recommended fix is either: (A) auto-timeout STARTED runs before the gate, or (B) transition to `FAILED` when the gate blocks on STARTED runs. Option A is preferred for operational correctness.
+## 13. New HITL Validation Failure (2026-06-13) and Extended Root Cause Analysis
 
-The backend developer should implement the fix in `apps/backend/handlers/audit_finalization_handler.py` — specifically in `_complete_finalization()` and the `except FinalizationGateError` catch blocks. Before implementation, the product/architecture owner must confirm the acceptable behavior for partial-completion audits (COMPLETED vs. FAILED).
+### New HITL Audit Evidence
+
+- **audit_id:** `audit_20260613_50fe5b4c`
+- `audit_window.end_time: 2026-06-13T01:57:41.375524Z`
+- `updated_at: 2026-06-13T01:53:04.108468Z` — never updated after window end
+- `lifecycle_state: RUNNING`
+- Finalization schedule confirmed created: `at(2026-06-13T09:57:56)` Asia/Hong_Kong = `2026-06-13T01:57:56Z` UTC
+- Schedule was deleted (ActionAfterCompletion=DELETE confirmed — schedule fired)
+- Audit remains RUNNING permanently
+
+### Confirmed Root Cause 1 (NEW): `_normalize_product_schedule_config` silently disables finalization schedule
+
+**Location:**
+- `packages/audit_scheduling/service.py` lines 274-275 (packages version)
+- `src/release_confidence_platform/audit_scheduling/service.py` lines 280-281 (src version)
+
+**Defect:**
+
+```python
+# DEFECTIVE CODE (before fix):
+if "finalization_schedule" not in config:
+    config["finalization_schedule"] = {"enabled": False}
+```
+
+When an audit config S3 file does not contain an explicit `finalization_schedule` key (the expected and common case for most real configs), `_normalize_product_schedule_config` injected `{"enabled": False}`. This caused `build_all()` line 108:
+
+```python
+if (config.get("finalization_schedule") or {"enabled": True}).get("enabled", True):
+```
+
+to evaluate the `or {"enabled": True}` fallback NEVER — because `{"enabled": False}` is truthy. The `.get("enabled", True)` on `{"enabled": False}` returned `False`. Result: `build_finalization()` was silently skipped. No finalization schedule was created. The audit would remain RUNNING indefinitely after the window.
+
+This defect only affects the `schedule_from_persisted_audit` path (which calls `_normalize_product_schedule_config`). The `schedule_audit` path does NOT call this function and correctly uses the fallback.
+
+**Fix:** Remove the injection of `{"enabled": False}` from `_normalize_product_schedule_config` in both `packages/` and `src/` versions. The comment now explains the intentional design.
+
+### Confirmed Root Cause 2 (NEW): Unhandled `LifecycleConflictError` on RUNNING→FINALIZING transition
+
+**Location:** `apps/backend/handlers/audit_finalization_handler.py` — `handle()` method, line 105-116
+
+**Defect:**
+
+```python
+# DEFECTIVE CODE (before fix):
+self.lifecycle.transition(
+    LifecycleTransition(
+        ...
+        expected_current_state=current_state,  # RUNNING
+        next_state=LIFECYCLE_STATE_FINALIZING,
+        ...
+    )
+)
+```
+
+`AuditLifecycleService.transition()` calls `repository.append_lifecycle_transition()`, which executes a DynamoDB conditional update with `ConditionExpression="lifecycle_state = :expected_state"`. If the audit state has changed between the initial `get_audit_metadata()` read (line 63) and the DynamoDB update, `ConditionalCheckFailedException` is raised and re-raised as `LifecycleConflictError`.
+
+`LifecycleConflictError` was NOT caught in `handle()`. The exception propagated as an unhandled Lambda failure. EventBridge Scheduler:
+1. Marks the Lambda invocation as failed
+2. Deletes the one-time `at()` schedule (ActionAfterCompletion=DELETE fires on first invocation regardless of Lambda outcome for `at()` schedules)
+
+The audit remains permanently in RUNNING with no active finalization schedule and no automatic recovery path.
+
+**Fix:** Wrap the `lifecycle.transition(RUNNING → FINALIZING)` call in a `try/except LifecycleConflictError` block. On conflict, re-read the audit state and handle idempotently:
+- Terminal state → return skipped
+- FINALIZING state → execute `_handle_finalizing_retry()`
+- Any other unexpected state → call `_fail_unexpected_state_finalization()` to drive to FAILED
+
+A new helper `_fail_unexpected_state_finalization()` was added to the handler to drive the audit to FAILED when no other terminal path is available.
+
+### Fix Summary
+
+**Files changed:**
+
+| File | Change |
+|---|---|
+| `packages/audit_scheduling/service.py` | Removed `{"enabled": False}` injection for absent `finalization_schedule` key |
+| `src/release_confidence_platform/audit_scheduling/service.py` | Same fix applied to src version |
+| `apps/backend/handlers/audit_finalization_handler.py` | Added `LifecycleConflictError` import; wrapped RUNNING→FINALIZING transition with conflict handler; added `_fail_unexpected_state_finalization()` method |
+| `tests/api/test_operator_cli_rcp_contract.py` | Updated test asserting old (wrong) behavior to assert correct behavior |
+| `tests/unit/test_operator_cli_rcp.py` | Updated test asserting old (wrong) behavior to assert correct behavior |
+| `tests/integration/test_phase3_lifecycle_determinism_regression.py` | New regression test file — 10 tests covering RCA-1, RCA-2, RCA-3, and audit list read-through |
+
+**Test counts:**
+- Before fixes: 407 tests passing
+- After fixes: 417 tests passing (10 new regression tests)
+
+### Root Cause Confidence
+
+**RCA-1 (normalize config defect):** Confirmed Root Cause. The code was directly read; the injection was explicit. Two existing tests had been written to assert the defective behavior — both updated to assert correct behavior.
+
+**RCA-2 (unhandled LifecycleConflictError):** Confirmed Root Cause. `LifecycleConflictError` is raised by `append_lifecycle_transition` on DynamoDB conditional update failure. The exception class is not imported or caught in `handle()`. The code path is fully traceable.
+
+**New HITL audit remaining in RUNNING:** Most Likely Root Cause is RCA-2 (the Lambda crashed on `LifecycleConflictError` from a race condition, or the Lambda was not deployed with RCA-1 fix and the finalization schedule was never created for an audit config without explicit `finalization_schedule` key). Direct CloudWatch logs for the specific invocation are not available from repository artifacts — exact cause cannot be confirmed to High confidence from code alone.
+
+### Final Decision
+
+**Fixed. All 417 tests pass on branch `bugfix/phase3-running-after-window-rca-v2`.**
