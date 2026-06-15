@@ -83,7 +83,13 @@ def test_stage_config_whitespace_env_override_is_rejected(tmp_path, monkeypatch)
         StageConfigLoader(root=tmp_path).load("dev")
 
 
-def test_schedule_missing_finalization_block_does_not_infer_finalization_schedule():
+def test_schedule_missing_finalization_block_still_includes_finalization_schedule():
+    """Audit configs without an explicit finalization_schedule key must still produce
+    a finalization schedule.  The prior defect (injecting {"enabled": False} for absent
+    keys) silently suppressed finalization for any config that omitted the block.
+    build_all() already treats an absent key as enabled=True via its `or {"enabled": True}`
+    fallback, so _normalize_product_schedule_config must NOT override that with False.
+    """
     repo = FakeRepo(
         {
             "client_id": "client1",
@@ -107,7 +113,12 @@ def test_schedule_missing_finalization_block_does_not_infer_finalization_schedul
     )
 
     planned_types = [schedule["schedule_type"] for schedule in result["planned_schedules"]]
-    assert planned_types == ["baseline"] * 4
+    # 4 baseline occurrences + 1 finalization schedule
+    assert "finalization" in planned_types, (
+        "finalization schedule must be present even when config omits finalization_schedule key"
+    )
+    assert planned_types.count("baseline") == 4
+    assert len(planned_types) == 5
     assert all(
         schedule["schedule_expression_summary"].startswith("at(")
         for schedule in result["planned_schedules"]

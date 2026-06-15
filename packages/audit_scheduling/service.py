@@ -271,6 +271,9 @@ def _normalize_product_schedule_config(
         config["repeated"] = repeated if isinstance(repeated, list) else [repeated]
     else:
         config["repeated"] = []
-    if "finalization_schedule" not in config:
-        config["finalization_schedule"] = {"enabled": False}
+    # Do NOT inject a disabled default for finalization_schedule.
+    # build_all() treats an absent key the same as {"enabled": True} via its
+    # `or {"enabled": True}` fallback.  Injecting {"enabled": False} here would
+    # silently suppress the finalization schedule for any audit config that
+    # omits the key — which is the expected, valid case for most configs.
     return config

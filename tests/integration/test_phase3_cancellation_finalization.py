@@ -310,6 +310,111 @@ def test_finalization_retry_from_finalizing_with_zero_metadata_fails():
     assert [entry["to_state"] for entry in repo.audit["lifecycle_history"]] == ["FAILED"]
 
 
+class GateFailingS3:
+    """S3 stub that returns no evidence keys, causing gate Check 3/4 failure."""
+
+    def list_raw_evidence_keys(self, client_id, audit_id):  # noqa: ARG002
+        return []
+
+
+def test_gate_failure_on_handle_returns_gate_failure_response_not_exception():
+    """FinalizationGateError must be caught and returned as gate_failure, not re-raised."""
+    repo = Repo(executions=1)  # Has 1 COMPLETED run record but GateFailingS3 returns no S3 keys
+    handler = AuditFinalizationHandler(
+        repository=repo,
+        s3_storage=GateFailingS3(),
+    )
+    result = handler.handle(finalization_event())
+    assert result["status"] == "gate_failure"
+    assert result["lifecycle_state"] == "FAILED"
+    # RUNNING->FINALIZING transition completed; gate failure transitions audit to FAILED
+    assert repo.audit["lifecycle_state"] == "FAILED"
+
+
+def test_gate_failure_on_retry_path_returns_gate_failure_response():
+    """Retry path (FINALIZING with existing metadata) must also catch FinalizationGateError."""
+    repo = Repo(state="FINALIZING", executions=1)
+    repo.audit["finalization"] = {
+        "execution_count": 1,
+        "schedule_occurrence_id": "finalization#2026-05-21T00:00:00Z",
+    }
+    handler = AuditFinalizationHandler(
+        repository=repo,
+        s3_storage=GateFailingS3(),
+    )
+    result = handler.handle(finalization_event())
+    assert result["status"] == "gate_failure"
+    assert result["lifecycle_state"] == "FAILED"
+    assert repo.audit["lifecycle_state"] == "FAILED"
+
+
+def test_gate_failure_transitions_to_failed_not_stuck_in_finalizing():
+    """After gate failure, audit must reach FAILED — never permanently stuck in FINALIZING.
+
+    Primary regression guard for the Phase 3 lifecycle determinism fix.
+    """
+    repo = Repo(executions=1)
+    handler = AuditFinalizationHandler(
+        repository=repo,
+        s3_storage=GateFailingS3(),
+    )
+    result = handler.handle(finalization_event())
+    assert result["status"] == "gate_failure"
+    assert result["lifecycle_state"] == "FAILED"
+    assert repo.audit["lifecycle_state"] == "FAILED"
+    states = [entry["to_state"] for entry in repo.audit["lifecycle_history"]]
+    assert states == ["FINALIZING", "FAILED"], f"Expected [FINALIZING, FAILED], got {states}"
+
+
+def test_gate_failure_on_retry_transitions_to_failed():
+    """Retry path (FINALIZING with existing metadata) must also transition to FAILED on gate failure."""
+    repo = Repo(state="FINALIZING", executions=1)
+    repo.audit["finalization"] = {
+        "execution_count": 1,
+        "schedule_occurrence_id": "finalization#2026-05-21T00:00:00Z",
+    }
+    handler = AuditFinalizationHandler(
+        repository=repo,
+        s3_storage=GateFailingS3(),
+    )
+    result = handler.handle(finalization_event())
+    assert result["status"] == "gate_failure"
+    assert result["lifecycle_state"] == "FAILED"
+    assert repo.audit["lifecycle_state"] == "FAILED"
+    states = [entry["to_state"] for entry in repo.audit["lifecycle_history"]]
+    assert states == ["FAILED"], f"Expected [FAILED], got {states}"
+
+
+def test_started_run_at_window_close_gate_failure_terminates_to_failed():
+    """Audit with one STARTED run at finalization time must reach FAILED, not stay in FINALIZING.
+
+    Directly reproduces the escalation scenario: a run in-flight at audit_window.end_time
+    causes gate Check 2 (NO_ORPHANED_STARTED_RECORDS) to fail. The audit must deterministically
+    exit FINALIZING to FAILED.
+    """
+    run_records = [
+        {"run_id": "run-completed-1", "status": "COMPLETED"},
+        {"run_id": "run-started-1", "status": "STARTED"},
+    ]
+    repo = Repo(executions=1, run_records=run_records)
+
+    class PartialS3:
+        def list_raw_evidence_keys(self, client_id, audit_id):  # noqa: ARG002
+            return [f"raw-results/{client_id}/{audit_id}/run-completed-1/results.json"]
+
+    handler = AuditFinalizationHandler(
+        repository=repo,
+        s3_storage=PartialS3(),
+    )
+    result = handler.handle(finalization_event())
+    assert result["status"] == "gate_failure"
+    assert result["lifecycle_state"] == "FAILED"
+    assert repo.audit["lifecycle_state"] == "FAILED"
+    states = [entry["to_state"] for entry in repo.audit["lifecycle_history"]]
+    assert "FINALIZING" in states
+    assert states[-1] == "FAILED", f"Final state must be FAILED, got {states}"
+
+
 def test_cancellation_cleanup_errors_recorded_but_cancelled():
     repo = Repo(state="SCHEDULED")
     result = AuditCancellationService(
@@ -334,3 +439,31 @@ def test_cancellation_cleanup_iterates_multiple_discrete_baseline_schedules():
 
     assert result["lifecycle_state"] == "CANCELLED"
     assert scheduler.deleted == ["baseline-001", "baseline-002", "finalization"]
+
+
+def test_finalization_handler_invocable_end_to_end():
+    """End-to-end invocation smoke test for the finalization handler.
+
+    Regression guard for the round-3 Lambda packaging defect: the auditFinalization
+    Lambda was crashing with 'No module named release_confidence_platform' before
+    any application logic ran. This test proves the handler module imports cleanly
+    and the full handle() path executes to a terminal lifecycle state.
+
+    The audit must reach COMPLETED or FAILED — never remain in RUNNING or FINALIZING.
+    """
+    repo = Repo(state="RUNNING", executions=2)
+    handler = AuditFinalizationHandler(repository=repo, s3_storage=FakeS3(repo))
+    event = {
+        "event_type": "audit_finalization",
+        "client_id": "smoke_client",
+        "audit_id": "smoke_audit",
+        "schedule_name": "rcp-dev-smoke_client-smoke_audit-finalization",
+        "triggered_by": "eventbridge_scheduler",
+        "audit_window_end": "2026-01-01T10:00:00Z",
+        "schedule_occurrence_id": "occ-smoke-001",
+    }
+    result = handler.handle(event)
+    assert result["lifecycle_state"] in {"COMPLETED", "FAILED"}, (
+        f"Audit must reach a terminal state; got lifecycle_state={result['lifecycle_state']!r}. "
+        "A RUNNING or FINALIZING result indicates the handler did not execute to completion."
+    )

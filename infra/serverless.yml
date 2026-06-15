@@ -19,6 +19,7 @@ provider:
     METADATA_TABLE: ${self:custom.metadataTableName}
     SCHEDULER_GROUP_NAME: ${self:custom.schedulerGroupName}
     LOG_LEVEL: INFO
+    PYTHONPATH: /var/task/src
   iam:
     role:
       statements:

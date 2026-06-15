@@ -1501,7 +1501,11 @@ def test_schedule_from_draft_lifecycle_behavior_unchanged(stage_config):
     assert len(scheduler.created) == 97
 
 
-def test_schedule_dry_run_does_not_infer_missing_finalization(stage_config):
+def test_schedule_dry_run_includes_finalization_when_key_absent(stage_config):
+    """When finalization_schedule is absent from config, a finalization schedule must
+    still be built.  _normalize_product_schedule_config previously injected
+    {"enabled": False} for absent keys, silently suppressing finalization.  The correct
+    behaviour is to let build_all()'s `or {"enabled": True}` fallback take effect."""
     _, audit, _ = configs()
     audit.pop("finalization_schedule")
     repo = FakeRepo(
@@ -1524,7 +1528,12 @@ def test_schedule_dry_run_does_not_infer_missing_finalization(stage_config):
         dry_run=True,
     )
 
-    assert [s["schedule_type"] for s in result["planned_schedules"]] == ["baseline"] * 96
+    planned_types = [s["schedule_type"] for s in result["planned_schedules"]]
+    assert "finalization" in planned_types, (
+        "finalization schedule must be included even when config omits finalization_schedule key"
+    )
+    assert planned_types.count("baseline") == 96
+    assert len(planned_types) == 97
 
 
 def test_schedule_prod_requires_allow_production(stage_config):

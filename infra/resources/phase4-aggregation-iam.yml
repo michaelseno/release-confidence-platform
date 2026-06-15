@@ -26,12 +26,28 @@ Resources:
               - Effect: Allow
                 Action:
                   - dynamodb:GetItem
+                  - dynamodb:Query
                   - dynamodb:PutItem
                   - dynamodb:UpdateItem
                 Resource:
                   - Fn::GetAtt:
                       - MetadataTable
                       - Arn
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - arn:aws:s3:::${self:custom.rawResultsBucketName}
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - raw-results/*
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:HeadObject
+                Resource:
+                  - arn:aws:s3:::${self:custom.rawResultsBucketName}/raw-results/*
               - Effect: Allow
                 Action:
                   - lambda:InvokeFunction

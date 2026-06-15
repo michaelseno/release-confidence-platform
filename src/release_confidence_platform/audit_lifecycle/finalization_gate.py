@@ -7,6 +7,7 @@ from typing import Any
 
 from release_confidence_platform.core.constants.engine import (
     RAW_RESULT_KEY_TEMPLATE,
+    RUN_STATUS_COMPLETED,
     RUN_STATUS_STARTED,
     RUN_STATUSES,
 )
@@ -162,10 +163,18 @@ def finalization_integrity_gate(
         )
 
     # ------------------------------------------------------------------
-    # Check 3: Every terminal RUN has a corresponding S3 evidence key
+    # Check 3: Every COMPLETED RUN must have a corresponding S3 evidence key.
+    # FAILED runs are exempt — they never write S3 evidence by design.
+    # (An exception during or before the S3 write produces a FAILED run record
+    # with raw_result_s3_key=None; this is the expected terminal state for a
+    # run that could not complete successfully.)
     # ------------------------------------------------------------------
     s3_key_set: frozenset[str] = frozenset(s3_evidence_keys)
     for run in terminal_runs:
+        if run.get("status") != RUN_STATUS_COMPLETED:
+            # FAILED runs have no S3 evidence — this is expected and must not
+            # block finalization.  Only COMPLETED runs must have evidence.
+            continue
         run_id = run.get("run_id", "")
         expected_key = RAW_RESULT_KEY_TEMPLATE.format(
             client_id=client_id, audit_id=audit_id, run_id=run_id
@@ -177,7 +186,7 @@ def finalization_integrity_gate(
                     expected=None,
                     actual=None,
                     detail=(
-                        f"1 terminal RUN record has no corresponding S3 evidence object: "
+                        f"1 COMPLETED RUN record has no corresponding S3 evidence object: "
                         f"run_id={run_id}, searched_key={expected_key}"
                     ),
                 )

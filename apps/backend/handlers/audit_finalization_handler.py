@@ -17,6 +17,7 @@ from packages.audit_lifecycle.constants import (
     LIFECYCLE_STATE_FINALIZING,
     TERMINAL_STATES,
 )
+from packages.audit_lifecycle.exceptions import LifecycleConflictError
 from packages.audit_lifecycle.service import AuditLifecycleService, LifecycleTransition
 from packages.audit_scheduling.events import validate_finalization_event
 from packages.core.constants.engine import LOG_CATEGORY_CLIENT_SAFE, RUN_STATUS_STARTED
@@ -102,17 +103,51 @@ class AuditFinalizationHandler:
             reason="finalization_trigger",
             status="transitioning",
         )
-        self.lifecycle.transition(
-            LifecycleTransition(
-                client_id=validated["client_id"],
-                audit_id=validated["audit_id"],
-                expected_current_state=current_state,
-                next_state=LIFECYCLE_STATE_FINALIZING,
-                reason="finalization_trigger",
-                actor="finalization_handler",
-                metadata={"execution_count": execution_count},
+        try:
+            self.lifecycle.transition(
+                LifecycleTransition(
+                    client_id=validated["client_id"],
+                    audit_id=validated["audit_id"],
+                    expected_current_state=current_state,
+                    next_state=LIFECYCLE_STATE_FINALIZING,
+                    reason="finalization_trigger",
+                    actor="finalization_handler",
+                    metadata={"execution_count": execution_count},
+                )
             )
-        )
+        except LifecycleConflictError:
+            # The audit state changed between the initial read and the DynamoDB
+            # conditional update.  Re-read the current state and handle idempotently
+            # rather than leaving the audit permanently stuck in RUNNING.
+            refreshed = self.repository.get_audit_metadata(
+                validated["client_id"], validated["audit_id"]
+            )
+            refreshed_state = refreshed.get("lifecycle_state", "UNKNOWN")
+            self._log_finalization(
+                "auditFinalization_transition_conflict_redirected",
+                validated,
+                execution_count=execution_count,
+                previous_state=current_state,
+                next_state=refreshed_state,
+                reason="lifecycle_conflict_on_finalizing_transition",
+                status="redirected",
+            )
+            if refreshed_state in TERMINAL_STATES:
+                return self._response(
+                    validated, status="skipped", lifecycle_state=refreshed_state
+                )
+            if refreshed_state == LIFECYCLE_STATE_FINALIZING:
+                return self._handle_finalizing_retry(validated, refreshed)
+            # Unexpected state after conflict: transition to FAILED to avoid
+            # permanently stuck lifecycle.
+            self._fail_unexpected_state_finalization(
+                validated,
+                actual_state=refreshed_state,
+                expected_state=current_state,
+            )
+            return self._response(
+                validated, status="failed", lifecycle_state=LIFECYCLE_STATE_FAILED
+            )
         self.repository.record_finalization(validated["client_id"], validated["audit_id"], metadata)
 
         if execution_count == 0:
@@ -126,13 +161,24 @@ class AuditFinalizationHandler:
                 validated, status="failed", lifecycle_state=LIFECYCLE_STATE_FAILED
             )
 
-        self._complete_finalization(
-            validated,
-            audit=audit,
-            expected_current_state=LIFECYCLE_STATE_FINALIZING,
-            execution_count=execution_count,
-            reason="finalization_completed",
-        )
+        try:
+            self._complete_finalization(
+                validated,
+                audit=audit,
+                expected_current_state=LIFECYCLE_STATE_FINALIZING,
+                execution_count=execution_count,
+                reason="finalization_completed",
+            )
+        except FinalizationGateError as exc:
+            self._fail_gate_failure_finalization(
+                validated,
+                expected_current_state=LIFECYCLE_STATE_FINALIZING,
+                reason="evidence_integrity_gate_failure",
+                gate_payload=exc.payload,
+            )
+            return self._response(
+                validated, status="gate_failure", lifecycle_state=LIFECYCLE_STATE_FAILED
+            )
         self._trigger_aggregation_after_finalization(validated)
         return self._response(
             validated, status="completed", lifecycle_state=LIFECYCLE_STATE_COMPLETED
@@ -143,13 +189,24 @@ class AuditFinalizationHandler:
     ) -> dict[str, Any]:
         existing_execution_count = _finalization_execution_count(audit)
         if existing_execution_count and existing_execution_count > 0:
-            self._complete_finalization(
-                event,
-                audit=audit,
-                expected_current_state=LIFECYCLE_STATE_FINALIZING,
-                execution_count=existing_execution_count,
-                reason="finalization_retry_completed",
-            )
+            try:
+                self._complete_finalization(
+                    event,
+                    audit=audit,
+                    expected_current_state=LIFECYCLE_STATE_FINALIZING,
+                    execution_count=existing_execution_count,
+                    reason="finalization_retry_completed",
+                )
+            except FinalizationGateError as exc:
+                self._fail_gate_failure_finalization(
+                    event,
+                    expected_current_state=LIFECYCLE_STATE_FINALIZING,
+                    reason="evidence_integrity_gate_failure",
+                    gate_payload=exc.payload,
+                )
+                return self._response(
+                    event, status="gate_failure", lifecycle_state=LIFECYCLE_STATE_FAILED
+                )
             self._trigger_aggregation_after_finalization(event)
             return self._response(
                 event, status="completed", lifecycle_state=LIFECYCLE_STATE_COMPLETED
@@ -282,6 +339,84 @@ class AuditFinalizationHandler:
             previous_state=expected_current_state,
             next_state=LIFECYCLE_STATE_FAILED,
             reason=reason,
+            status="failed",
+        )
+
+    def _fail_gate_failure_finalization(
+        self,
+        event: dict[str, Any],
+        *,
+        expected_current_state: str,
+        reason: str,
+        gate_payload: dict[str, Any],
+    ) -> None:
+        self.lifecycle.transition(
+            LifecycleTransition(
+                client_id=event["client_id"],
+                audit_id=event["audit_id"],
+                expected_current_state=expected_current_state,
+                next_state=LIFECYCLE_STATE_FAILED,
+                reason=reason,
+                actor="finalization_handler",
+                metadata={
+                    "gate_failure": True,
+                    "failed_checks": [
+                        fc.get("check", "<unknown>")
+                        for fc in gate_payload.get("failedChecks", [])
+                    ],
+                },
+            )
+        )
+        self._log_finalization(
+            "auditFinalization_failed_gate_failure",
+            event,
+            execution_count=None,
+            previous_state=expected_current_state,
+            next_state=LIFECYCLE_STATE_FAILED,
+            reason=reason,
+            status="failed",
+        )
+
+    def _fail_unexpected_state_finalization(
+        self,
+        event: dict[str, Any],
+        *,
+        actual_state: str,
+        expected_state: str,
+    ) -> None:
+        """Drive the audit to FAILED when a lifecycle conflict reveals an unexpected state.
+
+        This is a last-resort path that runs only after a LifecycleConflictError on the
+        RUNNING → FINALIZING transition and the re-read audit state is neither terminal
+        nor FINALIZING.  We cannot leave the audit permanently stuck, so we attempt to
+        move it to FAILED from its actual state.
+        """
+        try:
+            self.lifecycle.transition(
+                LifecycleTransition(
+                    client_id=event["client_id"],
+                    audit_id=event["audit_id"],
+                    expected_current_state=actual_state,
+                    next_state=LIFECYCLE_STATE_FAILED,
+                    reason="unexpected_state_after_lifecycle_conflict",
+                    actor="finalization_handler",
+                    metadata={
+                        "expected_state": expected_state,
+                        "actual_state": actual_state,
+                    },
+                )
+            )
+        except LifecycleConflictError:
+            # The state changed again between re-read and this transition attempt.
+            # Log and return — the caller returns FAILED status regardless.
+            pass
+        self._log_finalization(
+            "auditFinalization_failed_unexpected_state",
+            event,
+            execution_count=None,
+            previous_state=actual_state,
+            next_state=LIFECYCLE_STATE_FAILED,
+            reason="unexpected_state_after_lifecycle_conflict",
             status="failed",
         )
 
@@ -463,7 +598,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: ARG
     aggregation_invoker = (
         LambdaInvocationClient(boto3.client("lambda")) if aggregation_function_name else None
     )
-    evidence_bucket = os.environ.get("EVIDENCE_BUCKET")
+    evidence_bucket = os.environ.get("RAW_RESULTS_BUCKET")
     s3_storage = (
         S3StorageClient(evidence_bucket, boto3.client("s3")) if evidence_bucket else None
     )
