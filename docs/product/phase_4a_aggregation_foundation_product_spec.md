@@ -70,7 +70,7 @@ Phase 4A includes only the following:
 - Aggregation persistence validation and hardening (Phase 4A.4).
 - Engineering Retrieval CLI for internal operational debugging and evidence inspection (Phase 4A.5).
 - Structured logging improvements across orchestration, scheduling, execution, lifecycle, finalization, and aggregation (Phase 4A.5).
-- Phase 5 consumer contract publication as a platform constitution document (Phase 4A.3).
+- Phase 5 consumer contract publication as a platform constitution document with explicit ownership boundary statement: Aggregation owns facts. Phase 5 owns interpretation (Phase 4A.3).
 - Remediation of the `src/packages` dual-copy divergence (Phase 4A.6).
 - Deterministic startup validation and import smoke testing improvements (Phase 4A.6).
 - Controlled operational validation campaign with multiple 48-hour audits (Phase 4A.7).
@@ -100,7 +100,15 @@ The following are explicitly excluded from Phase 4A:
 
 ## 7. Functional Requirements
 
-### FR-P1: Engineering Retrieval CLI — Required Commands
+### FR-P1: Engineering Retrieval Layer — Constitutional Read-Only Guarantee
+
+The Engineering Retrieval Layer is a platform invariant. It SHALL NEVER create, update, delete, repair, recompute, compact, or otherwise modify persisted audit evidence, aggregation artifacts, lineage manifests, lifecycle records, or any platform state.
+
+Allowed operations are limited to: **inspect**, **retrieve**, **list**, **summarize**, **verify**, and **export**.
+
+This guarantee is unconditional and applies regardless of the requested output format, filtering parameters, or operational context. Violation of this invariant compromises evidence integrity and trustworthiness.
+
+### FR-P1a: Engineering Retrieval CLI — Required Commands
 
 The Engineering Retrieval CLI must implement the following commands:
 
@@ -121,6 +129,70 @@ The Engineering Retrieval CLI must implement the following commands:
 | `retrieve evidence-references` | Return bounded lineage manifest source references |
 | `retrieve failure-summaries` | Return failure classification counts and reason codes |
 | `retrieve processing-timeline` | Return per-stage processing timestamps |
+
+### FR-P1b: Engineering Retrieval CLI — Output Provenance
+
+Every retrieval command output must include provenance metadata as a top-level envelope:
+
+```
+retrieved_at        — UTC ISO-8601 timestamp of this retrieval
+retrieval_version   — version of the retrieval layer
+aggregation_version — aggregation_version of the artifact(s) retrieved
+manifest_hash       — manifest_hash from the AggregateSetCompletion marker (when applicable)
+audit_id            — scoped audit identifier
+client_id           — scoped client identifier
+```
+
+Retrieved output must include the following disclaimer in human-readable format:
+
+> "This output is for engineering diagnostics only. Authoritative evidence resides in immutable aggregation artifacts."
+
+For JSON output, this disclaimer must appear as a top-level `_notice` field with a fixed controlled string value.
+
+### FR-P1c: Engineering Retrieval CLI — Deterministic Output Ordering
+
+The retrieval layer must produce deterministically ordered output for all collections. For identical persisted aggregation state, retrieval output must be identical across repeated invocations.
+
+Canonical ordering precedence for all collections:
+
+1. `audit_id`
+2. `audit_execution_id`
+3. `endpoint_id`
+4. `scenario_id`
+5. `timestamp` (ascending)
+
+### FR-P1d: Engineering Retrieval CLI — Storage Abstraction Layering
+
+The Engineering Retrieval CLI must not interact with storage implementation details directly. The retrieval architecture must follow this layering:
+
+```
+CLI Command
+    ↓
+RetrievalService
+    ↓
+RetrievalRepository
+    ↓
+Storage Provider (DynamoDB / S3)
+```
+
+`RetrievalService` owns all query logic and returns immutable snapshot DTOs. `RetrievalRepository` owns all storage provider interactions. CLI commands own only argument parsing and output formatting.
+
+This layering ensures future storage evolution does not require changes to retrieval commands.
+
+### FR-P1e: Engineering Retrieval CLI — Immutable Retrieval DTOs
+
+`RetrievalService` must return immutable snapshot DTOs. Formatting and serialization layers must not mutate retrieval objects. This guarantees deterministic behavior and simplifies future validation.
+
+### FR-P1f: Engineering Retrieval CLI — Canonical Serialization
+
+`RetrievalFormatter` must normalize before output generation:
+
+- Field ordering (canonical alphabetical or defined priority order)
+- Collection ordering (canonical precedence per FR-P1c)
+- Timestamp formatting (UTC ISO-8601)
+- Numeric precision (consistent decimal representation)
+
+For identical persisted state, serialized JSON output must be byte-identical across invocations.
 
 ### FR-P2: Engineering Retrieval CLI — Output Formats
 
@@ -152,6 +224,8 @@ Retrieval command output must not expose:
 The same sensitive-data exclusion policy from Phase 4 aggregation applies to all retrieval output.
 
 ### FR-P5: Structured Logging Improvements
+
+Structured logs are operational diagnostics. They shall never become authoritative evidence or replace immutable aggregation artifacts. The platform evidence hierarchy is: raw execution evidence → aggregation artifacts → lineage manifests → aggregate-set completion markers. Structured logs support debugging but are not part of this chain.
 
 Structured logging must be improved to provide sufficient operational traceability across all lifecycle stages without exposing sensitive payload content. Logs must include stable correlation fields enabling cross-stage timeline reconstruction.
 
@@ -209,6 +283,18 @@ Then the command returns the complete aggregate artifact set with correct counts
 Given an audit with a failed aggregation job  
 When `retrieve failure-summaries` is executed  
 Then the command returns the failure classification, reason code, failure category, and job metadata without exposing raw evidence content.
+
+### AC-P1a: Retrieval Output Provenance
+
+Given any retrieval command executed for a completed audit  
+When the command output is inspected  
+Then the output includes provenance metadata: `retrieved_at`, `retrieval_version`, `aggregation_version`, `manifest_hash`, `audit_id`, `client_id`, and the engineering diagnostic disclaimer.
+
+### AC-P1b: Deterministic Retrieval Reproducibility
+
+Given any retrieval command executed twice for the same audit with identical persisted aggregation state  
+When both outputs are compared  
+Then the serialized JSON output is byte-identical across both invocations.
 
 ### AC-P2: JSON Output Format
 
@@ -268,8 +354,11 @@ Then all campaigns complete with the lifecycle reaching `COMPLETED`, aggregation
 - Phase 4A.5 Engineering Retrieval CLI is engineering-facing only; customer-facing retrieval is out of scope.
 - Phase 4A must not implement Phase 5, Phase 6, or Phase 7 behavior.
 - All Phase 4 aggregation invariants (immutability, lineage, idempotency, determinism) remain in effect throughout Phase 4A.
-- Retrieval commands must not mutate persisted state.
-- The Phase 5 consumer contract once published is immutable except through a formal versioning process.
+- Retrieval commands must not mutate persisted state. The Engineering Retrieval Layer is a platform invariant: allowed operations are inspect, retrieve, list, summarize, verify, and export only.
+- Structured logs are operational diagnostics only. They shall never become authoritative evidence or replace immutable aggregation artifacts.
+- The Phase 5 consumer contract once published is immutable except through a formal versioning process requiring contract version increment, HITL approval, and explicit consumer migration documentation.
+- The Phase 5 consumer contract constitutes a compatibility gate. Future aggregation changes that would break the published contract require a new contract version, HITL approval, and automated regression test validation before implementation.
+- Aggregation owns facts. Phase 5 owns interpretation. Phase 5 shall never redefine or reinterpret persisted aggregation facts.
 - Operational validation campaign requires multiple 48-hour audits; short-duration audits do not satisfy Phase 4A closure requirements.
 
 ## 12. Dependencies
@@ -297,9 +386,12 @@ QA validation for Phase 4A must include:
 
 - Unit tests for each retrieval command confirming correct data extraction and formatting.
 - Unit tests confirming sensitive data exclusion from retrieval output.
+- Provenance validation tests confirming every retrieval output includes `retrieved_at`, `retrieval_version`, `aggregation_version`, `manifest_hash`, `audit_id`, `client_id`, and the engineering diagnostic disclaimer.
+- Deterministic serialization tests confirming byte-identical JSON output for identical persisted state across two independent invocations.
 - Integration tests confirming retrieval returns correct data for known fixture aggregation state.
 - Tests confirming JSON and human-readable output formats.
 - Tests confirming filtering by client, audit, run, endpoint, scenario, and window.
+- Consumer contract compatibility gate tests: automated regression tests that validate Phase 5 consumer contract stability when aggregation artifacts change.
 - Structured logging coverage tests confirming required log events are emitted.
 - Import smoke tests covering all Lambda handlers and critical module imports.
 - `src/packages` divergence tests confirming behavioral equivalence post-remediation.

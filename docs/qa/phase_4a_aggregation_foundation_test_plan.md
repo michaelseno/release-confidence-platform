@@ -67,7 +67,7 @@ Validate all required retrieval commands for correctness, output format, filteri
 | RET-U14 | `retrieve failure-summaries` | Returns classification_counts by approved failure type labels |
 | RET-U15 | `retrieve processing-timeline` | Returns per-stage timestamps from job metadata |
 
-### 3.3 Unit Tests — Output Format
+### 3.3 Unit Tests — Output Format and Provenance
 
 | Test ID | Test Description | Pass Criteria |
 | --- | --- | --- |
@@ -75,6 +75,13 @@ Validate all required retrieval commands for correctness, output format, filteri
 | RET-F02 | `--output human` produces readable formatted output | Output is non-empty; key labels match expected field names |
 | RET-F03 | JSON output field ordering is deterministic | Two calls to same command produce byte-identical JSON |
 | RET-F04 | Default output format is human-readable | Command without `--output` flag defaults to human format |
+| RET-PROV01 | Every JSON output includes provenance envelope | Top-level `retrieved_at`, `retrieval_version`, `aggregation_version`, `manifest_hash`, `audit_id`, `client_id` all present |
+| RET-PROV02 | Every JSON output includes `_notice` field | `_notice` field contains the engineering diagnostic disclaimer string |
+| RET-PROV03 | Human-readable output includes disclaimer at top | Disclaimer text appears before any data in human-readable format |
+| RET-PROV04 | `manifest_hash` matches the AggregateSetCompletion marker | `manifest_hash` in provenance equals `aggregate_set_hash` from the completion marker |
+| RET-REPR01 | Byte-identical JSON for same persisted state | Two independent invocations for same audit/state produce identical serialized JSON bytes |
+| RET-REPR02 | Byte-identical JSON after no-op round-trip | Deserializing and re-serializing output produces identical bytes |
+| RET-REPR03 | Collection ordering is deterministic | Collections in JSON output are ordered by canonical precedence: audit_id → audit_execution_id → endpoint_id → scenario_id → timestamp |
 
 ### 3.4 Unit Tests — Filtering
 
@@ -192,7 +199,25 @@ Each campaign requires:
 
 Phase 4A.7 closes only upon HITL approval after multiple successful 48-hour campaigns are documented.
 
-## 7. Regression Requirements
+## 7. Phase 5 Consumer Contract Compatibility Gate Tests
+
+These tests validate the stability of the Phase 5 consumer contract and must be implemented as part of Phase 4A.4 or Phase 4A.5.
+
+| Test ID | Test Description | Pass Criteria |
+| --- | --- | --- |
+| CONTRACT-01 | AggregateSetCompletion marker contains all stable fields | All required fields from the Phase 5 contract field list present and correctly typed in fixture |
+| CONTRACT-02 | AuditAggregate contains all stable fields | All required fields from the Phase 5 contract field list present and correctly typed |
+| CONTRACT-03 | EndpointAggregate contains all stable fields | All required fields including `success_inputs.numerator`, `success_inputs.denominator` present |
+| CONTRACT-04 | FailureClassificationAggregate contains all stable fields | `classification_counts` map present with at least one entry |
+| CONTRACT-05 | Missing stable field fails contract test | Removing a stable field from a fixture aggregate causes the contract test to fail |
+| CONTRACT-06 | Breaking field type change fails contract test | Changing `request_counts.total` from int to string causes the contract test to fail |
+| CONTRACT-07 | Additive field does not fail contract test | Adding a new non-breaking field to an aggregate does not cause existing contract tests to fail |
+
+**Contract test location:** `tests/unit/test_phase5_consumer_contract.py`
+
+This test file becomes the compatibility gate regression baseline. It must pass for all future aggregation versions before implementation is approved.
+
+## 8. Regression Requirements
 
 All tests from the following suites must continue to pass throughout Phase 4A:
 

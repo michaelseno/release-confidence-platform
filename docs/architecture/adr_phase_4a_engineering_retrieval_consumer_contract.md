@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted (with HITL-required amendments incorporated)
 
 ## Context
 
@@ -20,20 +20,30 @@ These gaps must be addressed before Phase 5 begins. Phase 4A is the brownfield i
 
 ## Decision
 
-### Decision 1: Engineering Retrieval Layer as CLI, Not API
+### Decision 1: Engineering Retrieval Layer as CLI, Not API; Constitutional Read-Only Invariant
 
 The Engineering Retrieval Layer will be implemented as a CLI extension (`rcp retrieve`) within the existing operator CLI infrastructure, not as a new HTTP API or Lambda function.
+
+The Engineering Retrieval Layer is elevated to a **platform invariant**:
+
+> The Engineering Retrieval Layer SHALL NEVER create, update, delete, repair, recompute, compact, or otherwise modify persisted audit evidence, aggregation artifacts, lineage manifests, lifecycle records, or platform state. Allowed operations are limited to: inspect, retrieve, list, summarize, verify, and export.
 
 **Rationale:**
 - Engineering retrieval is an internal operational tool, not a product feature.
 - CLI delivery is faster to implement, easier to secure (IAM-gated local execution), and does not introduce a new HTTP surface.
 - Existing DynamoDB access patterns can be reused directly.
 - A CLI is appropriate for the operational debugging, evidence inspection, and audit traceability use cases.
+- Elevating read-only behavior to a platform invariant prevents future implementation drift from inadvertently adding write paths to the retrieval layer, which would compromise evidence integrity and trustworthiness.
 
-**Constraint:**
-- Retrieval commands are strictly read-only.
+**Constitutional Constraint:**
+- Retrieval commands are strictly read-only. This is a platform invariant, not an implementation preference.
 - Sensitive data exclusion rules from Phase 4 aggregation apply to all retrieval output.
-- The CLI is not customer-facing. Customer-facing evidence retrieval belongs to a later phase.
+- The CLI is not customer-facing. Customer-facing evidence retrieval belongs to a later phase and must remain a separate bounded context; it must not reuse or expose engineering retrieval interfaces directly.
+
+**Architecture constraint:**
+- The retrieval layer must follow CLI → RetrievalService → RetrievalRepository → Storage Provider layering. CLI commands must never interact with storage directly.
+- `RetrievalService` must return immutable snapshot DTOs. Formatting layers must not mutate retrieval objects.
+- `RetrievalFormatter` must produce byte-identical serialized JSON output for identical input DTOs. Canonical serialization (field ordering, collection ordering, timestamp formatting) is required.
 
 ### Decision 2: Phase 5 Consumer Contract Published as Platform Constitution Document
 
@@ -44,12 +54,19 @@ The Phase 5 consumer contract will be a formally published document (`docs/archi
 - A design-time contract enforced through HITL review is appropriate for an internal multi-phase platform where all phases are built by the same team.
 - Publishing the contract as a platform constitution document makes it durable, discoverable, and formally under governance.
 
+**Ownership Boundary (constitutional):**
+
+> Aggregation owns facts. Phase 5 owns interpretation. Phase 5 may derive intelligence from aggregation outputs. Phase 5 shall never redefine or reinterpret persisted aggregation facts.
+
 **Contract Principles:**
-1. Aggregation owns data. Phase 5 owns interpretation.
+1. Aggregation owns facts. Phase 5 owns interpretation.
 2. Phase 5 must not consume raw execution evidence.
 3. Phase 5 must not mutate aggregation artifacts.
 4. Phase 5 must require the `AggregateSetCompletion` marker before consuming child aggregate records.
 5. Phase 5 must not reinterpret raw evidence through its own summarization logic.
+
+**Compatibility Gate:**
+The published Phase 5 Consumer Contract constitutes a compatibility gate. Future aggregation changes that break the stable field set require: contract version increment, HITL approval, explicit consumer migration documentation, and automated regression test validation. A baseline compatibility test must be implemented in Phase 4A validating `agg_v1` fields on a fixture aggregate set.
 
 **Versioning:**
 - The contract is versioned alongside `aggregation_version`. Changes to Phase 4A.3 contract require a new version and HITL approval.
@@ -83,6 +100,7 @@ Structured logging improvements in Phase 4A.5 will add new structured log events
 **Constraint:**
 - New log events must follow the structured logging standard in `docs/architecture/structured_logging.md`.
 - Logs must not include sensitive payload content.
+- Structured logs are operational diagnostics. They shall never become authoritative evidence or replace immutable aggregation artifacts. The platform evidence hierarchy is: raw execution evidence → aggregation artifacts → lineage manifests → aggregate-set completion markers. Logs support debugging but are not part of this chain.
 
 ## Alternatives Considered
 

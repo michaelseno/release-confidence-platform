@@ -60,11 +60,19 @@ Phase 4A.4 does not modify aggregation logic, add new aggregate types, or introd
 
 ## 4. Phase 4A.5 — Engineering Retrieval Layer
 
+### Constitutional Invariant
+
+The Engineering Retrieval Layer is a **platform invariant**. It SHALL NEVER create, update, delete, repair, recompute, compact, or otherwise modify persisted audit evidence, aggregation artifacts, lineage manifests, lifecycle records, or any platform state.
+
+Allowed operations are limited to: **inspect**, **retrieve**, **list**, **summarize**, **verify**, and **export**.
+
+This invariant is unconditional and applies regardless of requested output format, filtering parameters, or operational context. Violation of this invariant compromises evidence integrity and trustworthiness.
+
 ### Design Philosophy
 
 The Engineering Retrieval Layer is an internal engineering tool. Its purpose is operational debugging, evidence inspection, audit traceability, and engineering support. It is not customer-facing, not operator-facing, and not a reporting surface.
 
-All retrieval commands are read-only. They must not create, update, or delete any persisted record.
+Engineering Retrieval Layer and any future customer-facing evidence retrieval capability must remain separate bounded contexts. Engineering retrieval is an internal operational capability. Customer evidence delivery belongs to a future roadmap phase and must not reuse or expose engineering retrieval interfaces directly.
 
 ### Architecture
 
@@ -74,26 +82,85 @@ The Engineering Retrieval CLI is implemented as a new `rcp retrieve` subcommand 
 rcp retrieve <command> [--client <id>] [--audit <id>] [--output json|human] [options]
 ```
 
+The retrieval layer follows strict bounded-context layering. CLI commands must never interact with storage implementation details directly:
+
+```
+CLI Command  (argument parsing + output formatting only)
+    ↓
+RetrievalService  (query logic, filtering, immutable DTO construction)
+    ↓
+RetrievalRepository  (storage provider interactions only)
+    ↓
+Storage Provider  (DynamoDB / S3)
+```
+
+### Retrieval Output Provenance
+
+Every retrieval command output must include a provenance envelope as the outermost wrapper:
+
+```json
+{
+  "_notice": "This output is for engineering diagnostics only. Authoritative evidence resides in immutable aggregation artifacts.",
+  "retrieved_at": "<UTC ISO-8601>",
+  "retrieval_version": "<retrieval layer version>",
+  "aggregation_version": "<aggregation_version of retrieved artifact>",
+  "manifest_hash": "<aggregate_set_hash from AggregateSetCompletion marker, or null>",
+  "audit_id": "<scoped audit identifier>",
+  "client_id": "<scoped client identifier>",
+  "data": { ... }
+}
+```
+
+For human-readable output, the disclaimer must appear at the top of every retrieval response.
+
+### Deterministic Retrieval Ordering
+
+The retrieval layer must produce deterministically ordered output for all collections. For identical persisted aggregation state, retrieval output must be identical across repeated invocations.
+
+Canonical ordering precedence for all collections:
+
+1. `audit_id` (lexicographic ascending)
+2. `audit_execution_id` (lexicographic ascending)
+3. `endpoint_id` (lexicographic ascending)
+4. `scenario_id` (lexicographic ascending)
+5. `timestamp` (UTC ascending)
+
 ### Component: RetrievalService
 
 Suggested location: `src/release_confidence_platform/retrieval/service.py`
 
 Responsibilities:
 - Accept validated retrieval parameters.
-- Query DynamoDB using existing table access patterns.
+- Query DynamoDB through `RetrievalRepository` only (never directly to storage).
 - Apply filtering by client, audit, run, endpoint, scenario, or window.
-- Return structured DTOs for formatting.
+- Return **immutable snapshot DTOs** only. DTOs must not be mutated after construction.
 - Never write, update, or delete records.
 - Enforce sensitive data exclusion on all returned fields.
+
+### Component: RetrievalRepository
+
+Suggested location: `src/release_confidence_platform/retrieval/repository.py`
+
+Responsibilities:
+- Execute all DynamoDB and S3 read operations.
+- Own all storage provider interactions.
+- Return raw storage records to `RetrievalService` for DTO construction.
+- Never accept write, update, or delete operations.
 
 ### Component: RetrievalFormatter
 
 Suggested location: `src/release_confidence_platform/retrieval/formatter.py`
 
 Responsibilities:
-- Accept retrieval DTOs.
+- Accept immutable retrieval DTOs. Must not mutate retrieval objects.
 - Format as machine-readable JSON or human-readable text.
-- Produce consistent field ordering for deterministic JSON output.
+- Apply canonical serialization normalization before output generation:
+  - Field ordering: canonical alphabetical or defined priority order
+  - Collection ordering: canonical precedence per deterministic ordering rules above
+  - Timestamp formatting: UTC ISO-8601
+  - Numeric precision: consistent decimal representation
+- Produce byte-identical serialized JSON output for identical input DTOs across invocations.
+- Prepend provenance envelope on all output.
 
 ### Command Implementations
 
@@ -128,19 +195,41 @@ The RetrievalService must apply the same allowed-field contract used by Phase 4 
 ```text
 src/release_confidence_platform/retrieval/
   __init__.py
-  commands.py
-  service.py
-  formatter.py
-  filters.py
+  commands.py      (CLI command definitions — argument parsing + output only)
+  service.py       (RetrievalService — immutable DTOs, query logic, filtering)
+  repository.py    (RetrievalRepository — storage provider interactions)
+  formatter.py     (RetrievalFormatter — canonical serialization + provenance)
+  filters.py       (filter validation and application)
+  dtypes.py        (immutable DTO definitions)
 
 tests/unit/retrieval/
   test_retrieval_commands.py
   test_retrieval_formatter.py
   test_retrieval_sensitive_data.py
   test_retrieval_filtering.py
+  test_retrieval_provenance.py
+  test_retrieval_determinism.py
 ```
 
 ## 5. Phase 4A.5 — Structured Logging Improvements
+
+### Logs Are Not Evidence
+
+Structured logs are operational diagnostics. They shall never become authoritative evidence or replace immutable aggregation artifacts.
+
+The platform evidence hierarchy is:
+
+```
+Raw execution evidence (S3)
+    ↓
+Aggregation artifacts (DynamoDB)
+    ↓
+Lineage manifests (DynamoDB)
+    ↓
+AggregateSetCompletion marker (DynamoDB)
+```
+
+Structured logs support debugging but are not part of this chain. Any operational conclusion derived solely from logs — not from immutable aggregation artifacts — must be treated as advisory only.
 
 ### Current State
 
@@ -252,9 +341,21 @@ A dedicated test file `tests/unit/test_handler_import_smoke.py` must confirm all
 
 ## 7. Phase 4A.3 — Phase 5 Consumer Contract
 
-### Contract Authority
+### Contract Authority and Ownership Boundary
 
-Aggregation owns data. Phase 5 owns interpretation. This separation is the foundational principle of the Phase 4A consumer contract.
+**Aggregation owns facts. Phase 5 owns interpretation.**
+
+Phase 5 may derive intelligence from aggregation outputs. Phase 5 shall never redefine or reinterpret persisted aggregation facts.
+
+This ownership boundary is a constitutional statement and must be stated explicitly in the published Phase 5 Consumer Contract document.
+
+The full ownership statement:
+- Aggregation owns data production, persistence, and lineage.
+- Phase 5 owns analytical interpretation and reliability intelligence derivation.
+- Phase 5 may consume aggregation outputs as stable inputs.
+- Phase 5 shall never reinterpret, re-summarize, or re-aggregate raw execution evidence.
+- Phase 5 shall never mutate aggregation artifacts.
+- Phase 5 shall never bypass the `AggregateSetCompletion` marker.
 
 ### What Phase 5 May Consume
 
@@ -307,6 +408,18 @@ The following fields on `EndpointAggregate` are stable:
 If a future aggregation version introduces new or changed fields, the consumer contract is versioned alongside `aggregation_version`. Phase 5 must select an `aggregation_version` to consume and must not assume forward compatibility across versions.
 
 Phase 4 / `agg_v1` is the initial stable contract baseline.
+
+### Consumer Contract Compatibility Gate
+
+The published Phase 5 Consumer Contract is a compatibility gate. Future aggregation changes that would affect the stable field set must be validated against the published contract before implementation.
+
+Breaking contract changes require:
+1. Contract version increment.
+2. HITL approval.
+3. Explicit consumer migration documentation.
+4. Automated regression tests confirming the new contract version does not silently break Phase 5 assumptions.
+
+Phase 4A.6 or Phase 4A.7 must add a baseline automated test that validates the `agg_v1` consumer contract fields are present and correctly typed in a fixture aggregate set. This test becomes the compatibility gate regression baseline for all future versions.
 
 ## 8. Backward Compatibility
 
