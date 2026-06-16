@@ -116,6 +116,18 @@ class AggregationOrchestrator:
                     return self._handle_duplicate_job(
                         job_key, client_id, audit_id, aggregation_version, job_id
                     )
+            self.logger.log(
+                "aggregation_job_claimed",
+                event_type="aggregation_job_claimed",
+                log_category=LOG_CATEGORY_INTERNAL,
+                level="INFO",
+                service="AggregationOrchestrator",
+                stage="aggregation",
+                client_id=client_id,
+                audit_id=audit_id,
+                aggregation_job_id=job_id,
+                aggregation_version=aggregation_version,
+            )
             audit = self.repository.get_audit_metadata(client_id, audit_id)
             audit_execution_id = self.identity_resolver.resolve_or_assign(
                 client_id, audit_id, audit
@@ -146,12 +158,41 @@ class AggregationOrchestrator:
                 )
             runs = self.repository.list_completed_runs(client_id, audit_id)
             records = self._load_records(runs, client_id=client_id, audit_id=audit_id)
+            self.logger.log(
+                "aggregation_eligibility_evaluated",
+                event_type="aggregation_eligibility_evaluated",
+                log_category=LOG_CATEGORY_INTERNAL,
+                level="INFO",
+                service="AggregationOrchestrator",
+                stage="aggregation",
+                client_id=client_id,
+                audit_id=audit_id,
+                aggregation_job_id=job_id,
+                result="eligible",
+                reason_code=None,
+                source_run_count=len(runs),
+            )
             integrity = validate_evidence_integrity(
                 audit=audit,
                 runs=runs,
                 records=records,
                 audit_execution_id=audit_execution_id,
                 config_version=config_version,
+            )
+            self.logger.log(
+                "aggregation_integrity_gate_evaluated",
+                event_type="aggregation_integrity_gate_evaluated",
+                log_category=LOG_CATEGORY_INTERNAL,
+                level="INFO",
+                service="AggregationOrchestrator",
+                stage="aggregation",
+                client_id=client_id,
+                audit_id=audit_id,
+                aggregation_job_id=job_id,
+                result="pass",
+                expected_count=integrity.expected_execution_count,
+                observed_count=integrity.source_run_count,
+                reason_code=None,
             )
             all_items = self._build_persisted_records(
                 client_id,
@@ -165,6 +206,19 @@ class AggregationOrchestrator:
                 integrity.expected_execution_count,
                 integrity.source_run_count,
                 integrity.source_raw_result_count,
+            )
+            self.logger.log(
+                "aggregation_manifest_write_started",
+                event_type="aggregation_manifest_write_started",
+                log_category=LOG_CATEGORY_INTERNAL,
+                level="INFO",
+                service="AggregationOrchestrator",
+                stage="aggregation",
+                client_id=client_id,
+                audit_id=audit_id,
+                aggregation_job_id=job_id,
+                manifest_scope="audit",
+                source_ref_count=len(records),
             )
             try:
                 self.repository.put_records_once(all_items)
@@ -221,6 +275,28 @@ class AggregationOrchestrator:
                 ),
                 {},
             )
+            self.logger.log(
+                "aggregation_set_completed",
+                event_type="aggregation_set_completed",
+                log_category=LOG_CATEGORY_INTERNAL,
+                level="INFO",
+                service="AggregationOrchestrator",
+                stage="aggregation",
+                client_id=client_id,
+                audit_id=audit_id,
+                aggregation_job_id=job_id,
+                aggregate_record_count=aggregate_count,
+                endpoint_count=len(
+                    {
+                        item.get("endpoint_id")
+                        for item in all_items
+                        if item.get("aggregate_type") == "endpoint"
+                    }
+                ),
+                manifest_count=sum(
+                    1 for item in all_items if item.get("record_kind") == "lineage_manifest"
+                ),
+            )
             return self._complete_job(
                 job_key,
                 client_id,
@@ -239,6 +315,20 @@ class AggregationOrchestrator:
                 aggregate_set_ref=aggregate_set,
             )
         except AggregationIneligibleError as exc:
+            self.logger.log(
+                "aggregation_eligibility_evaluated",
+                event_type="aggregation_eligibility_evaluated",
+                log_category=LOG_CATEGORY_INTERNAL,
+                level="INFO",
+                service="AggregationOrchestrator",
+                stage="aggregation",
+                client_id=client_id,
+                audit_id=audit_id,
+                aggregation_job_id=job_id,
+                result="ineligible",
+                reason_code=exc.error_type,
+                source_run_count=0,
+            )
             return self._complete_job(
                 job_key,
                 client_id,
@@ -271,6 +361,20 @@ class AggregationOrchestrator:
                         "aggregation_job_id": job_id,
                     },
                 },
+            )
+            self.logger.log(
+                "aggregation_job_failed",
+                event_type="aggregation_job_failed",
+                log_category=LOG_CATEGORY_INTERNAL,
+                level="ERROR",
+                service="AggregationOrchestrator",
+                stage="aggregation",
+                client_id=client_id,
+                audit_id=audit_id,
+                aggregation_job_id=job_id,
+                failure_category=failure_category,
+                reason_code=reason,
+                component="AggregationOrchestrator",
             )
             self._log("aggregation_failed", client_id, audit_id, job_id, reason)
             return sanitize(

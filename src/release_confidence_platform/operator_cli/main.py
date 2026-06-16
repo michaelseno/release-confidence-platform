@@ -8,13 +8,16 @@ import sys
 from release_confidence_platform.core.exceptions import EngineError
 from release_confidence_platform.operator_cli import services
 from release_confidence_platform.operator_cli.result import CommandResult, render, render_error
+from release_confidence_platform.retrieval.commands import build_retrieve_parser, dispatch_retrieve
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rcp", description="Internal Release Confidence Platform operator CLI."
     )
-    sub = parser.add_subparsers(dest="group", required=True, metavar="{client,audit,config}")
+    sub = parser.add_subparsers(
+        dest="group", required=True, metavar="{client,audit,config,retrieve}"
+    )
     client = sub.add_parser("client", help="Discover clients available to operators")
     client_sub = client.add_subparsers(dest="client_command", required=True)
     p = client_sub.add_parser("list", help="List clients visible in a stage")
@@ -91,6 +94,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--include-sample-endpoints", action="store_true")
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--output", choices=("text", "json"), default=None)
+    retrieve = sub.add_parser(
+        "retrieve",
+        help="Engineering retrieval commands for operational debugging (read-only)",
+    )
+    retrieve_sub = retrieve.add_subparsers(dest="retrieve_command", required=True)
+    build_retrieve_parser(retrieve_sub)
     return parser
 
 
@@ -125,6 +134,26 @@ def _limit_arg(value: str) -> int:
 
 
 def dispatch(args: argparse.Namespace) -> CommandResult:
+    if args.group == "retrieve":
+        from release_confidence_platform.config.stage_config import (
+            StageConfigLoader,  # noqa: PLC0415
+        )
+        from release_confidence_platform.retrieval.repository import (
+            RetrievalRepository,  # noqa: PLC0415, F401
+        )
+        from release_confidence_platform.retrieval.service import (
+            RetrievalService,  # noqa: PLC0415, F401
+        )
+        from release_confidence_platform.storage.aws_client_factory import (
+            AwsClientFactory,  # noqa: PLC0415
+        )
+
+        stage_config = StageConfigLoader().load(args.stage)
+        factory = AwsClientFactory(stage_config)
+        dynamodb_client = factory._session.client("dynamodb")
+        repo = RetrievalRepository(stage_config.audit_metadata_table, dynamodb_client)
+        svc = RetrievalService(repo)
+        return dispatch_retrieve(args, svc)
     if args.group == "client":
         if args.client_command == "list":
             return services.client_list_command(args)
@@ -183,6 +212,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 1
+    # Retrieve commands pre-render their output; print it directly.
+    if getattr(args, "group", None) == "retrieve" and result.data.get("rendered") is not None:
+        print(result.data["rendered"])
+        return result.exit_code
     output = result.data.get("output_format") or getattr(args, "output", None) or "text"
     print(render(result, output=output))
     return result.exit_code
@@ -193,6 +226,8 @@ def _command_name(args: argparse.Namespace) -> str:
         return f"client {getattr(args, 'client_command', 'unknown')}"
     if getattr(args, "group", None) == "config":
         return f"config {getattr(args, 'config_command', 'unknown')}"
+    if getattr(args, "group", None) == "retrieve":
+        return f"retrieve {getattr(args, 'retrieve_command', 'unknown')}"
     return f"audit {getattr(args, 'audit_command', 'unknown')}"
 
 
