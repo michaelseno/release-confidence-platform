@@ -36,15 +36,6 @@ class AuditMetadataRepository:
     def aggregation_job_keys(self, client_id: str, audit_id: str, job_id: str) -> dict[str, str]:
         return {"PK": f"CLIENT#{client_id}", "SK": f"AUDIT#{audit_id}#AGGJOB#{job_id}"}
 
-    def put_aggregation_job_intent_once(self, item: dict[str, Any]) -> None:
-        self._put_conditional(
-            item,
-            error=StorageError("Aggregation job intent exists", "AGGREGATION_JOB_INTENT_EXISTS"),
-        )
-
-    def update_aggregation_job_intent(self, key: dict[str, str], updates: dict[str, Any]) -> None:
-        self.update_occurrence(key, updates)
-
     def get_audit_metadata(self, client_id: str, audit_id: str) -> dict[str, Any]:
         response = self._call("get_item", Key=self.audit_keys(client_id, audit_id))
         if "Item" not in response:
@@ -73,6 +64,116 @@ class AuditMetadataRepository:
                 break
             kwargs["ExclusiveStartKey"] = last_key
         return items
+
+    def list_audits_for_client(
+        self, client_id: str, *, limit: int, exclusive_start_key: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """List canonical audit metadata records for a client.
+
+        Audit child records share the same ``AUDIT#`` sort-key prefix, so query pages are
+        positively filtered to the canonical ``AUDIT#<audit_id>`` shape. Pagination continues
+        until the requested number of canonical rows is collected or DynamoDB is exhausted.
+        """
+
+        items: list[dict[str, Any]] = []
+        last_evaluated_key = exclusive_start_key
+        while len(items) < limit:
+            kwargs: dict[str, Any] = {
+                "KeyConditionExpression": "PK = :pk AND begins_with(SK, :sk_prefix)",
+                "ExpressionAttributeValues": {
+                    ":pk": {"S": f"CLIENT#{client_id}"},
+                    ":sk_prefix": {"S": "AUDIT#"},
+                },
+                "Limit": limit,
+            }
+            if last_evaluated_key:
+                kwargs["ExclusiveStartKey"] = last_evaluated_key
+            try:
+                response = self._call("query", **kwargs)
+            except Exception as exc:
+                if isinstance(exc, StorageError):
+                    raise
+                raise StorageError("DynamoDB audit query failed", "STORAGE_ERROR") from exc
+            for raw_item in response.get("Items", []):
+                item = _unmarshal_ddb_item(raw_item)
+                if _is_canonical_audit_metadata_item(item, client_id):
+                    items.append(item)
+                    if len(items) >= limit:
+                        break
+            last_evaluated_key = response.get("LastEvaluatedKey")
+            if not last_evaluated_key:
+                break
+        return {
+            "items": items,
+            "last_evaluated_key": last_evaluated_key,
+        }
+
+    def list_clients_from_registry(
+        self, *, limit: int, exclusive_start_key: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
+        """Return registry-backed clients if a registry/index exists.
+
+        No registry or client index exists in the current repository schema, so callers should use
+        the documented temporary bounded scan fallback.
+        """
+
+        return None
+
+    def scan_clients_bounded(
+        self,
+        *,
+        limit: int,
+        exclusive_start_key: dict[str, Any] | None = None,
+        max_items: int = 1000,
+    ) -> dict[str, Any]:
+        """Temporary bounded scan fallback for client discovery.
+
+        This intentionally reads only safe metadata fields and stops once enough unique clients are
+        collected or the hard read guard is reached. Replace with a client registry/index when one
+        is available.
+        """
+
+        clients: dict[str, dict[str, Any]] = {}
+        read_count = 0
+        last_key = exclusive_start_key
+        while len(clients) < limit and read_count < max_items:
+            page_limit = min(limit - len(clients), max_items - read_count)
+            if page_limit <= 0:
+                break
+            kwargs: dict[str, Any] = {
+                "Limit": page_limit,
+                "ProjectionExpression": (
+                    "PK, SK, client_id, client_name, created_at, updated_at, lifecycle_state"
+                ),
+            }
+            if last_key:
+                kwargs["ExclusiveStartKey"] = last_key
+            try:
+                response = self._call("scan", **kwargs)
+            except Exception as exc:
+                if isinstance(exc, StorageError):
+                    raise
+                raise StorageError("DynamoDB client scan failed", "STORAGE_ERROR") from exc
+            items = response.get("Items", [])
+            read_count += len(items)
+            for item in items:
+                item = _unmarshal_ddb_item(item)
+                client_id = _client_id_from_item(item)
+                if not client_id:
+                    continue
+                current = clients.setdefault(
+                    client_id,
+                    {"client_id": client_id, "active_audit_count": 0},
+                )
+                current["active_audit_count"] = current.get("active_audit_count", 0) + 1
+                for field in ("client_name", "created_at", "updated_at"):
+                    value = item.get(field)
+                    if value is not None and current.get(field) is None:
+                        current[field] = value
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+        return {"items": list(clients.values())[:limit], "last_evaluated_key": last_key}
 
     def put_audit_metadata_once(self, item: dict[str, Any]) -> None:
         item = sanitize(item)
@@ -172,6 +273,17 @@ class AuditMetadataRepository:
     def record_finalization(self, client_id: str, audit_id: str, metadata: dict[str, Any]) -> None:
         self._set_fields(client_id, audit_id, {"finalization": sanitize(metadata)})
 
+    def put_aggregation_job_intent_once(self, item: dict[str, Any]) -> None:
+        self._put_conditional(
+            item,
+            error=StorageError(
+                "Aggregation job intent exists", "AGGREGATION_JOB_INTENT_EXISTS"
+            ),
+        )
+
+    def update_aggregation_job_intent(self, key: dict[str, str], updates: dict[str, Any]) -> None:
+        self.update_occurrence(key, updates)
+
     def record_cleanup_errors(
         self, client_id: str, audit_id: str, cleanup_errors: list[dict[str, Any]]
     ) -> None:
@@ -237,3 +349,63 @@ class AuditMetadataRepository:
             return method(TableName=self.table_name, **kwargs)
         except TypeError:
             return method(**kwargs)
+
+
+def _client_id_from_item(item: dict[str, Any]) -> str | None:
+    value = _ddb_scalar(item.get("client_id"))
+    if isinstance(value, str) and value:
+        return value
+    pk = _ddb_scalar(item.get("PK"))
+    if isinstance(pk, str) and pk.startswith("CLIENT#"):
+        return pk.removeprefix("CLIENT#")
+    return None
+
+
+def _is_canonical_audit_metadata_item(item: dict[str, Any], client_id: str) -> bool:
+    pk = _ddb_scalar(item.get("PK"))
+    sk = _ddb_scalar(item.get("SK"))
+    if pk != f"CLIENT#{client_id}" or not isinstance(sk, str):
+        return False
+    if not sk.startswith("AUDIT#"):
+        return False
+    audit_id = sk.removeprefix("AUDIT#")
+    return bool(audit_id) and "#" not in audit_id
+
+
+def _ddb_scalar(value: Any) -> Any:
+    value = _unmarshal_ddb_value(value)
+    return value
+
+
+def _unmarshal_ddb_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Return a plain-Python item for both low-level DDB and unit fake shapes."""
+
+    return {key: _unmarshal_ddb_value(value) for key, value in item.items()}
+
+
+def _unmarshal_ddb_value(value: Any) -> Any:
+    """Unwrap DynamoDB AttributeValue maps without altering plain fake items."""
+
+    if isinstance(value, list):
+        return [_unmarshal_ddb_value(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if len(value) == 1:
+        kind, raw = next(iter(value.items()))
+        if kind == "S":
+            return raw
+        if kind == "N":
+            return raw
+        if kind == "BOOL":
+            return raw
+        if kind == "NULL":
+            return None
+        if kind == "M":
+            return {key: _unmarshal_ddb_value(item) for key, item in raw.items()}
+        if kind == "L":
+            return [_unmarshal_ddb_value(item) for item in raw]
+        if kind in {"SS", "NS", "BS"}:
+            return list(raw)
+        if kind == "B":
+            return raw
+    return {key: _unmarshal_ddb_value(item) for key, item in value.items()}

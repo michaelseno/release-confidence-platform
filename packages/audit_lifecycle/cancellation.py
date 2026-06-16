@@ -5,7 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from packages.audit_lifecycle.constants import LIFECYCLE_STATE_CANCELLED
-from packages.audit_lifecycle.service import AuditLifecycleService, LifecycleTransition
+from packages.audit_lifecycle.service import (
+    AuditLifecycleService,
+    LifecycleTransition,
+)
 from packages.core.time import utc_now_iso
 from packages.core.validators import validate_identifier
 from packages.sanitization.sanitizer import sanitize

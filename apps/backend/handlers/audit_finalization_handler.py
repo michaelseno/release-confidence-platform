@@ -41,6 +41,17 @@ from release_confidence_platform.audit_lifecycle.finalization_gate import (
     finalization_integrity_gate,
 )
 
+# ---------------------------------------------------------------------------
+# Startup import validation — fail fast on missing critical modules
+# ---------------------------------------------------------------------------
+try:
+    from packages.core import logging as _core_logging  # noqa: F401
+    from packages.storage import audit_metadata_client as _amc  # noqa: F401
+except ImportError as _exc:  # pragma: no cover
+    import logging as _logging
+    _logging.critical("STARTUP_IMPORT_FAILURE: %s", _exc)
+    raise
+
 
 class AuditFinalizationHandler:
     def __init__(

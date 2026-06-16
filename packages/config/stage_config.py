@@ -54,13 +54,24 @@ class StageConfig:
     def to_dict(self) -> dict[str, str]:
         return asdict(self)
 
+    def validate_orchestrator_function_name(self) -> None:
+        validate_orchestrator_function_name(self.orchestrator_function_name, stage=self.stage)
+
     def validate_scheduler_config(self) -> None:
         validate_scheduler_config(self)
 
 
 class StageConfigLoader:
     def __init__(self, *, root: Path | None = None):
-        self.root = root or Path(__file__).resolve().parents[2]
+        self.root = root or self._default_root()
+
+    @staticmethod
+    def _default_root() -> Path:
+        module_path = Path(__file__).resolve()
+        for candidate in (*module_path.parents, Path.cwd(), *Path.cwd().resolve().parents):
+            if (candidate / "config" / "stages").is_dir():
+                return candidate
+        return module_path.parents[3]
 
     def load(self, stage: str, env: Mapping[str, str] | None = None) -> StageConfig:
         if stage not in STAGES:
@@ -95,6 +106,18 @@ class StageConfigLoader:
                 "STAGE_CONFIG_ERROR",
             )
         return StageConfig(stage=stage, **resolved)
+
+
+def validate_orchestrator_function_name(function_name: str, *, stage: str) -> None:
+    """Reject committed placeholder Lambda targets before runtime invocation."""
+
+    if "placeholder" in function_name.lower():
+        raise ConfigError(
+            f"Stage orchestrator_function_name is a placeholder for stage {stage}; set a deployed "
+            "Lambda function target in config/stages/<stage>.json or export "
+            "RCP_ORCHESTRATOR_FUNCTION_NAME=<deployed-function-name>",
+            "LAMBDA_CONFIG_ERROR",
+        )
 
 
 def validate_scheduler_config(config: StageConfig) -> None:

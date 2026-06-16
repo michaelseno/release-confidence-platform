@@ -48,6 +48,29 @@ class AuditMetadataRepository:
             raise StorageError("Audit metadata not found", "AUDIT_NOT_FOUND")
         return response["Item"]
 
+    def list_run_records(self, client_id: str, audit_id: str) -> list[dict[str, Any]]:
+        """Query all RUN child records for the audit.
+
+        Uses a KeyConditionExpression with begins_with on the SK so that only
+        AUDIT#{audit_id}#RUN#* items are returned.  Follows LastEvaluatedKey
+        pagination to return the complete result set.
+        """
+        pk_value = f"CLIENT#{client_id}"
+        sk_prefix = f"AUDIT#{audit_id}#RUN#"
+        items: list[dict[str, Any]] = []
+        kwargs: dict[str, Any] = {
+            "KeyConditionExpression": "PK = :pk AND begins_with(SK, :sk_prefix)",
+            "ExpressionAttributeValues": {":pk": pk_value, ":sk_prefix": sk_prefix},
+        }
+        while True:
+            response = self._call("query", **kwargs)
+            items.extend(response.get("Items", []))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            kwargs["ExclusiveStartKey"] = last_key
+        return items
+
     def list_audits_for_client(
         self, client_id: str, *, limit: int, exclusive_start_key: dict[str, Any] | None = None
     ) -> dict[str, Any]:
