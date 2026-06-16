@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
-from packages.audit_lifecycle.constants import LIFECYCLE_STATE_DRAFT, LIFECYCLE_STATE_FAILED
+from packages.audit_lifecycle.constants import (
+    LIFECYCLE_STATE_DRAFT,
+    LIFECYCLE_STATE_FAILED,
+)
 from packages.audit_scheduling.safeguards import effective_caps
 from packages.config.audit_validation_service import AuditConfigValidationService
 from packages.config.stage_config import StageConfig
@@ -69,8 +73,10 @@ class AuditCreationService:
             existing_metadata = self.repository.get_audit_metadata(
                 validated.client_id, validated.audit_id
             )
-        except Exception:
-            existing_metadata = None
+        except StorageError as exc:
+            if exc.error_type != "AUDIT_NOT_FOUND":
+                raise
+        adopt_existing_artifacts = False
         if force:
             if existing_metadata is None:
                 raise StorageError(
@@ -82,18 +88,19 @@ class AuditCreationService:
                     "Audit lifecycle is not eligible for force recreate", "FORCE_RECREATE_BLOCKED"
                 )
         else:
-            existing_keys = [key for key in keys.values() if self.s3.object_exists(key)]
-            if existing_keys:
-                raise StorageError("Config object exists", "CONFIG_OBJECT_EXISTS")
+            existing_artifacts = {label: self.s3.object_exists(key) for label, key in keys.items()}
+            if any(existing_artifacts.values()):
+                if existing_metadata is None:
+                    self._reconcile_existing_config_artifacts(validated, keys, existing_artifacts)
+                    adopt_existing_artifacts = True
+                else:
+                    raise StorageError("Config object exists", "CONFIG_OBJECT_EXISTS")
             if existing_metadata is not None:
                 raise StorageError("Audit metadata exists", "AUDIT_EXISTS")
         metadata = self._metadata(validated, keys, force=force)
-        for label, payload in (
-            ("client_config", validated.client_config),
-            ("audit_config", validated.audit_config),
-            ("endpoints_config", validated.endpoints_config),
-        ):
-            self.s3.write_json(keys[label], payload, overwrite=force)
+        if not adopt_existing_artifacts:
+            for label, payload in _config_payloads(validated):
+                self.s3.write_json(keys[label], payload, overwrite=force)
         if force:
             self.repository.update_for_force_recreate(metadata)
         else:
@@ -107,6 +114,34 @@ class AuditCreationService:
                 "config_s3_keys": keys,
                 "force": force,
             }
+        )
+
+    def _reconcile_existing_config_artifacts(
+        self, validated: Any, keys: dict[str, str], existing_artifacts: dict[str, bool]
+    ) -> None:
+        diagnostics: list[dict[str, str]] = []
+        all_match = True
+        for label, payload in _config_payloads(validated):
+            key = keys[label]
+            if not existing_artifacts[label]:
+                diagnostics.append({"artifact": label, "key": key, "state": "missing"})
+                all_match = False
+                continue
+            existing_payload = self.s3.read_json(key)
+            if _normalized_json(existing_payload) == _normalized_json(payload):
+                diagnostics.append({"artifact": label, "key": key, "state": "match"})
+            else:
+                diagnostics.append({"artifact": label, "key": key, "state": "mismatch"})
+                all_match = False
+        if all_match:
+            return
+        raise StorageError(
+            "Partial audit create state exists; "
+            f"artifacts={_format_artifact_diagnostics(diagnostics)}; "
+            "metadata_absent=true; recovery=retry with a new bundle/new IDs, or delete only "
+            "the exact stale config objects when metadata is absent, or use --force only when "
+            "metadata exists in DRAFT/FAILED and replacement is safe",
+            "PARTIAL_AUDIT_CREATE_EXISTS",
         )
 
     def _metadata(self, validated: Any, keys: dict[str, str], *, force: bool) -> dict[str, Any]:
@@ -139,3 +174,20 @@ class AuditCreationService:
                 "actor": "operator_cli",
             }
         return sanitize(item)
+
+
+def _config_payloads(validated: Any) -> tuple[tuple[str, dict[str, Any]], ...]:
+    return (
+        ("client_config", validated.client_config),
+        ("audit_config", validated.audit_config),
+        ("endpoints_config", validated.endpoints_config),
+    )
+
+
+def _normalized_json(payload: dict[str, Any]) -> str:
+    return json.dumps(sanitize(payload), sort_keys=True, separators=(",", ":"))
+
+
+def _format_artifact_diagnostics(diagnostics: list[dict[str, str]]) -> str:
+    sanitized = sanitize(diagnostics)
+    return ",".join(f"{item['artifact']}:{item['state']}:{item['key']}" for item in sanitized)

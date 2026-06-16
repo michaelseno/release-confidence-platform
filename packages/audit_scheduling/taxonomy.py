@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from packages.audit_scheduling.constants import RELIABILITY_CATEGORY_BY_SCENARIO, SCENARIO_TYPES
+from packages.audit_scheduling.constants import (
+    RELIABILITY_CATEGORY_BY_SCENARIO,
+    SCENARIO_TYPES,
+)
 from packages.core.exceptions import ValidationError
 
 

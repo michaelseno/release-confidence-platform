@@ -145,3 +145,36 @@ def test_aggregation_handler_repository_receives_metadata_table(monkeypatch):
             f"AggregationRepository was constructed with '{captured_args[0]}' "
             f"instead of METADATA_TABLE='{table_name}'"
         )
+
+
+def test_aggregation_submodules_import():
+    """OPS-I05: All aggregation submodules import successfully."""
+    import release_confidence_platform.aggregation.orchestrator  # noqa
+    import release_confidence_platform.aggregation.eligibility  # noqa
+    import release_confidence_platform.aggregation.integrity  # noqa
+    import release_confidence_platform.aggregation.engine  # noqa
+    import release_confidence_platform.aggregation.lineage  # noqa
+    import release_confidence_platform.aggregation.repository  # noqa
+    import release_confidence_platform.aggregation.identity  # noqa
+    import release_confidence_platform.aggregation.constants  # noqa
+    import release_confidence_platform.aggregation.models  # noqa
+    import release_confidence_platform.aggregation.events  # noqa
+
+
+def test_smoke_detects_missing_module():
+    """OPS-I06: Smoke test mechanism detects missing modules when None is injected."""
+    import sys
+    module_name = "release_confidence_platform.aggregation.engine"
+    original = sys.modules.get(module_name)
+    try:
+        sys.modules[module_name] = None  # type: ignore[assignment]
+        # Importing a None module should raise AttributeError or ImportError
+        with pytest.raises((ImportError, AttributeError)):
+            import release_confidence_platform.aggregation.engine as eng  # noqa
+            if eng is None:
+                raise ImportError("Module is None — simulated missing module")
+    finally:
+        if original is not None:
+            sys.modules[module_name] = original
+        elif module_name in sys.modules:
+            del sys.modules[module_name]
