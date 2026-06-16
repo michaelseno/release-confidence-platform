@@ -15,6 +15,17 @@ from release_confidence_platform.core.logging import StructuredLogger
 from release_confidence_platform.sanitization.sanitizer import sanitize
 from release_confidence_platform.storage.s3_client import S3StorageClient
 
+# ---------------------------------------------------------------------------
+# Startup import validation — fail fast on missing critical modules
+# ---------------------------------------------------------------------------
+try:
+    from release_confidence_platform.aggregation import orchestrator as _orch  # noqa: F401
+    from release_confidence_platform.storage import audit_metadata_client as _amc  # noqa: F401
+except ImportError as _exc:  # pragma: no cover
+    import logging as _logging
+    _logging.critical("STARTUP_IMPORT_FAILURE: %s", _exc)
+    raise
+
 
 class AggregationHandler:
     def __init__(self, *, orchestrator: Any, logger: StructuredLogger | None = None):

@@ -33,6 +33,17 @@ from packages.storage.dynamodb_client import DynamoDBMetadataClient
 from packages.storage.s3_client import S3StorageClient
 from packages.storage.secrets_client import SecretsManagerClient
 
+# ---------------------------------------------------------------------------
+# Startup import validation — fail fast on missing critical modules
+# ---------------------------------------------------------------------------
+try:
+    from packages.core import logging as _core_logging  # noqa: F401
+    from packages.storage import audit_metadata_client as _amc  # noqa: F401
+except ImportError as _exc:  # pragma: no cover
+    import logging as _logging
+    _logging.critical("STARTUP_IMPORT_FAILURE: %s", _exc)
+    raise
+
 
 def configure_logging() -> None:
     """Configure Lambda-visible structured logging for the scheduled entrypoint."""

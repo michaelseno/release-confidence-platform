@@ -21,7 +21,10 @@ from packages.audit_scheduling.constants import (
     SCHEDULE_TYPE_REPEATED,
 )
 from packages.audit_scheduling.safeguards import isoformat_z, parse_iso_datetime
-from packages.audit_scheduling.taxonomy import reliability_category_for, validate_scenario_type
+from packages.audit_scheduling.taxonomy import (
+    reliability_category_for,
+    validate_scenario_type,
+)
 from packages.core.exceptions import ValidationError
 from packages.core.validators import validate_identifier
 

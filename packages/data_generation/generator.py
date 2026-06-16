@@ -7,8 +7,14 @@ from typing import Any
 
 from packages.core.exceptions import EngineError
 from packages.data_generation.data_pools import DataPoolLoader, select_record
-from packages.data_generation.duplicate_checker import MAX_GENERATION_ATTEMPTS, DuplicateChecker
-from packages.data_generation.fingerprints import fingerprint, payload_fingerprint
+from packages.data_generation.duplicate_checker import (
+    MAX_GENERATION_ATTEMPTS,
+    DuplicateChecker,
+)
+from packages.data_generation.fingerprints import (
+    fingerprint,
+    payload_fingerprint,
+)
 from packages.data_generation.templates import (
     TemplateContext,
     TemplateResolutionError,
