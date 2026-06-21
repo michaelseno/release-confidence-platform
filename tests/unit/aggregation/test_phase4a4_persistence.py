@@ -421,3 +421,144 @@ def test_agg_p9_missing_config_version_blocks_aggregation():
         i for i in repo.items.values() if i.get("record_kind") == "aggregate"
     ]
     assert len(aggregate_records) == 0, "No aggregate records must be written when version missing"
+
+
+# ---------------------------------------------------------------------------
+# AGG-R01: multi-endpoint envelope must produce COMPLETED, not mismatch error
+# Regression for EXECUTION_COUNT_MISMATCH_RAW_RESULTS on multi-endpoint audits.
+# ---------------------------------------------------------------------------
+
+
+def test_agg_r01_multi_endpoint_envelope_succeeds():
+    """One run whose S3 envelope contains two endpoint results must produce COMPLETED."""
+    key = "raw-results/client/audit/run_12345678/results.json"
+    multi_envelope = {
+        "raw_result_version": "v1",
+        "client_id": "client",
+        "audit_id": "audit",
+        "run_id": "run_12345678",
+        "results": [
+            {
+                "endpoint_id": "endpoint_a",
+                "failure_type": "PASS",
+                "status_code": 200,
+                "duration_ms": 42,
+                "timestamp": "2026-06-07T00:00:00Z",
+            },
+            {
+                "endpoint_id": "endpoint_b",
+                "failure_type": "PASS",
+                "status_code": 200,
+                "duration_ms": 38,
+                "timestamp": "2026-06-07T00:00:01Z",
+            },
+        ],
+    }
+    repo = MemoryRepo(eligible_audit(), [run_meta(key=key)])
+    s3 = MemoryS3({key: multi_envelope})
+
+    result = _run(repo, s3)
+
+    assert result["status"] == "COMPLETED", (
+        f"Multi-endpoint audit must succeed — got {result['status']} / {result.get('reason_code')}"
+    )
+
+    endpoint_aggs = [i for i in repo.items.values() if i.get("aggregate_type") == "endpoint"]
+    assert len(endpoint_aggs) == 2, "Must produce one endpoint aggregate per distinct endpoint_id"
+
+
+# ---------------------------------------------------------------------------
+# AGG-R02: FAILED run counted in finalization.execution_count must fail at
+# Check 1 (EXECUTION_COUNT_MISMATCH_COMPLETED_RUNS), not Check 2.
+# ---------------------------------------------------------------------------
+
+
+def test_agg_r02_failed_run_counted_in_expected_causes_check1_mismatch():
+    """finalization.execution_count=2 but list_completed_runs returns 1 → MISMATCH_COMPLETED_RUNS."""
+    key = "raw-results/client/audit/run/results.json"
+    repo = MemoryRepo(
+        eligible_audit(finalization={"execution_count": 2, "zero_execution": False}),
+        [run_meta(key=key)],  # only 1 COMPLETED run — 1 FAILED run was counted in expected
+    )
+    s3 = MemoryS3({key: envelope()})
+
+    result = _run(repo, s3)
+
+    assert result["status"] == "FAILED"
+    assert result["reason_code"] == "EXECUTION_COUNT_MISMATCH_COMPLETED_RUNS"
+
+    aggregate_records = [i for i in repo.items.values() if i.get("record_kind") == "aggregate"]
+    assert len(aggregate_records) == 0
+
+
+# ---------------------------------------------------------------------------
+# AGG-R03: orphaned record (run_id not in runs) raises ORPHANED_RAW_RESULT_RECORDS.
+# Tests the new check added to validate_evidence_integrity.
+# ---------------------------------------------------------------------------
+
+
+from release_confidence_platform.aggregation.integrity import validate_evidence_integrity  # noqa: E402
+from release_confidence_platform.aggregation.models import RawAggregationRecord  # noqa: E402
+from release_confidence_platform.core.exceptions import ValidationError  # noqa: E402
+
+
+def _make_record(run_id, endpoint_id="ep_a", index=0):
+    return RawAggregationRecord(
+        raw_result_version="v1",
+        run_id=run_id,
+        raw_result_s3_key=f"raw-results/client/audit/{run_id}/results.json",
+        s3_version_id=None,
+        result_index=index,
+        endpoint_id=endpoint_id,
+        result_timestamp=None,
+        duration_ms=None,
+        status_code=200,
+        failure_type="PASS",
+    )
+
+
+def test_agg_r03_orphaned_record_raises_correct_error():
+    """A record whose run_id is absent from runs must raise ORPHANED_RAW_RESULT_RECORDS."""
+    known_run = run_meta(run_id="run_known", key="raw-results/client/audit/run_known/results.json")
+
+    with pytest.raises(ValidationError) as exc_info:
+        validate_evidence_integrity(
+            audit=eligible_audit(),
+            runs=[known_run],
+            records=[
+                _make_record("run_known"),
+                _make_record("run_orphan"),  # not in runs → must trigger orphan check
+            ],
+            audit_execution_id="audexec_123",
+            config_version="config_v1",
+        )
+
+    assert exc_info.value.error_type == "ORPHANED_RAW_RESULT_RECORDS"
+
+
+# ---------------------------------------------------------------------------
+# AGG-R04: integrity gate failure must persist diagnostic counts to AGGJOB.
+# Verifies the fix that populates source_run_count and source_raw_result_count
+# on the failure path so aggregation-generation-status can surface them.
+# ---------------------------------------------------------------------------
+
+
+def test_agg_r04_failure_persists_diagnostic_counts_to_aggjob():
+    """On integrity failure, AGGJOB must record observed source_run_count and source_raw_result_count."""
+    key = "raw-results/client/audit/run/results.json"
+    # finalization expects 2 runs; only 1 completed run exists → EXECUTION_COUNT_MISMATCH_COMPLETED_RUNS
+    repo = MemoryRepo(
+        eligible_audit(finalization={"execution_count": 2, "zero_execution": False}),
+        [run_meta(key=key)],
+    )
+    s3 = MemoryS3({key: envelope()})
+
+    result = _run(repo, s3)
+
+    assert result["status"] == "FAILED"
+
+    job = repo.items[("CLIENT#client", "AUDIT#audit#AGGJOB#job_123")]
+    assert job.get("source_run_count") == 1, "source_run_count must reflect completed runs observed"
+    assert job.get("source_raw_result_count") == 1, (
+        "source_raw_result_count must reflect records loaded before failure"
+    )

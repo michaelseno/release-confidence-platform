@@ -74,6 +74,8 @@ class AggregationOrchestrator:
         )
         job_key = self.repository.job_keys(client_id, audit_id, job_id)
         started_at = utc_now_iso()
+        _diagnostic_run_count = 0
+        _diagnostic_record_count = 0
         try:
             try:
                 self.repository.put_job_once(
@@ -157,7 +159,9 @@ class AggregationOrchestrator:
                     None,
                 )
             runs = self.repository.list_completed_runs(client_id, audit_id)
+            _diagnostic_run_count = len(runs)
             records = self._load_records(runs, client_id=client_id, audit_id=audit_id)
+            _diagnostic_record_count = len(records)
             self.logger.log(
                 "aggregation_eligibility_evaluated",
                 event_type="aggregation_eligibility_evaluated",
@@ -355,6 +359,8 @@ class AggregationOrchestrator:
                     "reason_code": reason,
                     "failure_category": failure_category,
                     "completed_at": utc_now_iso(),
+                    "source_run_count": _diagnostic_run_count,
+                    "source_raw_result_count": _diagnostic_record_count,
                     "error_summary": {
                         "reason_code": reason,
                         "component": "AggregationOrchestrator",

@@ -193,15 +193,15 @@ def test_partial_evidence_execution_count_mismatch_blocks_aggregation():
     assert not [item for item in repo.items.values() if item.get("record_kind") == "aggregate"]
 
 
-def test_raw_result_count_mismatch_blocks_aggregation():
+def test_multi_result_envelope_succeeds():
+    # A single run whose S3 envelope contains multiple result entries must produce COMPLETED.
+    # Previously this triggered a false EXECUTION_COUNT_MISMATCH_RAW_RESULTS — fixed in Phase 4A.6.
     key = "raw-results/client/audit/run/results.json"
     raw = envelope()
-    raw["results"].append(raw["results"][0].copy())
+    raw["results"].append({**raw["results"][0], "endpoint_id": "endpoint_b"})
     repo = MemoryRepo(eligible_audit(), [run_meta(key=key)])
     result = invoke(repo, MemoryS3({key: raw}))
-    assert result["status"] == "FAILED"
-    assert result["reason_code"] == "EXECUTION_COUNT_MISMATCH_RAW_RESULTS"
-    assert not [item for item in repo.items.values() if item.get("record_kind") == "aggregate"]
+    assert result["status"] == "COMPLETED"
 
 
 def test_missing_raw_evidence_blocks_without_outputs():
