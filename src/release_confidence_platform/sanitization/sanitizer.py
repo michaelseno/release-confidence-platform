@@ -25,6 +25,23 @@ SENSITIVE_KEY_PARTS = (
     "ssn",
     "pii",
 )
+# Structural evidence identifiers must survive sanitize() byte-identical. They are
+# system-generated (UUIDs, operator-chosen slugs, version strings) and are compared
+# for strict equality across storage layers (DynamoDB run records vs. S3 raw result
+# envelopes) — a coincidental PII-pattern match (e.g. a UUID containing a bounded
+# 10-digit run that looks like a phone number) must not cause redaction here.
+STRUCTURAL_IDENTIFIER_KEYS = frozenset(
+    {
+        "run_id",
+        "client_id",
+        "audit_id",
+        "audit_execution_id",
+        "job_id",
+        "aggregation_job_id",
+        "config_version",
+        "aggregation_version",
+    }
+)
 SENSITIVE_QUERY_KEYS = (
     "token",
     "api_key",
@@ -46,6 +63,11 @@ SECRET_ASSIGNMENT_PATTERN = re.compile(
 def _is_sensitive_key(key: object) -> bool:
     normalized = str(key).lower().replace("-", "_")
     return any(part in normalized for part in SENSITIVE_KEY_PARTS)
+
+
+def _is_structural_identifier_key(key: object) -> bool:
+    normalized = str(key).lower().replace("-", "_")
+    return normalized in STRUCTURAL_IDENTIFIER_KEYS
 
 
 def _sanitize_string(value: str) -> str:
@@ -80,7 +102,12 @@ def sanitize(value: Any) -> Any:
     if isinstance(value, Mapping):
         sanitized: dict[Any, Any] = {}
         for key, item in value.items():
-            sanitized[key] = REDACTION_TOKEN if _is_sensitive_key(key) else sanitize(item)
+            if _is_sensitive_key(key):
+                sanitized[key] = REDACTION_TOKEN
+            elif _is_structural_identifier_key(key) and isinstance(item, str):
+                sanitized[key] = item
+            else:
+                sanitized[key] = sanitize(item)
         return sanitized
     if isinstance(value, str):
         if value.startswith(("http://", "https://")):
