@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import UTC
 from typing import Any
 
+from release_confidence_platform.core.constants.engine import FAILURE_PASS
 from release_confidence_platform.retrieval.dtypes import (
     AggregationGenerationStatusDTO,
     AggregationLineageDTO,
@@ -579,7 +580,9 @@ class RetrievalService:
         if not isinstance(counts, dict):
             counts = {}
         classification_counts = tuple(sorted(counts.items()))
-        total = sum(v for v in counts.values() if isinstance(v, int))
+        total = sum(
+            v for k, v in counts.items() if isinstance(v, int) and k != FAILURE_PASS
+        )
         job = self._repo.get_latest_aggregation_job(
             filters.client_id or "", filters.audit_id or ""
         )
