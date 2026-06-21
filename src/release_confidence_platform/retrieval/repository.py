@@ -77,10 +77,19 @@ class RetrievalRepository:
     def list_lifecycle_history(
         self, client_id: str, audit_id: str
     ) -> list[dict[str, Any]]:
-        return self._query_begins(
-            pk=f"CLIENT#{client_id}",
-            sk_prefix=f"AUDIT#{audit_id}#LIFECYCLE#",
-        )
+        """Return the lifecycle transition history for an audit.
+
+        Lifecycle transitions are persisted as a `lifecycle_history` list attribute on
+        the root audit item (see AuditLifecycleService.transition() /
+        AuditMetadataRepository.append_lifecycle_transition(), which list_append onto
+        PK=CLIENT#{client_id}, SK=AUDIT#{audit_id}) — there are no separate child
+        records to query for.
+        """
+        audit = self.get_audit_metadata(client_id, audit_id)
+        if not audit:
+            return []
+        history = audit.get("lifecycle_history")
+        return list(history) if isinstance(history, list) else []
 
     # ------------------------------------------------------------------
     # Full audit item scan
