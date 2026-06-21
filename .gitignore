@@ -2,6 +2,9 @@
 .idea/
 .vscode/
 
+# Local Claude Code state
+.claude/
+
 # Python
 .venv/
 venv/
