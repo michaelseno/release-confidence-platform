@@ -128,6 +128,24 @@ _FAILURE_AGG = {
     "classification_counts": {"network_failure": 1, "timeout": 1},
 }
 
+_ALL_PASS_FAILURE_AGG = {
+    "PK": "CLIENT#client1",
+    "SK": "AUDIT#audit1#EXEC#exec1#CFG#cfg1#AGG#v1#FAILURE_CLASSIFICATION",
+    "record_kind": "aggregate",
+    "aggregate_type": "failure_classification",
+    "scope": "audit",
+    "classification_counts": {"PASS": 145},
+}
+
+_MIXED_PASS_FAILURE_AGG = {
+    "PK": "CLIENT#client1",
+    "SK": "AUDIT#audit1#EXEC#exec1#CFG#cfg1#AGG#v1#FAILURE_CLASSIFICATION",
+    "record_kind": "aggregate",
+    "aggregate_type": "failure_classification",
+    "scope": "audit",
+    "classification_counts": {"PASS": 140, "TIMEOUT": 3, "CONNECTION_ERROR": 2},
+}
+
 _LINEAGE_MANIFEST = {
     "PK": "CLIENT#client1",
     "SK": "AUDIT#audit1#EXEC#exec1#CFG#cfg1#AGG#v1#LINEAGE#audit",
@@ -449,6 +467,25 @@ def test_ret_u14_failure_summaries():
     assert "network_failure" in counts
     assert "timeout" in counts
     assert dto.total_failures == 2
+
+
+def test_ret_u14_failure_summaries_excludes_pass_bucket_from_total():
+    # Per docs/architecture/phase_4a_aggregation_schema.md: classification_counts
+    # always includes a PASS bucket. PASS is a non-failure outcome and must not
+    # be counted in total_failures.
+    svc = _make_svc(aggregate_records=[_ALL_PASS_FAILURE_AGG])
+    dto = svc.get_failure_summaries(_FILTERS)
+    counts = dict(dto.classification_counts)
+    assert counts["PASS"] == 145
+    assert dto.total_failures == 0
+
+
+def test_ret_u14_failure_summaries_total_excludes_pass_when_mixed():
+    svc = _make_svc(aggregate_records=[_MIXED_PASS_FAILURE_AGG])
+    dto = svc.get_failure_summaries(_FILTERS)
+    counts = dict(dto.classification_counts)
+    assert counts["PASS"] == 140
+    assert dto.total_failures == 5
 
 
 # ---------------------------------------------------------------------------
