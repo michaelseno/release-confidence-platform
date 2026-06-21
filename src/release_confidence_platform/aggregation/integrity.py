@@ -47,7 +47,18 @@ def validate_evidence_integrity(
             "Execution count does not match completed runs",
             "EXECUTION_COUNT_MISMATCH_COMPLETED_RUNS",
         )
-    if expected != len(records):
+
+    expected_run_ids = {run["run_id"] for run in runs}
+    record_run_ids = {r.run_id for r in records}
+
+    # Every endpoint-level record must belong to a known completed run.
+    if not record_run_ids.issubset(expected_run_ids):
+        raise ValidationError(
+            "Raw result records reference unknown runs",
+            "ORPHANED_RAW_RESULT_RECORDS",
+        )
+    # Every completed run must have contributed at least one evidence record (1 envelope each).
+    if not expected_run_ids.issubset(record_run_ids):
         raise ValidationError(
             "Execution count does not match raw results",
             "EXECUTION_COUNT_MISMATCH_RAW_RESULTS",

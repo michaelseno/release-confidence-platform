@@ -378,6 +378,28 @@ def test_ret_u11_aggregation_generation_status_pending():
     assert dto.completion_marker_present is False
 
 
+def test_ret_u11_aggregation_generation_status_pending_exposes_failure_counts():
+    """PENDING status with a failed AGGJOB must surface source_run_count and source_raw_result_count."""
+    failed_job = {
+        **_JOB,
+        "status": "FAILED",
+        "reason_code": "EXECUTION_COUNT_MISMATCH_COMPLETED_RUNS",
+        "failure_category": "EVIDENCE_PRODUCING",
+        "source_run_count": 1,
+        "source_raw_result_count": 1,
+        "completed_at": "2024-01-01T10:05:00Z",
+    }
+    svc = _make_svc(jobs=[failed_job])
+    dto = svc.get_aggregation_generation_status(_FILTERS)
+
+    assert dto.completeness_status == "PENDING"
+    assert dto.completion_marker_present is False
+    assert dto.source_run_count == 1, "source_run_count must be surfaced from failed AGGJOB"
+    assert dto.source_raw_result_count == 1, (
+        "source_raw_result_count must be surfaced from failed AGGJOB"
+    )
+
+
 # ---------------------------------------------------------------------------
 # RET-U12: aggregation-version
 # ---------------------------------------------------------------------------

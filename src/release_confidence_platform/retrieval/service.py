@@ -456,17 +456,20 @@ class RetrievalService:
             filters.client_id or "", filters.audit_id or ""
         )
         if not completion:
+            job = self._repo.get_latest_aggregation_job(
+                filters.client_id or "", filters.audit_id or ""
+            )
             return AggregationGenerationStatusDTO(
                 completeness_status="PENDING",
                 completion_marker_present=False,
                 aggregate_record_count=None,
                 endpoint_aggregate_count=None,
                 manifest_count=None,
-                expected_execution_count=None,
-                source_run_count=None,
-                source_raw_result_count=None,
-                aggregation_version=None,
-                created_at=None,
+                expected_execution_count=job.get("expected_execution_count") if job else None,
+                source_run_count=job.get("source_run_count") if job else None,
+                source_raw_result_count=job.get("source_raw_result_count") if job else None,
+                aggregation_version=job.get("aggregation_version") if job else None,
+                created_at=job.get("completed_at") if job else None,
             )
         return AggregationGenerationStatusDTO(
             completeness_status=str(completion.get("completion_status") or "COMPLETE"),
