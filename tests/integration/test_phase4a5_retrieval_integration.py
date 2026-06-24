@@ -82,6 +82,12 @@ class MemoryRepo:
         for item in records:
             self._put(item)
 
+    def put_lineage_page_once(self, item):
+        self._put(item)
+
+    def get_lineage_page(self, key):
+        return self.items.get((key["PK"], key["SK"]))
+
     def _put(self, item):
         from release_confidence_platform.aggregation.repository import (
             ConditionalWriteError,  # noqa: PLC0415
@@ -129,6 +135,10 @@ class MemoryRepo:
     def list_lineage_manifests(self, client_id, audit_id):
         return [r for r in self.list_aggregate_records(client_id, audit_id)
                 if r.get("record_kind") == "lineage_manifest"]
+
+    def list_lineage_manifest_pages(self, client_id, audit_id):
+        return [r for r in self.list_aggregate_records(client_id, audit_id)
+                if r.get("record_kind") == "lineage_manifest_page"]
 
     def list_completed_runs_for_retrieval(self, client_id, audit_id):
         return self.runs

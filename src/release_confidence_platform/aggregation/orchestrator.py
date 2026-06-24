@@ -20,6 +20,7 @@ from release_confidence_platform.aggregation.constants import (
     JOB_STATUS_INVOCATION_FAILED,
     JOB_STATUS_INVOCATION_REQUESTED,
     JOB_STATUS_STARTED,
+    LINEAGE_PAGE_SIZE,
     MAX_AGGREGATE_ITEM_BYTES,
     MAX_AGGREGATE_RECORDS,
     MAX_AGGREGATE_TRANSACTION_BYTES,
@@ -34,7 +35,12 @@ from release_confidence_platform.aggregation.eligibility import (
 from release_confidence_platform.aggregation.engine import build_aggregates, normalize_failure_type
 from release_confidence_platform.aggregation.identity import AuditExecutionIdentityResolver
 from release_confidence_platform.aggregation.integrity import validate_evidence_integrity
-from release_confidence_platform.aggregation.lineage import build_manifest, manifest_ref
+from release_confidence_platform.aggregation.lineage import (
+    build_manifest_header_v2,
+    build_manifest_page,
+    manifest_ref,
+    paginate_records,
+)
 from release_confidence_platform.aggregation.models import RawAggregationRecord
 from release_confidence_platform.aggregation.repository import (
     AggregationRepository,
@@ -198,7 +204,7 @@ class AggregationOrchestrator:
                 observed_count=integrity.source_run_count,
                 reason_code=None,
             )
-            all_items = self._build_persisted_records(
+            all_items, lineage_pages = self._build_persisted_records(
                 client_id,
                 audit_id,
                 audit_execution_id,
@@ -224,6 +230,7 @@ class AggregationOrchestrator:
                 manifest_scope="audit",
                 source_ref_count=len(records),
             )
+            self._write_lineage_pages(lineage_pages)
             try:
                 self.repository.put_records_once(all_items)
             except ConditionalWriteError:
@@ -352,6 +359,7 @@ class AggregationOrchestrator:
         except (ValidationError, ConditionalWriteError, EngineError) as exc:
             reason = getattr(exc, "error_type", "AGGREGATION_FAILED")
             failure_category = _failure_category_for_reason(reason)
+            diagnostic_context = getattr(exc, "context", {}) or {}
             self.repository.update_job(
                 job_key,
                 {
@@ -365,6 +373,7 @@ class AggregationOrchestrator:
                         "reason_code": reason,
                         "component": "AggregationOrchestrator",
                         "aggregation_job_id": job_id,
+                        **diagnostic_context,
                     },
                 },
             )
@@ -381,6 +390,7 @@ class AggregationOrchestrator:
                 failure_category=failure_category,
                 reason_code=reason,
                 component="AggregationOrchestrator",
+                **diagnostic_context,
             )
             self._log("aggregation_failed", client_id, audit_id, job_id, reason)
             return sanitize(
@@ -443,6 +453,90 @@ class AggregationOrchestrator:
                 )
         return records
 
+    def _build_lineage_scope(
+        self,
+        *,
+        client_id: str,
+        audit_id: str,
+        audit_execution_id: str,
+        config_version: str,
+        aggregation_version: str,
+        job_id: str,
+        timestamp: str,
+        manifest_scope: str,
+        records: list[RawAggregationRecord],
+        pk: str,
+        manifest_sk: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+        common = dict(
+            client_id=client_id,
+            audit_id=audit_id,
+            audit_execution_id=audit_execution_id,
+            config_version=config_version,
+            aggregation_version=aggregation_version,
+            aggregation_job_id=job_id,
+            created_at=timestamp,
+        )
+        pages: list[dict[str, Any]] = []
+        page_hashes: list[str] = []
+        for page_index, page_records in enumerate(
+            paginate_records(records, page_size=LINEAGE_PAGE_SIZE)
+        ):
+            page = build_manifest_page(
+                **common,
+                manifest_scope=manifest_scope,
+                page_index=page_index,
+                page_records=page_records,
+            )
+            _fail_if_too_large(
+                page,
+                MAX_MANIFEST_BYTES,
+                "LINEAGE_MANIFEST_TOO_LARGE",
+                context={
+                    "manifest_scope": manifest_scope,
+                    "source_ref_count": len(records),
+                    "page_size": LINEAGE_PAGE_SIZE,
+                    "page_index": page_index,
+                },
+            )
+            pages.append({"PK": pk, "SK": f"{manifest_sk}#PAGE#{page_index}", **page})
+            page_hashes.append(page["page_hash"])
+        header = build_manifest_header_v2(
+            **common,
+            manifest_scope=manifest_scope,
+            source_ref_count=len(records),
+            page_size=LINEAGE_PAGE_SIZE,
+            page_hashes=page_hashes,
+        )
+        _fail_if_too_large(
+            header,
+            MAX_MANIFEST_BYTES,
+            "LINEAGE_MANIFEST_TOO_LARGE",
+            context={
+                "manifest_scope": manifest_scope,
+                "source_ref_count": len(records),
+                "page_size": LINEAGE_PAGE_SIZE,
+            },
+        )
+        ref = manifest_ref(header, pk=pk, sk=manifest_sk)
+        return header, ref, pages
+
+    def _write_lineage_pages(self, pages: list[dict[str, Any]]) -> None:
+        for page in pages:
+            try:
+                self.repository.put_lineage_page_once(page)
+            except ConditionalWriteError as exc:
+                existing = self.repository.get_lineage_page({"PK": page["PK"], "SK": page["SK"]})
+                if not existing or existing.get("page_hash") != page.get("page_hash"):
+                    raise ValidationError(
+                        "Lineage page hash mismatch",
+                        "LINEAGE_PAGE_HASH_MISMATCH",
+                        context={
+                            "manifest_scope": page.get("manifest_scope"),
+                            "page_index": page.get("page_index"),
+                        },
+                    ) from exc
+
     def _build_persisted_records(
         self,
         client_id: str,
@@ -456,25 +550,25 @@ class AggregationOrchestrator:
         expected_execution_count: int,
         source_run_count: int,
         source_raw_result_count: int,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         prefix = self.repository.aggregate_prefix(
             client_id, audit_id, audit_execution_id, config_version, aggregation_version
         )
-        manifest = build_manifest(
+        pk = f"CLIENT#{client_id}"
+        manifest_sk = f"{prefix}#LINEAGE#audit"
+        header, ref, lineage_pages = self._build_lineage_scope(
             client_id=client_id,
             audit_id=audit_id,
             audit_execution_id=audit_execution_id,
             config_version=config_version,
             aggregation_version=aggregation_version,
-            aggregation_job_id=job_id,
-            created_at=timestamp,
+            job_id=job_id,
+            timestamp=timestamp,
             manifest_scope="audit",
             records=records,
+            pk=pk,
+            manifest_sk=manifest_sk,
         )
-        manifest_sk = f"{prefix}#LINEAGE#audit"
-        _fail_if_too_large(manifest, MAX_MANIFEST_BYTES, "LINEAGE_MANIFEST_TOO_LARGE")
-        pk = f"CLIENT#{client_id}"
-        ref = manifest_ref(manifest, pk=pk, sk=manifest_sk)
         lineage = {
             "client_id": client_id,
             "audit_id": audit_id,
@@ -485,7 +579,7 @@ class AggregationOrchestrator:
             "aggregation_timestamp": timestamp,
             "lineage_manifest_ref": ref,
             "source_ref_count": len(records),
-            "lineage_manifest_hash": manifest["manifest_hash"],
+            "lineage_manifest_hash": header["manifest_hash"],
         }
         aggregates = build_aggregates(records)
         items = [
@@ -493,7 +587,7 @@ class AggregationOrchestrator:
                 "PK": pk,
                 "SK": manifest_sk,
                 "record_kind": "lineage_manifest",
-                **manifest,
+                **header,
             }
         ]
         records_by_endpoint: dict[str, list[RawAggregationRecord]] = {}
@@ -501,20 +595,21 @@ class AggregationOrchestrator:
             records_by_endpoint.setdefault(record.endpoint_id, []).append(record)
         endpoint_lineages: dict[str, dict[str, Any]] = {}
         for endpoint_id, endpoint_records in sorted(records_by_endpoint.items()):
-            endpoint_manifest = build_manifest(
+            endpoint_manifest_sk = f"{prefix}#LINEAGE#endpoint:{endpoint_id}"
+            endpoint_header, endpoint_ref, endpoint_pages = self._build_lineage_scope(
                 client_id=client_id,
                 audit_id=audit_id,
                 audit_execution_id=audit_execution_id,
                 config_version=config_version,
                 aggregation_version=aggregation_version,
-                aggregation_job_id=job_id,
-                created_at=timestamp,
+                job_id=job_id,
+                timestamp=timestamp,
                 manifest_scope=f"endpoint:{endpoint_id}",
                 records=endpoint_records,
+                pk=pk,
+                manifest_sk=endpoint_manifest_sk,
             )
-            endpoint_manifest_sk = f"{prefix}#LINEAGE#endpoint:{endpoint_id}"
-            _fail_if_too_large(endpoint_manifest, MAX_MANIFEST_BYTES, "LINEAGE_MANIFEST_TOO_LARGE")
-            endpoint_ref = manifest_ref(endpoint_manifest, pk=pk, sk=endpoint_manifest_sk)
+            lineage_pages.extend(endpoint_pages)
             endpoint_lineages[endpoint_id] = {
                 "client_id": client_id,
                 "audit_id": audit_id,
@@ -525,14 +620,14 @@ class AggregationOrchestrator:
                 "aggregation_timestamp": timestamp,
                 "lineage_manifest_ref": endpoint_ref,
                 "source_ref_count": len(endpoint_records),
-                "lineage_manifest_hash": endpoint_manifest["manifest_hash"],
+                "lineage_manifest_hash": endpoint_header["manifest_hash"],
             }
             items.append(
                 {
                     "PK": pk,
                     "SK": endpoint_manifest_sk,
                     "record_kind": "lineage_manifest",
-                    **endpoint_manifest,
+                    **endpoint_header,
                 }
             )
         audit_item = {
@@ -624,7 +719,7 @@ class AggregationOrchestrator:
             total_bytes += len(json.dumps(item, sort_keys=True, default=str).encode("utf-8"))
         if total_bytes > MAX_AGGREGATE_TRANSACTION_BYTES:
             raise ValidationError("Aggregate set too large", "AGGREGATE_SET_TOO_LARGE")
-        return items
+        return items, lineage_pages
 
     def _validate_duplicate_refs(self, records: list[RawAggregationRecord]) -> None:
         seen = set()
@@ -819,9 +914,20 @@ def _validate_raw_result_s3_key(key: Any, *, client_id: str, audit_id: str) -> s
     return key
 
 
-def _fail_if_too_large(item: dict[str, Any], max_bytes: int, reason: str) -> None:
-    if len(json.dumps(item, sort_keys=True, default=str).encode("utf-8")) > max_bytes:
-        raise ValidationError("Aggregation item too large", reason)
+def _fail_if_too_large(
+    item: dict[str, Any],
+    max_bytes: int,
+    reason: str,
+    *,
+    context: dict[str, Any] | None = None,
+) -> None:
+    size = len(json.dumps(item, sort_keys=True, default=str).encode("utf-8"))
+    if size > max_bytes:
+        raise ValidationError(
+            "Aggregation item too large",
+            reason,
+            context={**(context or {}), "estimated_size_bytes": size, "max_bytes": max_bytes},
+        )
 
 
 def _failure_category_for_reason(reason: str) -> str:

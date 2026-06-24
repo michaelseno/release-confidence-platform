@@ -3,7 +3,8 @@
 AGGREGATION_VERSION = "agg_v1"
 AGGREGATION_EVENT_TYPE = "aggregate_audit"
 AGGREGATION_EVENT_SCHEMA_VERSION = "phase4.aggregation_event.v1"
-LINEAGE_MANIFEST_VERSION = "lineage_manifest_v1"
+LINEAGE_MANIFEST_VERSION_V1 = "lineage_manifest_v1"
+LINEAGE_MANIFEST_VERSION_V2 = "lineage_manifest_v2"
 
 JOB_STATUS_STARTED = "STARTED"
 JOB_STATUS_INTENT_RECORDED = "INTENT_RECORDED"
@@ -35,6 +36,7 @@ EVIDENCE_PRODUCING_REASON_CODES = frozenset(
         "INVALID_RAW_RESULT_ENVELOPE",
         "INVALID_RAW_RESULT_RECORD",
         "UNSAFE_RAW_RESULT_S3_KEY",
+        "LINEAGE_PAGE_HASH_MISMATCH",
     }
 )
 
@@ -62,3 +64,12 @@ MAX_AGGREGATE_RECORDS = 100
 MAX_AGGREGATE_ITEM_BYTES = 300_000
 MAX_AGGREGATE_TRANSACTION_BYTES = 3_800_000
 MAX_ENDPOINT_ID_LENGTH = 128
+
+# Validated worst-case ceiling (every identifier field — client_id, audit_id,
+# run_id, endpoint_id, audit_execution_id, config_version, aggregation_job_id —
+# at its IDENTIFIER_PATTERN-enforced 128-char max; s3_version_id assumed 200
+# chars) for refs in one lineage_manifest_v2 page. Pinned by
+# test_worst_case_page_at_documented_ceiling_stays_under_byte_cap — see
+# docs/architecture/phase_4a_lineage_manifest_pagination_technical_design.md §1.
+MAX_MANIFEST_PAGE_REF_COUNT = 275
+LINEAGE_PAGE_SIZE = 200

@@ -60,6 +60,12 @@ class AggregationRepository:
     def put_job_once(self, item: dict[str, Any]) -> None:
         self._put_once(item)
 
+    def put_lineage_page_once(self, item: dict[str, Any]) -> None:
+        self._put_once(item)
+
+    def get_lineage_page(self, key: dict[str, str]) -> dict[str, Any] | None:
+        return self._call("get_item", Key=key).get("Item")
+
     def update_job(self, key: dict[str, str], updates: dict[str, Any]) -> None:
         names = {f"#f{i}": key for i, key in enumerate(updates)}
         values = {f":v{i}": value for i, value in enumerate(sanitize(updates).values())}
