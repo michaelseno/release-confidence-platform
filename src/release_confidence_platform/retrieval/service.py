@@ -529,7 +529,21 @@ class RetrievalService:
             m for m in manifests if str(m.get("SK") or "").endswith("LINEAGE#audit")
         ]
         manifest = audit_manifests[0] if audit_manifests else {}
-        raw_refs = manifest.get("source_refs") or []
+        if manifest.get("manifest_version") == "lineage_manifest_v2":
+            pages = self._repo.list_lineage_manifest_pages(
+                filters.client_id or "", filters.audit_id or ""
+            )
+            audit_pages = sorted(
+                (p for p in pages if p.get("manifest_scope") == "audit"),
+                key=lambda p: p.get("page_index", 0),
+            )
+            raw_refs = [
+                ref
+                for page in audit_pages
+                for ref in (page.get("source_raw_result_refs") or [])
+            ]
+        else:
+            raw_refs = manifest.get("source_raw_result_refs") or []
         if not isinstance(raw_refs, list):
             raw_refs = []
         entries = tuple(

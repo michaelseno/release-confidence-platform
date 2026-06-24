@@ -131,6 +131,12 @@ class MemoryJobRepo:
         for item in records:
             self._put(item)
 
+    def put_lineage_page_once(self, item):
+        self._put(item)
+
+    def get_lineage_page(self, key):
+        return self.items.get((key["PK"], key["SK"]))
+
     def _put(self, item):
         key = (item["PK"], item["SK"])
         self.items[key] = item

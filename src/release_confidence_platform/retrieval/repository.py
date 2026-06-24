@@ -114,6 +114,12 @@ class RetrievalRepository:
         records = self.list_aggregate_records(client_id, audit_id)
         return [r for r in records if r.get("record_kind") == "lineage_manifest"]
 
+    def list_lineage_manifest_pages(
+        self, client_id: str, audit_id: str
+    ) -> list[dict[str, Any]]:
+        records = self.list_aggregate_records(client_id, audit_id)
+        return [r for r in records if r.get("record_kind") == "lineage_manifest_page"]
+
     # ------------------------------------------------------------------
     # Completed runs
     # ------------------------------------------------------------------

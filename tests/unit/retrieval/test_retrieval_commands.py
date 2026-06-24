@@ -65,6 +65,11 @@ class MockRepo:
     def list_lineage_manifests(self, client_id, audit_id):
         return [r for r in self._aggregate_records if r.get("record_kind") == "lineage_manifest"]
 
+    def list_lineage_manifest_pages(self, client_id, audit_id):
+        return [
+            r for r in self._aggregate_records if r.get("record_kind") == "lineage_manifest_page"
+        ]
+
     def list_completed_runs(self, client_id, audit_id):
         return self._runs
 
@@ -163,13 +168,74 @@ _LINEAGE_MANIFEST = {
         "PK": "CLIENT#client1",
         "SK": "AUDIT#audit1#EXEC#exec1#CFG#cfg1#AGG#v1#LINEAGE#audit",
     },
-    "source_refs": [
+    "source_raw_result_refs": [
         {
             "run_id": "run1",
             "result_index": 0,
             "endpoint_id": "ep1",
             "result_timestamp": "2024-01-01T09:00:00Z",
             "raw_result_s3_key": "raw-results/client1/audit1/run1.json",
+        },
+    ],
+}
+
+_LINEAGE_MANIFEST_V2_HEADER = {
+    "PK": "CLIENT#client1",
+    "SK": "AUDIT#audit1#EXEC#exec1#CFG#cfg1#AGG#v1#LINEAGE#audit",
+    "record_kind": "lineage_manifest",
+    "manifest_version": "lineage_manifest_v2",
+    "manifest_scope": "audit",
+    "client_id": "client1",
+    "audit_id": "audit1",
+    "audit_execution_id": "exec1",
+    "aggregation_version": "v1",
+    "aggregation_job_id": "job1",
+    "aggregation_timestamp": "2024-01-01T10:00:00Z",
+    "source_ref_count": 3,
+    "lineage_page_count": 2,
+    "page_size": 2,
+    "manifest_hash": "manifest_hash_v2_abc",
+}
+
+_LINEAGE_MANIFEST_V2_PAGE_0 = {
+    "PK": "CLIENT#client1",
+    "SK": "AUDIT#audit1#EXEC#exec1#CFG#cfg1#AGG#v1#LINEAGE#audit#PAGE#0",
+    "record_kind": "lineage_manifest_page",
+    "manifest_scope": "audit",
+    "page_index": 0,
+    "page_ref_count": 2,
+    "source_raw_result_refs": [
+        {
+            "run_id": "run1",
+            "result_index": 0,
+            "endpoint_id": "ep1",
+            "result_timestamp": "2024-01-01T09:00:00Z",
+            "raw_result_s3_key": "raw-results/client1/audit1/run1.json",
+        },
+        {
+            "run_id": "run2",
+            "result_index": 0,
+            "endpoint_id": "ep1",
+            "result_timestamp": "2024-01-01T09:01:00Z",
+            "raw_result_s3_key": "raw-results/client1/audit1/run2.json",
+        },
+    ],
+}
+
+_LINEAGE_MANIFEST_V2_PAGE_1 = {
+    "PK": "CLIENT#client1",
+    "SK": "AUDIT#audit1#EXEC#exec1#CFG#cfg1#AGG#v1#LINEAGE#audit#PAGE#1",
+    "record_kind": "lineage_manifest_page",
+    "manifest_scope": "audit",
+    "page_index": 1,
+    "page_ref_count": 1,
+    "source_raw_result_refs": [
+        {
+            "run_id": "run3",
+            "result_index": 0,
+            "endpoint_id": "ep1",
+            "result_timestamp": "2024-01-01T09:02:00Z",
+            "raw_result_s3_key": "raw-results/client1/audit1/run3.json",
         },
     ],
 }
@@ -449,9 +515,27 @@ def test_ret_u13_evidence_references():
     assert isinstance(dto, EvidenceReferencesDTO)
     assert dto.source_ref_count == 15
     assert dto.manifest_hash == "manifest_hash_abc"
+    assert len(dto.source_refs) == 1, "v1 manifest's source_raw_result_refs must be surfaced"
+    assert dto.source_refs[0].run_id == "run1"
+    assert dto.source_refs[0].endpoint_id == "ep1"
     # Raw S3 key must NOT appear in output
     for ref in dto.source_refs:
         assert ref.s3_key_ref is None or not ref.s3_key_ref.startswith("raw-results/")
+
+
+def test_ret_u13_evidence_references_v2_walks_pages_in_order():
+    svc = _make_svc(
+        aggregate_records=[
+            _LINEAGE_MANIFEST_V2_HEADER,
+            _LINEAGE_MANIFEST_V2_PAGE_1,  # deliberately out of order
+            _LINEAGE_MANIFEST_V2_PAGE_0,
+        ]
+    )
+    dto = svc.get_evidence_references(_FILTERS)
+    assert isinstance(dto, EvidenceReferencesDTO)
+    assert dto.source_ref_count == 3
+    assert dto.manifest_hash == "manifest_hash_v2_abc"
+    assert [ref.run_id for ref in dto.source_refs] == ["run1", "run2", "run3"]
 
 
 # ---------------------------------------------------------------------------

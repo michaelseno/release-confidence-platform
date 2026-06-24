@@ -15,8 +15,15 @@ class EngineError(Exception):
 
 
 class ValidationError(EngineError):
-    def __init__(self, message: str = "Validation failed", error_type: str = "VALIDATION_ERROR"):
+    def __init__(
+        self,
+        message: str = "Validation failed",
+        error_type: str = "VALIDATION_ERROR",
+        *,
+        context: dict | None = None,
+    ):
         super().__init__(error_type, message)
+        self.context = context or {}
 
 
 class ConfigError(EngineError):
