@@ -83,7 +83,6 @@ _AGGREGATE_ALLOWED_FIELDS = frozenset(
         "http_response_distribution",
         "manifest_scope",
         "manifest_hash",
-        "source_refs",  # bounded count only
     }
 )
 
@@ -101,11 +100,8 @@ def _canonical_sort_key(item: dict[str, Any]) -> tuple[str, str, str, str, str]:
 def _safe_record_data(record: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
     scrubbed = scrub_sensitive_fields(record)
     allowed = {k: v for k, v in scrubbed.items() if k in _AGGREGATE_ALLOWED_FIELDS}
-    # Sanitize lineage refs to strip raw S3 keys if they leaked in
     if "lineage" in allowed and isinstance(allowed["lineage"], dict):
-        lineage = dict(allowed["lineage"])
-        lineage.pop("source_refs", None)
-        allowed["lineage"] = lineage
+        allowed["lineage"] = dict(allowed["lineage"])
     return tuple(sorted(allowed.items()))
 
 
