@@ -1,5 +1,4 @@
 """OPS-D01, OPS-D02: Behavioral equivalence between packages/ and src/ implementations."""
-import pytest
 
 
 class TestSanitizationEquivalence:
@@ -44,7 +43,9 @@ class TestAuditMetadataRepositoryEquivalence:
     def test_both_have_list_run_records(self):
         """OPS-D01: list_run_records exists in both packages/ and src/."""
         from packages.storage.audit_metadata_client import AuditMetadataRepository as PkgRepo
-        from release_confidence_platform.storage.audit_metadata_client import AuditMetadataRepository as SrcRepo
+        from release_confidence_platform.storage.audit_metadata_client import (
+            AuditMetadataRepository as SrcRepo,
+        )
         assert hasattr(PkgRepo, 'list_run_records'), "packages/ missing list_run_records"
         assert hasattr(SrcRepo, 'list_run_records'), "src/ missing list_run_records"
 
@@ -58,8 +59,11 @@ class TestAuditMetadataRepositoryEquivalence:
     def test_repository_init_signatures_match(self):
         """OPS-D01: AuditMetadataRepository constructors accept same parameters."""
         import inspect
+
         from packages.storage.audit_metadata_client import AuditMetadataRepository as PkgRepo
-        from release_confidence_platform.storage.audit_metadata_client import AuditMetadataRepository as SrcRepo
+        from release_confidence_platform.storage.audit_metadata_client import (
+            AuditMetadataRepository as SrcRepo,
+        )
         pkg_params = set(inspect.signature(PkgRepo.__init__).parameters.keys())
         src_params = set(inspect.signature(SrcRepo.__init__).parameters.keys())
         # packages/ params must be a subset of or equal to src/ params

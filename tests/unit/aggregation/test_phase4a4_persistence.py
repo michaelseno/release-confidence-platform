@@ -480,7 +480,7 @@ def test_agg_r01_multi_endpoint_envelope_succeeds():
 
 
 def test_agg_r02_failed_run_counted_in_expected_causes_check1_mismatch():
-    """finalization.execution_count=2 but list_completed_runs returns 1 → MISMATCH_COMPLETED_RUNS."""
+    """finalization.execution_count=2 but list_completed_runs returns 1 → MISMATCH_COMPLETED_RUNS."""  # noqa: E501
     key = "raw-results/client/audit/run/results.json"
     repo = MemoryRepo(
         eligible_audit(finalization={"execution_count": 2, "zero_execution": False}),
@@ -503,7 +503,9 @@ def test_agg_r02_failed_run_counted_in_expected_causes_check1_mismatch():
 # ---------------------------------------------------------------------------
 
 
-from release_confidence_platform.aggregation.integrity import validate_evidence_integrity  # noqa: E402
+from release_confidence_platform.aggregation.integrity import (  # noqa: E402
+    validate_evidence_integrity,
+)
 from release_confidence_platform.aggregation.models import RawAggregationRecord  # noqa: E402
 from release_confidence_platform.core.exceptions import ValidationError  # noqa: E402
 
@@ -550,9 +552,9 @@ def test_agg_r03_orphaned_record_raises_correct_error():
 
 
 def test_agg_r04_failure_persists_diagnostic_counts_to_aggjob():
-    """On integrity failure, AGGJOB must record observed source_run_count and source_raw_result_count."""
+    """On integrity failure, AGGJOB must record observed source_run_count and source_raw_result_count."""  # noqa: E501
     key = "raw-results/client/audit/run/results.json"
-    # finalization expects 2 runs; only 1 completed run exists → EXECUTION_COUNT_MISMATCH_COMPLETED_RUNS
+    # finalization expects 2 runs; only 1 completed run exists → EXECUTION_COUNT_MISMATCH_COMPLETED_RUNS  # noqa: E501
     repo = MemoryRepo(
         eligible_audit(finalization={"execution_count": 2, "zero_execution": False}),
         [run_meta(key=key)],

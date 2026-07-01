@@ -463,7 +463,7 @@ def test_ret_u11_aggregation_generation_status_pending():
 
 
 def test_ret_u11_aggregation_generation_status_pending_exposes_failure_counts():
-    """PENDING status with a failed AGGJOB must surface source_run_count and source_raw_result_count."""
+    """PENDING status with a failed AGGJOB must surface source_run_count and source_raw_result_count."""  # noqa: E501
     failed_job = {
         **_JOB,
         "status": "FAILED",

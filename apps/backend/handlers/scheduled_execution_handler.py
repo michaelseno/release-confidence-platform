@@ -183,7 +183,8 @@ class ScheduledExecutionHandler:
                 if result.get("status"):
                     self._log("run_metadata_written", validated, run_id=run_id)
                 # Counters track occurrence handler path outcomes, not terminal RUN record states.
-                # The finalization integrity gate is the canonical authority for lifecycle completion.
+                # The finalization integrity gate is the canonical authority for lifecycle
+                # completion.
                 result_status = result.get("status")
                 if result_status == RUN_STATUS_COMPLETED:
                     num_completed = 1

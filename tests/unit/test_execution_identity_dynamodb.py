@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 from botocore.exceptions import ClientError
 
 from packages.core.constants.engine import RUN_STATUS_COMPLETED, RUN_STATUS_STARTED
-from packages.core.exceptions import DuplicateRunIdError
 from packages.storage.dynamodb_client import DynamoDBMetadataClient
 
 # This specific UUID is the canonical regression fixture: PHONE_PATTERN matches
@@ -104,7 +102,7 @@ def test_update_terminal_key_matches_put_started_once_key_for_phone_like_uuid():
         {
             "status": RUN_STATUS_COMPLETED,
             "completed_at": "2026-06-12T00:01:00Z",
-            "raw_result_s3_key": f"raw-results/{CLIENT_ID}/{AUDIT_ID}/{PHONE_LIKE_UUID}/results.json",
+            "raw_result_s3_key": f"raw-results/{CLIENT_ID}/{AUDIT_ID}/{PHONE_LIKE_UUID}/results.json",  # noqa: E501
         },
     )
 

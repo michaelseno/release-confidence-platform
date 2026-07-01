@@ -8,17 +8,15 @@ from __future__ import annotations
 import argparse
 import json
 
-import pytest
-
 from release_confidence_platform.reliability_intelligence.commands import (
     dispatch_intelligence_retrieve,
 )
 from release_confidence_platform.reliability_intelligence.dtypes import (
+    _INTELLIGENCE_NOTICE,
     IntelligenceFilter,
     IntelligenceNotFoundDTO,
     IntelligenceStatusDTO,
     IntelligenceSummaryDTO,
-    _INTELLIGENCE_NOTICE,
 )
 from release_confidence_platform.reliability_intelligence.formatter import (
     IntelligenceFormatter,
@@ -77,7 +75,7 @@ _COMPLETE_METADATA = {
     "composite_score": "0.850",
     "score_label": "HIGH_CONFIDENCE",
     "endpoint_count": 3,
-    "s3_artifact_ref": "intelligence/client1/audit1/exec1/agg_v1/intel_v1/intjob_abc123/artifact.json",
+    "s3_artifact_ref": "intelligence/client1/audit1/exec1/agg_v1/intel_v1/intjob_abc123/artifact.json",  # noqa: E501
     "aggregate_set_hash": "abc123hash",
     "created_at": "2026-07-01T00:00:00.000Z",
     "completed_at": "2026-07-01T01:00:00.000Z",

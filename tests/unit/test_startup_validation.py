@@ -1,5 +1,6 @@
 """OPS-S01: Startup validation raises on missing critical import."""
 import sys
+
 import pytest
 
 

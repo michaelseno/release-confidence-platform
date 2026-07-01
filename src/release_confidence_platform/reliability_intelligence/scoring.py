@@ -57,10 +57,17 @@ _ZERO = Decimal("0")
 # Static formula strings for S3 artifact score_derivation field.
 _SCORE_DERIVATION: dict[str, str] = {
     "reliability_score_source": "success_rate (or 0.0 when is_insufficient_data)",
-    "stability_score_formula": "(label_to_value(sr_stability) + label_to_value(lat_stability)) / 2.0",
-    "burst_score_formula": "(label_to_value(failure_burst) + label_to_value(spike)) / 2.0",
+    "stability_score_formula": (
+        "(label_to_value(sr_stability) + label_to_value(lat_stability)) / 2.0"
+    ),
+    "burst_score_formula": (
+        "(label_to_value(failure_burst) + label_to_value(spike)) / 2.0"
+    ),
     "consistency_score_formula": "label_to_value(consistency)",
-    "composite_score_formula": "0.50 * reliability_score + 0.20 * stability_score + 0.15 * burst_score + 0.15 * consistency_score",
+    "composite_score_formula": (
+        "0.50 * reliability_score + 0.20 * stability_score"
+        " + 0.15 * burst_score + 0.15 * consistency_score"
+    ),
 }
 
 
@@ -203,7 +210,9 @@ def build_methodology_disclosure() -> dict[str, Any]:
         "burst_label_definitions": {
             "NO_BURST_DETECTED": "timeout proportion <= 0.20",
             "BURST_SUSPECTED": "timeout proportion > 0.20",
-            "INSUFFICIENT_DATA": "execution_count < 10; spike: latency_count < 5 or p99/max not available",
+            "INSUFFICIENT_DATA": (
+                "execution_count < 10; spike: latency_count < 5 or p99/max not available"
+            ),
         },
         "consistency_label_definitions": {
             "CONSISTENT": "Bernoulli variance p*(1-p) <= 0.05",
@@ -229,7 +238,7 @@ def build_methodology_disclosure() -> dict[str, Any]:
 
 
 def _reliability_score(endpoint_metrics: EndpointMetricsDTO) -> Decimal:
-    """Return success_rate as the reliability component, or 0.0 if no executable reliability evidence.
+    """Return success_rate as reliability component, or 0.0 if no executable reliability evidence.
 
     Per Technical Design Section 13.3 Step 1: when denominator = 0 or execution_count = 0,
     reliability_score = 0.0. Reliability is the primary direct evidence component — the 0.5
@@ -290,26 +299,27 @@ def _build_component_breakdown(
         "stability": {
             "weight": float(WEIGHT_STABILITY),
             "value": str(mean_stability),
-            "description": "Mean of per-endpoint stability scores derived from stability label mappings",
+            "description": "Mean of per-endpoint stability scores derived from stability label mappings",  # noqa: E501
         },
         "burst": {
             "weight": float(WEIGHT_BURST),
             "value": str(mean_burst),
-            "description": "Mean of per-endpoint burst scores derived from burst and spike label mappings",
+            "description": "Mean of per-endpoint burst scores derived from burst and spike label mappings",  # noqa: E501
         },
         "consistency": {
             "weight": float(WEIGHT_CONSISTENCY),
             "value": str(mean_consistency),
-            "description": "Mean of per-endpoint consistency scores derived from consistency label mappings",
+            "description": "Mean of per-endpoint consistency scores derived from consistency label mappings",  # noqa: E501
         },
     }
 
 
 def _empty_component_breakdown() -> dict[str, Any]:
     """Component breakdown for the zero-endpoint edge case."""
+    _d = "No endpoints"
     return {
-        "reliability": {"weight": float(WEIGHT_RELIABILITY), "value": "0.000", "description": "No endpoints"},
-        "stability": {"weight": float(WEIGHT_STABILITY), "value": "0.000", "description": "No endpoints"},
-        "burst": {"weight": float(WEIGHT_BURST), "value": "0.000", "description": "No endpoints"},
-        "consistency": {"weight": float(WEIGHT_CONSISTENCY), "value": "0.000", "description": "No endpoints"},
+        "reliability": {"weight": float(WEIGHT_RELIABILITY), "value": "0.000", "description": _d},
+        "stability": {"weight": float(WEIGHT_STABILITY), "value": "0.000", "description": _d},
+        "burst": {"weight": float(WEIGHT_BURST), "value": "0.000", "description": _d},
+        "consistency": {"weight": float(WEIGHT_CONSISTENCY), "value": "0.000", "description": _d},
     }

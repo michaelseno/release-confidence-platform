@@ -8,6 +8,10 @@ import sys
 from release_confidence_platform.core.exceptions import EngineError
 from release_confidence_platform.operator_cli import services
 from release_confidence_platform.operator_cli.result import CommandResult, render, render_error
+from release_confidence_platform.reliability_intelligence.commands import (
+    build_intelligence_retrieve_parser,
+    dispatch_intelligence_retrieve,
+)
 from release_confidence_platform.retrieval.commands import build_retrieve_parser, dispatch_retrieve
 
 
@@ -100,6 +104,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     retrieve_sub = retrieve.add_subparsers(dest="retrieve_command", required=True)
     build_retrieve_parser(retrieve_sub)
+    build_intelligence_retrieve_parser(retrieve_sub)
+    generate = sub.add_parser("generate", help="Generate intelligence artifacts")
+    generate_sub = generate.add_subparsers(dest="generate_command", required=True)
+    intel_gen = generate_sub.add_parser(
+        "intelligence", help="Generate reliability intelligence from Phase 4 aggregate set"
+    )
+    intel_gen.add_argument("--client", required=True, help="Client identifier")
+    intel_gen.add_argument("--audit", required=True, help="Audit identifier")
+    intel_gen.add_argument(
+        "--execution", required=True, help="Audit execution identity"
+    )
+    intel_gen.add_argument(
+        "--config-version", required=True, dest="config_version",
+        help="Configuration version (e.g., cfg_v1)"
+    )
+    intel_gen.add_argument(
+        "--aggregation-version", default="agg_v1", dest="aggregation_version",
+        help="Aggregation version to consume (default: agg_v1)"
+    )
+    intel_gen.add_argument(
+        "--stage", required=True, choices=("dev", "staging", "prod"),
+        help="Deployment stage"
+    )
+    intel_gen.add_argument(
+        "--force", action="store_true",
+        help="Re-generate even if COMPLETE intelligence already exists"
+    )
+    intel_gen.add_argument(
+        "--dry-run", action="store_true", dest="dry_run",
+        help="Run computation pipeline without writing to DynamoDB or S3"
+    )
+    intel_gen.add_argument(
+        "--output", default="json", choices=("json", "human"),
+        help="Output format (default: json)"
+    )
     return parser
 
 
@@ -151,9 +190,98 @@ def dispatch(args: argparse.Namespace) -> CommandResult:
         stage_config = StageConfigLoader().load(args.stage)
         factory = AwsClientFactory(stage_config)
         dynamodb_client = factory._session.client("dynamodb")
+
+        retrieve_command = getattr(args, "retrieve_command", "") or ""
+        if retrieve_command.startswith("intelligence-"):
+            from release_confidence_platform.reliability_intelligence.formatter import (  # noqa: PLC0415
+                IntelligenceFormatter,
+            )
+            from release_confidence_platform.reliability_intelligence.intelligence_service import (  # noqa: PLC0415
+                IntelligenceRetrievalService,
+            )
+            from release_confidence_platform.reliability_intelligence.publisher import (  # noqa: PLC0415
+                IntelligencePublisher,
+            )
+            from release_confidence_platform.reliability_intelligence.repository import (  # noqa: PLC0415
+                IntelligenceRepository,
+            )
+
+            intel_repo = IntelligenceRepository(
+                stage_config.audit_metadata_table, dynamodb_client
+            )
+            s3_client = factory._session.client("s3")
+            intel_publisher = IntelligencePublisher(stage_config.config_bucket, s3_client)
+            intel_svc = IntelligenceRetrievalService(intel_repo, intel_publisher)
+            intel_formatter = IntelligenceFormatter()
+            rendered = dispatch_intelligence_retrieve(args, intel_svc, intel_formatter)
+            return CommandResult(
+                command=f"retrieve {retrieve_command}",
+                stage=getattr(args, "stage", None),
+                status="success",
+                summary=f"Retrieved {retrieve_command} for {getattr(args, 'audit', 'unknown')}",
+                data={"rendered": rendered},
+                exit_code=0,
+            )
+
         repo = RetrievalRepository(stage_config.audit_metadata_table, dynamodb_client)
         svc = RetrievalService(repo)
         return dispatch_retrieve(args, svc)
+
+    if args.group == "generate":
+        from release_confidence_platform.config.stage_config import (
+            StageConfigLoader,  # noqa: PLC0415
+        )
+        from release_confidence_platform.core.logging import StructuredLogger  # noqa: PLC0415
+        from release_confidence_platform.reliability_intelligence.engine import (  # noqa: PLC0415
+            IntelligenceEngine,
+        )
+        from release_confidence_platform.reliability_intelligence.publisher import (  # noqa: PLC0415
+            IntelligencePublisher,
+        )
+        from release_confidence_platform.reliability_intelligence.repository import (  # noqa: PLC0415
+            IntelligenceRepository,
+        )
+        from release_confidence_platform.storage.aws_client_factory import (
+            AwsClientFactory,  # noqa: PLC0415
+        )
+
+        generate_command = getattr(args, "generate_command", "") or ""
+        if generate_command == "intelligence":
+            stage_config = StageConfigLoader().load(args.stage)
+            factory = AwsClientFactory(stage_config)
+            dynamodb_client = factory._session.client("dynamodb")
+            s3_client = factory._session.client("s3")
+
+            intel_repo = IntelligenceRepository(
+                stage_config.audit_metadata_table, dynamodb_client
+            )
+            intel_publisher = IntelligencePublisher(stage_config.config_bucket, s3_client)
+            engine = IntelligenceEngine(
+                intel_repo, intel_publisher, logger=StructuredLogger()
+            )
+            result = engine.generate(
+                client_id=args.client,
+                audit_id=args.audit,
+                audit_execution_id=args.execution,
+                config_version=args.config_version,
+                aggregation_version=args.aggregation_version,
+                force=getattr(args, "force", False),
+                dry_run=getattr(args, "dry_run", False),
+            )
+            status_val = result.get("status", "COMPLETE")
+            cli_status = (
+                "success" if status_val in {"COMPLETE", "ALREADY_COMPLETE"}
+                else status_val.lower()
+            )
+            return CommandResult(
+                command="generate intelligence",
+                stage=args.stage,
+                status=cli_status,
+                summary=f"Intelligence generation {status_val.lower()} for {args.audit}",
+                data=result,
+                exit_code=0,
+            )
+        raise AssertionError(f"generate {generate_command}")
     if args.group == "client":
         if args.client_command == "list":
             return services.client_list_command(args)
@@ -228,6 +356,8 @@ def _command_name(args: argparse.Namespace) -> str:
         return f"config {getattr(args, 'config_command', 'unknown')}"
     if getattr(args, "group", None) == "retrieve":
         return f"retrieve {getattr(args, 'retrieve_command', 'unknown')}"
+    if getattr(args, "group", None) == "generate":
+        return f"generate {getattr(args, 'generate_command', 'unknown')}"
     return f"audit {getattr(args, 'audit_command', 'unknown')}"
 
 

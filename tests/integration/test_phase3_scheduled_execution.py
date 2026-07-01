@@ -162,7 +162,7 @@ def test_repeated_execution_is_sequential_and_omits_run_id():
 # ---------------------------------------------------------------------------
 
 def test_scheduler_increments_total_completed_on_orchestrator_completed():
-    """B-01: single execution with COMPLETED status → total_completed incremented, total_failed=0."""
+    """B-01: single execution with COMPLETED status → total_completed incremented, total_failed=0."""  # noqa: E501
     repo = Repo()
 
     class CompletedOrchestrator:
@@ -184,7 +184,7 @@ def test_scheduler_increments_total_completed_on_orchestrator_completed():
 # ---------------------------------------------------------------------------
 
 def test_scheduler_does_not_increment_total_completed_on_orchestrator_failed():
-    """B-02: single execution with FAILED status → total_completed NOT incremented, total_failed=1."""
+    """B-02: single execution with FAILED status → total_completed NOT incremented, total_failed=1."""  # noqa: E501
     repo = Repo()
 
     class FailedOrchestrator:
@@ -241,8 +241,6 @@ def test_scheduler_counter_consistency_after_mixed_execution_sequence():
     repo = Repo()
     # Override get_audit_metadata to always return the live audit dict so that
     # each subsequent call picks up counters written by the previous call.
-    original_get = repo.get_audit_metadata
-
     def get_live_audit(client_id, audit_id):  # noqa: ARG001
         return repo.audit
 

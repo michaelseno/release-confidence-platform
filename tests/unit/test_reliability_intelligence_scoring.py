@@ -36,6 +36,7 @@ from release_confidence_platform.reliability_intelligence.models import (
     BurstResult,
     ConsistencyResult,
     EndpointMetricsDTO,
+    EndpointScoreResult,
     StabilityResult,
 )
 from release_confidence_platform.reliability_intelligence.scoring import (
@@ -110,7 +111,7 @@ def _all_passing_score() -> tuple:
 def _all_insufficient() -> tuple:
     """Returns (metrics, stability, burst, consistency) for all-INSUFFICIENT_DATA endpoint."""
     return (
-        _make_metrics(success_rate=None, is_insufficient_data=True, execution_count=0, numerator=0, denominator=0),
+        _make_metrics(success_rate=None, is_insufficient_data=True, execution_count=0, numerator=0, denominator=0),  # noqa: E501
         _make_stability(LABEL_INSUFFICIENT_DATA, LABEL_INSUFFICIENT_DATA),
         _make_burst(LABEL_INSUFFICIENT_DATA, LABEL_INSUFFICIENT_DATA),
         _make_consistency(LABEL_INSUFFICIENT_DATA),
@@ -169,7 +170,7 @@ class TestPerEndpointScore:
         = 0.1665 + 0.1000 + 0.0750 + 0.0750 = 0.4165 → ROUND_HALF_UP → 0.417
         """
         result = compute_endpoint_score(
-            _make_metrics(success_rate=Decimal("0.333"), numerator=1, denominator=3, execution_count=10),
+            _make_metrics(success_rate=Decimal("0.333"), numerator=1, denominator=3, execution_count=10),  # noqa: E501
             _make_stability(LABEL_INSUFFICIENT_DATA, LABEL_INSUFFICIENT_DATA),
             _make_burst(LABEL_INSUFFICIENT_DATA, LABEL_INSUFFICIENT_DATA),
             _make_consistency(LABEL_INSUFFICIENT_DATA),
@@ -181,7 +182,7 @@ class TestPerEndpointScore:
         """SCORE-EP06a: no input combination can push composite below 0.0."""
         # Worst case: all DEGRADED / BURST_SUSPECTED / SPIKE_SUSPECTED / INCONSISTENT
         result = compute_endpoint_score(
-            _make_metrics(success_rate=Decimal("0.000"), numerator=0, denominator=20, execution_count=20),
+            _make_metrics(success_rate=Decimal("0.000"), numerator=0, denominator=20, execution_count=20),  # noqa: E501
             _make_stability(LABEL_DEGRADED, LABEL_DEGRADED),
             _make_burst(LABEL_BURST_SUSPECTED, LABEL_SPIKE_SUSPECTED),
             _make_consistency(LABEL_INCONSISTENT),
@@ -300,7 +301,7 @@ class TestScoreLabelAssignment:
 
     def test_only_three_valid_label_values(self):
         """SCORE-LB08: only HIGH_CONFIDENCE, MODERATE_CONFIDENCE, LOW_CONFIDENCE are produced."""
-        valid_labels = {SCORE_LABEL_HIGH_CONFIDENCE, SCORE_LABEL_MODERATE_CONFIDENCE, SCORE_LABEL_LOW_CONFIDENCE}
+        valid_labels = {SCORE_LABEL_HIGH_CONFIDENCE, SCORE_LABEL_MODERATE_CONFIDENCE, SCORE_LABEL_LOW_CONFIDENCE}  # noqa: E501
         probe_scores = [
             Decimal("0.000"), Decimal("0.001"), Decimal("0.499"), Decimal("0.500"),
             Decimal("0.501"), Decimal("0.799"), Decimal("0.800"), Decimal("0.801"),
@@ -316,7 +317,7 @@ class TestScoreLabelAssignment:
         The label is assigned AFTER rounding. This test verifies scoring produces
         the correct rounded value, then calls assign_score_label on the rounded score.
         """
-        rounded = Decimal("0.7995").quantize(Decimal("0.001"), rounding=__import__("decimal").ROUND_HALF_UP)
+        rounded = Decimal("0.7995").quantize(Decimal("0.001"), rounding=__import__("decimal").ROUND_HALF_UP)  # noqa: E501
         assert rounded == Decimal("0.800")
         assert assign_score_label(rounded) == SCORE_LABEL_HIGH_CONFIDENCE
 
@@ -335,17 +336,25 @@ class TestScoreLabelAssignment:
 
 
 def _ep_score_from_composite(composite: Decimal, endpoint_id: str = "ep") -> "EndpointScoreResult":
-    """Helper: build an EndpointScoreResult with a known composite_score by running the actual scorer."""
+    """Helper: build an EndpointScoreResult with a known composite_score by running the actual scorer."""  # noqa: E501
     # We need a real EndpointScoreResult; construct via compute_endpoint_score
     # with inputs that yield the desired composite. For exact control, use
     # reliability only (set analysis labels to INSUFFICIENT_DATA to neutralize them).
     # composite = 0.50*rel + 0.20*0.5 + 0.15*0.5 + 0.15*0.5 = 0.50*rel + 0.25
     # rel = (composite - 0.25) / 0.50
-    from decimal import ROUND_HALF_UP as _RHU, Decimal as _D
+    from decimal import ROUND_HALF_UP as _RHU
+    from decimal import Decimal as _D
     rel = (composite - _D("0.25")) / _D("0.50")
     rel = rel.quantize(_D("0.001"), rounding=_RHU)
-    from release_confidence_platform.reliability_intelligence.models import EndpointMetricsDTO, StabilityResult, BurstResult, ConsistencyResult
-    from release_confidence_platform.reliability_intelligence.constants import LABEL_INSUFFICIENT_DATA as _LID
+    from release_confidence_platform.reliability_intelligence.constants import (
+        LABEL_INSUFFICIENT_DATA as _LID,
+    )
+    from release_confidence_platform.reliability_intelligence.models import (
+        BurstResult,
+        ConsistencyResult,
+        EndpointMetricsDTO,
+        StabilityResult,
+    )
     m = EndpointMetricsDTO(
         endpoint_id=endpoint_id,
         execution_count=20,
@@ -356,7 +365,7 @@ def _ep_score_from_composite(composite: Decimal, endpoint_id: str = "ep") -> "En
         timeout_count=0,
         is_insufficient_data=False,
     )
-    s = StabilityResult(success_rate_stability_label=_LID, latency_stability_label=_LID, methodology_trace={})
+    s = StabilityResult(success_rate_stability_label=_LID, latency_stability_label=_LID, methodology_trace={})  # noqa: E501
     b = BurstResult(failure_burst_label=_LID, latency_spike_label=_LID, methodology_trace={})
     c = ConsistencyResult(consistency_label=_LID, methodology_trace={})
     return compute_endpoint_score(m, s, b, c)

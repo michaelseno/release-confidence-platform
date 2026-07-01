@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from apps.backend.handlers.audit_finalization_handler import AuditFinalizationHandler
 
-
 # ---------------------------------------------------------------------------
 # Test doubles
 # ---------------------------------------------------------------------------

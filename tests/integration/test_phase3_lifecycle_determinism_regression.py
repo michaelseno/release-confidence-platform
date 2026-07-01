@@ -20,15 +20,11 @@ RCA-3  (Inherited from prior bug chain) The finalization integrity gate's
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock
-
-import pytest
 
 from apps.backend.handlers.audit_finalization_handler import AuditFinalizationHandler
 from packages.audit_lifecycle.exceptions import LifecycleConflictError
 from packages.audit_scheduling.service import AuditSchedulingService
 from src.release_confidence_platform.operator_cli.discovery_service import DiscoveryListService
-
 
 # ---------------------------------------------------------------------------
 # Shared test fixtures / stubs
@@ -263,7 +259,7 @@ class TestNormalizeConfigFinalizationSchedule:
         )
 
     def test_config_with_finalization_enabled_true_creates_finalization_schedule(self):
-        """Explicit finalization_schedule: {enabled: true} must also produce a finalization schedule."""
+        """Explicit finalization_schedule: {enabled: true} must also produce a finalization schedule."""  # noqa: E501
         config = {
             "client_id": "client1",
             "audit_id": "audit1",
@@ -363,7 +359,6 @@ class TestLifecycleConflictOnFinalizingTransition:
         # After the conflict, the repo will return the same dict — but we need to simulate
         # the re-read showing a terminal state.  We do this by overriding get_audit_metadata
         # to return a terminal state on the second call.
-        original_get = repo.get_audit_metadata
         call_count = {"n": 0}
 
         def patched_get(client_id, audit_id):

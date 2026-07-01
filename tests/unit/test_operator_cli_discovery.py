@@ -226,7 +226,7 @@ def test_audit_metadata_repository_filters_canonical_rows_across_query_pages():
                         {"PK": "CLIENT#client1", "SK": "AUDIT#audit1#RUN#run1"},
                         {"PK": "CLIENT#client1", "SK": "AUDIT#audit1#OCCURRENCE#occ1"},
                     ],
-                    "LastEvaluatedKey": {"PK": "CLIENT#client1", "SK": "AUDIT#audit1#OCCURRENCE#occ1"},
+                    "LastEvaluatedKey": {"PK": "CLIENT#client1", "SK": "AUDIT#audit1#OCCURRENCE#occ1"},  # noqa: E501
                 }
             return {
                 "Items": [
