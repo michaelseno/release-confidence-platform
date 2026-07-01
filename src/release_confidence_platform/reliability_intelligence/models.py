@@ -48,6 +48,28 @@ class EndpointMetricsDTO:
     is_insufficient_data: bool
 
 
+@dataclass(frozen=True)
+class StabilityResult:
+    """Per-endpoint stability analysis result from Phase 5.3.
+
+    Produced by stability.py. Consumed by scoring.py and engine.py
+    for S3 artifact assembly.
+
+    Fields:
+        success_rate_stability_label: STABLE | DEGRADED | INSUFFICIENT_DATA
+        latency_stability_label: STABLE | DEGRADED | INSUFFICIENT_DATA
+        methodology_trace: Combined trace dict for both success_rate_stability_v1 and
+            latency_stability_v1 — inputs, thresholds, intermediate values, and label
+            determination. Persisted in the S3 intelligence artifact.
+    Note: hash() raises TypeError because methodology_trace is a dict.
+    StabilityResult is never used as a dict key or set member.
+    """
+
+    success_rate_stability_label: str
+    latency_stability_label: str
+    methodology_trace: dict
+
+
 @dataclass
 class AuditMetricsSummaryDTO:
     """Audit-level reliability summary aggregated from Phase 4 AuditAggregate and per-endpoint metrics.
