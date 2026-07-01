@@ -25,7 +25,6 @@ from release_confidence_platform.sanitization.sanitizer import sanitize
 from release_confidence_platform.storage.dynamodb_codec import (
     decode_dynamodb_response,
     encode_dynamodb_call_kwargs,
-    encode_item,
     storage_error_from_dynamodb_client_error,
     storage_error_from_dynamodb_request_error,
 )

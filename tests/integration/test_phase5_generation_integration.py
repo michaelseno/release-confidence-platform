@@ -16,13 +16,9 @@ from __future__ import annotations
 import json
 from decimal import Decimal
 
-import pytest
-
 from release_confidence_platform.reliability_intelligence.engine import (
     IntelligenceEngine,
-    IntelligenceGateError,
 )
-from release_confidence_platform.reliability_intelligence.publisher import IntelligencePublisher
 
 # ---------------------------------------------------------------------------
 # Shared fixture data — minimal Phase 4 aggregate records
@@ -39,7 +35,11 @@ _AGGREGATE_SET = {
     "source_raw_result_count": 20,
     "endpoint_aggregate_count": 2,
     "created_at": "2026-01-01T00:00:00.000Z",
-    "audit_lineage_manifest_ref": {"manifest_scope": "audit", "source_ref_count": 20, "manifest_hash": "abc"},
+    "audit_lineage_manifest_ref": {
+        "manifest_scope": "audit",
+        "source_ref_count": 20,
+        "manifest_hash": "abc",
+    },
 }
 
 _AUDIT_AGGREGATE = {
@@ -219,7 +219,8 @@ class FakeIntelligenceRepository:
     def update_intelligence_job(self, key, updates):
         sk = key.get("SK", "")
         _check_phase5_sk("update_intelligence_job", sk)
-        job_id = key.get("SK", "").split("#INTJOB#")[-1] if "#INTJOB#" in key.get("SK", "") else "unknown"
+        sk_val = key.get("SK", "")
+        job_id = sk_val.split("#INTJOB#")[-1] if "#INTJOB#" in sk_val else "unknown"
         if job_id in self._job_store:
             self._job_store[job_id].update(updates)
         self.write_calls.append(("update_intelligence_job", {**key, **updates}))
@@ -399,7 +400,9 @@ def test_s3_key_uses_intelligence_prefix():
     result, repo, publisher = _run_generation()
     keys = list(publisher.written.keys())
     assert len(keys) == 1
-    assert keys[0].startswith("intelligence/"), f"S3 key must start with intelligence/, got {keys[0]}"
+    assert keys[0].startswith("intelligence/"), (
+        f"S3 key must start with intelligence/, got {keys[0]}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -417,22 +420,18 @@ def test_determinism_byte_identical_artifact_json():
     _, repo1, publisher1 = _run_generation()
     key1 = list(publisher1.written.keys())[0]
     artifact1 = publisher1.written[key1]
-    # Serialize as the publisher would
-    json_bytes1 = json.dumps(artifact1, sort_keys=True, default=str).encode("utf-8")
-
     # Run generation again with same inputs (different job_id will appear in key and artifact)
     # For true determinism test, we compare the content excluding the variable fields.
     _, repo2, publisher2 = _run_generation()
     key2 = list(publisher2.written.keys())[0]
     artifact2 = publisher2.written[key2]
-    json_bytes2 = json.dumps(artifact2, sort_keys=True, default=str).encode("utf-8")
 
     # The intelligence_job_id and generated_at differ between runs; we compare
     # the deterministic computation outputs: scores, analysis labels, methodology disclosure.
     # These must be identical.
     def _strip_variable_fields(artifact: dict) -> dict:
-        stripped = {k: v for k, v in artifact.items() if k not in {"intelligence_job_id", "generated_at"}}
-        return stripped
+        exclude = {"intelligence_job_id", "generated_at"}
+        return {k: v for k, v in artifact.items() if k not in exclude}
 
     deterministic1 = json.dumps(_strip_variable_fields(artifact1), sort_keys=True, default=str)
     deterministic2 = json.dumps(_strip_variable_fields(artifact2), sort_keys=True, default=str)
@@ -447,7 +446,8 @@ def test_determinism_composite_score_consistent():
     result1, _, _ = _run_generation()
     result2, _, _ = _run_generation()
     assert result1["composite_score"] == result2["composite_score"], (
-        f"composite_score must be deterministic: {result1['composite_score']} != {result2['composite_score']}"
+        f"composite_score must be deterministic: "
+        f"{result1['composite_score']} != {result2['composite_score']}"
     )
     assert result1["score_label"] == result2["score_label"]
 
@@ -485,7 +485,9 @@ def test_idempotency_second_call_no_force_returns_early():
         "composite_score": "0.950",
         "score_label": "HIGH_CONFIDENCE",
         "endpoint_count": 2,
-        "s3_artifact_ref": "intelligence/client1/audit1/exec1/agg_v1/intel_v1/intjob_existing/artifact.json",
+        "s3_artifact_ref": (
+            "intelligence/client1/audit1/exec1/agg_v1/intel_v1/intjob_existing/artifact.json"
+        ),
         "generation_count": 1,
         "created_at": "2026-01-01T00:00:00Z",
     }

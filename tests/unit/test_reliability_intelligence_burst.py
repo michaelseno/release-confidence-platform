@@ -11,6 +11,9 @@ from decimal import Decimal
 
 import pytest
 
+from release_confidence_platform.reliability_intelligence.burst import (
+    compute_burst_analysis,
+)
 from release_confidence_platform.reliability_intelligence.constants import (
     FAILURE_BURST_ALGORITHM,
     INTELLIGENCE_VERSION,
@@ -26,9 +29,6 @@ from release_confidence_platform.reliability_intelligence.constants import (
     TIMEOUT_BURST_THRESHOLD,
 )
 from release_confidence_platform.reliability_intelligence.models import EndpointMetricsDTO
-from release_confidence_platform.reliability_intelligence.burst import (
-    compute_burst_analysis,
-)
 
 # ---------------------------------------------------------------------------
 # Required wording phrase (Section 11 / methodology_disclosure limitations line 577)
@@ -139,7 +139,7 @@ class TestFailureBurstAlgorithm:
         assert result.failure_burst_label == LABEL_INSUFFICIENT_DATA
 
     def test_threshold_is_exclusive_boundary(self):
-        """BURST-FB07: timeout_proportion 0.2002 → BURST_SUSPECTED; exactly 0.200 → NO_BURST_DETECTED."""
+        """BURST-FB07: timeout_proportion 0.2002 → BURST_SUSPECTED; exactly 0.200 → NO_BURST_DETECTED."""  # noqa: E501
         result_just_above = compute_burst_analysis(
             _make_endpoint_metrics(execution_count=999, timeout_count=200)
         )

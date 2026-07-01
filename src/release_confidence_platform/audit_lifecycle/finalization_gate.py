@@ -96,7 +96,8 @@ def finalization_integrity_gate(
     execution_count = finalization.get("execution_count")
     if execution_count is None or not _is_valid_positive_int(execution_count):
         raise ValueError(
-            f"audit.finalization.execution_count must be a valid integer > 0; got {execution_count!r}"
+            "audit.finalization.execution_count must be a valid integer > 0; "
+            f"got {execution_count!r}"
         )
 
     expected_terminal_count = int(execution_count)

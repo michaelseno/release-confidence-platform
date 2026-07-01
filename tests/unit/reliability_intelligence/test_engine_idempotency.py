@@ -7,13 +7,9 @@ Covers:
 """
 from __future__ import annotations
 
-import pytest
-
 from release_confidence_platform.reliability_intelligence.engine import (
     IntelligenceEngine,
-    IntelligenceGateError,
 )
-
 
 # ---------------------------------------------------------------------------
 # Shared test infrastructure
@@ -32,8 +28,13 @@ _AGGREGATE_SET = {
 _AUDIT_AGGREGATE = {
     "aggregate_type": "audit",
     "record_kind": "aggregate",
-    "request_counts": {"total": 20, "successful": 18, "failed": 2, "timeout": 1, "network_failure": 1},
-    "latency_summary_ms": {"count": 20, "min": 50.0, "max": 500.0, "mean": 120.0, "median": 100.0, "p95": 400.0, "p99": 480.0},
+    "request_counts": {
+        "total": 20, "successful": 18, "failed": 2, "timeout": 1, "network_failure": 1
+    },
+    "latency_summary_ms": {
+        "count": 20, "min": 50.0, "max": 500.0, "mean": 120.0,
+        "median": 100.0, "p95": 400.0, "p99": 480.0,
+    },
     "endpoint_execution_counts": {"ep_1": 20},
     "lineage": {"audit_execution_id": "exec1", "config_version": "cfg_v1"},
 }
@@ -126,7 +127,9 @@ def test_complete_without_force_returns_existing_no_writes():
         "composite_score": "0.900",
         "score_label": "HIGH_CONFIDENCE",
         "endpoint_count": 1,
-        "s3_artifact_ref": "intelligence/client1/audit1/exec1/agg_v1/intel_v1/intjob_existing/artifact.json",
+        "s3_artifact_ref": (
+            "intelligence/client1/audit1/exec1/agg_v1/intel_v1/intjob_existing/artifact.json"
+        ),
         "generation_count": 1,
         "created_at": "2026-01-01T00:00:00Z",
     }
@@ -160,7 +163,9 @@ def test_complete_without_force_returns_existing_artifact_ref():
         "composite_score": "0.750",
         "score_label": "MODERATE_CONFIDENCE",
         "endpoint_count": 2,
-        "s3_artifact_ref": "intelligence/client1/audit1/exec1/agg_v1/intel_v1/intjob_existing/artifact.json",
+        "s3_artifact_ref": (
+            "intelligence/client1/audit1/exec1/agg_v1/intel_v1/intjob_existing/artifact.json"
+        ),
         "generation_count": 1,
         "created_at": "2026-01-01T00:00:00Z",
     }
@@ -190,7 +195,9 @@ def test_force_when_complete_generates_new_job_id():
         "composite_score": "0.900",
         "score_label": "HIGH_CONFIDENCE",
         "endpoint_count": 1,
-        "s3_artifact_ref": "intelligence/client1/audit1/exec1/agg_v1/intel_v1/intjob_existing/artifact.json",
+        "s3_artifact_ref": (
+            "intelligence/client1/audit1/exec1/agg_v1/intel_v1/intjob_existing/artifact.json"
+        ),
         "generation_count": 1,
         "created_at": "2026-01-01T00:00:00Z",
     }

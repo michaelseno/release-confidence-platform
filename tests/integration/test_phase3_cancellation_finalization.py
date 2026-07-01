@@ -367,7 +367,7 @@ def test_gate_failure_transitions_to_failed_not_stuck_in_finalizing():
 
 
 def test_gate_failure_on_retry_transitions_to_failed():
-    """Retry path (FINALIZING with existing metadata) must also transition to FAILED on gate failure."""
+    """Retry path (FINALIZING with existing metadata) must also transition to FAILED on gate failure."""  # noqa: E501
     repo = Repo(state="FINALIZING", executions=1)
     repo.audit["finalization"] = {
         "execution_count": 1,

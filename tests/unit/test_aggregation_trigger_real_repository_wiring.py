@@ -1,4 +1,4 @@
-"""Regression test: _trigger_aggregation_after_finalization wiring against real AuditMetadataRepository.
+"""Regression: _trigger_aggregation_after_finalization wiring against real AuditMetadataRepository.
 
 This test exists because the deployed runtime AttributeError
     'AuditMetadataRepository' object has no attribute 'aggregation_job_keys'
@@ -27,11 +27,11 @@ from unittest.mock import MagicMock
 import pytest
 from botocore.exceptions import ClientError
 
-# Import the REAL class — not a stub or Mock.
-from packages.storage.audit_metadata_client import AuditMetadataRepository
 from apps.backend.handlers.audit_finalization_handler import AuditFinalizationHandler
 from packages.core.logging import StructuredLogger
 
+# Import the REAL class — not a stub or Mock.
+from packages.storage.audit_metadata_client import AuditMetadataRepository
 
 # ---------------------------------------------------------------------------
 # In-memory DynamoDB fake
@@ -51,20 +51,20 @@ class _InMemoryDynamoFake:
         self.put_calls: list[dict[str, Any]] = []
         self.update_calls: list[dict[str, Any]] = []
 
-    def put_item(self, TableName: str, Item: dict[str, Any], ConditionExpression: str = "", **kwargs: Any) -> dict[str, Any]:  # noqa: N803, ARG002
+    def put_item(self, TableName: str, Item: dict[str, Any], ConditionExpression: str = "", **kwargs: Any) -> dict[str, Any]:  # noqa: N803, ARG002, E501
         pk = Item.get("PK")
         sk = Item.get("SK")
         key = (pk, sk)
         if key in self._store:
             raise ClientError(
-                {"Error": {"Code": "ConditionalCheckFailedException", "Message": "The conditional request failed"}},
+                {"Error": {"Code": "ConditionalCheckFailedException", "Message": "The conditional request failed"}},  # noqa: E501
                 "PutItem",
             )
         self._store[key] = dict(Item)
         self.put_calls.append(dict(Item))
         return {}
 
-    def update_item(self, TableName: str, Key: dict[str, Any], ConditionExpression: str = "", **kwargs: Any) -> dict[str, Any]:  # noqa: N803, ARG002
+    def update_item(self, TableName: str, Key: dict[str, Any], ConditionExpression: str = "", **kwargs: Any) -> dict[str, Any]:  # noqa: N803, ARG002, E501
         pk = Key.get("PK")
         sk = Key.get("SK")
         key = (pk, sk)
@@ -96,7 +96,7 @@ def _silent_logger() -> StructuredLogger:
     return logger
 
 
-def _build_handler(fake_ddb: _InMemoryDynamoFake, *, aggregation_invoker: Any = None, aggregation_function_name: str | None = None) -> tuple[AuditFinalizationHandler, AuditMetadataRepository]:
+def _build_handler(fake_ddb: _InMemoryDynamoFake, *, aggregation_invoker: Any = None, aggregation_function_name: str | None = None) -> tuple[AuditFinalizationHandler, AuditMetadataRepository]:  # noqa: E501
     """Return handler + real repository wired against fake_ddb."""
     repository = AuditMetadataRepository("test_table", fake_ddb)
     handler = AuditFinalizationHandler(
@@ -202,7 +202,7 @@ class TestTriggerAggregationAfterFinalizationWithRealRepository:
     def test_no_attribute_error_without_invoker(self) -> None:
         """Trigger without aggregation_invoker configured: must not raise AttributeError."""
         fake = _InMemoryDynamoFake()
-        handler, _repo = _build_handler(fake, aggregation_invoker=None, aggregation_function_name=None)
+        handler, _repo = _build_handler(fake, aggregation_invoker=None, aggregation_function_name=None)  # noqa: E501
         event = self._make_event()
         # This must not raise AttributeError even when invoker is None.
         handler._trigger_aggregation_after_finalization(event)
@@ -210,7 +210,7 @@ class TestTriggerAggregationAfterFinalizationWithRealRepository:
     def test_intent_record_written_to_real_repository(self) -> None:
         """Intent record must be persisted in the real repository after trigger."""
         fake = _InMemoryDynamoFake()
-        handler, _repo = _build_handler(fake, aggregation_invoker=None, aggregation_function_name=None)
+        handler, _repo = _build_handler(fake, aggregation_invoker=None, aggregation_function_name=None)  # noqa: E501
         event = self._make_event()
         handler._trigger_aggregation_after_finalization(event)
         # Exactly one put_item call must have been made for the job intent record.
@@ -243,7 +243,7 @@ class TestTriggerAggregationAfterFinalizationWithRealRepository:
         assert call_kwargs["payload"]["audit_id"] == "audit_regression"
 
     def test_trigger_invocation_accepted_status_written(self) -> None:
-        """After successful Lambda invoke, status must be updated to ACCEPTED via real repository."""
+        """After successful Lambda invoke, status must be updated to ACCEPTED via real repository."""  # noqa: E501
         fake = _InMemoryDynamoFake()
         mock_invoker = MagicMock()
         mock_invoker.invoke.return_value = None
@@ -287,9 +287,9 @@ class TestTriggerAggregationAfterFinalizationWithRealRepository:
         fake = _InMemoryDynamoFake()
         handler, repo = _build_handler(fake)
         assert isinstance(repo, AuditMetadataRepository), (
-            "Handler must use the real AuditMetadataRepository from packages.storage.audit_metadata_client, "
+            "Handler must use the real AuditMetadataRepository from packages.storage.audit_metadata_client, "  # noqa: E501
             "not a stub or Mock"
         )
-        assert hasattr(repo, "aggregation_job_keys"), "aggregation_job_keys missing from real repository"
-        assert hasattr(repo, "put_aggregation_job_intent_once"), "put_aggregation_job_intent_once missing from real repository"
-        assert hasattr(repo, "update_aggregation_job_intent"), "update_aggregation_job_intent missing from real repository"
+        assert hasattr(repo, "aggregation_job_keys"), "aggregation_job_keys missing from real repository"  # noqa: E501
+        assert hasattr(repo, "put_aggregation_job_intent_once"), "put_aggregation_job_intent_once missing from real repository"  # noqa: E501
+        assert hasattr(repo, "update_aggregation_job_intent"), "update_aggregation_job_intent missing from real repository"  # noqa: E501

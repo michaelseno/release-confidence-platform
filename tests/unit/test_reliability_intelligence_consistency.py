@@ -11,6 +11,9 @@ from decimal import Decimal
 
 import pytest
 
+from release_confidence_platform.reliability_intelligence.consistency import (
+    compute_consistency_analysis,
+)
 from release_confidence_platform.reliability_intelligence.constants import (
     INTELLIGENCE_VERSION,
     LABEL_CONSISTENT,
@@ -21,9 +24,6 @@ from release_confidence_platform.reliability_intelligence.constants import (
     VARIANCE_CONSISTENT_THRESHOLD,
 )
 from release_confidence_platform.reliability_intelligence.models import EndpointMetricsDTO
-from release_confidence_platform.reliability_intelligence.consistency import (
-    compute_consistency_analysis,
-)
 
 # ---------------------------------------------------------------------------
 # Required wording phrase (tech design Section 12 / limitations line 578)
@@ -237,7 +237,7 @@ class TestBernoulliVarianceFormula:
         assert variance is not None
         # Must match 0.333 * 0.667, not the unrounded 1/3 * 2/3.
         expected_from_rounded = Decimal("0.333") * Decimal("0.667")
-        expected_from_unrounded = Decimal("1") / Decimal("3") * (Decimal("1") - Decimal("1") / Decimal("3"))
+        expected_from_unrounded = Decimal("1") / Decimal("3") * (Decimal("1") - Decimal("1") / Decimal("3"))  # noqa: E501
         assert variance == expected_from_rounded
         assert variance != expected_from_unrounded
 

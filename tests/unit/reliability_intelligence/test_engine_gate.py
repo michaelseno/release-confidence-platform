@@ -12,7 +12,6 @@ from release_confidence_platform.reliability_intelligence.engine import (
     IntelligenceGateError,
 )
 
-
 # ---------------------------------------------------------------------------
 # Minimal repository stubs
 # ---------------------------------------------------------------------------

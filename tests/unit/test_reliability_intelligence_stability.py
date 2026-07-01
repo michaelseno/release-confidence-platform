@@ -479,7 +479,7 @@ class TestMethodologyTraceWording:
 
 class TestStabilityResultStructure:
     def test_result_has_expected_fields(self):
-        """StabilityResult has success_rate_stability_label, latency_stability_label, methodology_trace."""
+        """StabilityResult has success_rate_stability_label, latency_stability_label, methodology_trace."""  # noqa: E501
         result = compute_stability_analysis(_make_endpoint_metrics())
         assert hasattr(result, "success_rate_stability_label")
         assert hasattr(result, "latency_stability_label")

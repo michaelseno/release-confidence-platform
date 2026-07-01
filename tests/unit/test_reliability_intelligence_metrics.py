@@ -1,7 +1,8 @@
 """Unit tests for Phase 5.2 — Reliability Metrics Core.
 
 Tests the pure computation functions in metrics.py using fixture dicts that match the
-Phase 4 consumer contract field specification (docs/architecture/phase_4a_phase5_consumer_contract.md).
+Phase 4 consumer contract field specification
+(docs/architecture/phase_4a_phase5_consumer_contract.md).
 
 Fixture format for latency_distribution_ms follows the consumer contract (Section 3.3):
 fields at the top level of latency_distribution_ms (count, min, max, mean, median, p95, p99).
@@ -21,7 +22,6 @@ from release_confidence_platform.reliability_intelligence.models import (
     AuditMetricsSummaryDTO,
     EndpointMetricsDTO,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixture helpers
@@ -472,9 +472,9 @@ def test_mean_success_rate_has_exactly_three_decimal_places():
         endpoint_execution_counts={"ep_1": 3, "ep_2": 3, "ep_3": 3}
     )
     ep_metrics = [
-        compute_endpoint_metrics(_endpoint_aggregate("ep_1", execution_count=3, numerator=1, denominator=3)),
-        compute_endpoint_metrics(_endpoint_aggregate("ep_2", execution_count=3, numerator=1, denominator=3)),
-        compute_endpoint_metrics(_endpoint_aggregate("ep_3", execution_count=3, numerator=1, denominator=3)),
+        compute_endpoint_metrics(_endpoint_aggregate("ep_1", execution_count=3, numerator=1, denominator=3)),  # noqa: E501
+        compute_endpoint_metrics(_endpoint_aggregate("ep_2", execution_count=3, numerator=1, denominator=3)),  # noqa: E501
+        compute_endpoint_metrics(_endpoint_aggregate("ep_3", execution_count=3, numerator=1, denominator=3)),  # noqa: E501
     ]
     summary = compute_audit_metrics_summary(audit_agg, ep_metrics)
     assert summary.mean_success_rate is not None
@@ -511,5 +511,7 @@ def test_endpoint_metrics_dto_success_inputs_preserved():
 def test_endpoint_metrics_dto_is_frozen():
     """EndpointMetricsDTO must be frozen (attribute reassignment raises FrozenInstanceError)."""
     ep = compute_endpoint_metrics(_endpoint_aggregate())
-    with pytest.raises(Exception):  # dataclasses.FrozenInstanceError
+    import dataclasses
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
         ep.endpoint_id = "mutated"  # type: ignore[misc]

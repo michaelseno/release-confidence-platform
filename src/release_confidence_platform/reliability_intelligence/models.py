@@ -167,7 +167,7 @@ class AuditScoreResult:
 
 @dataclass
 class AuditMetricsSummaryDTO:
-    """Audit-level reliability summary aggregated from Phase 4 AuditAggregate and per-endpoint metrics.
+    """Audit-level reliability summary from Phase 4 AuditAggregate and per-endpoint metrics.
 
     Produced by metrics.py. Consumed by engine.py for S3 artifact assembly.
 

@@ -45,7 +45,10 @@ class IntelligenceFormatter:
 
     @classmethod
     def format_json(cls, data: Any, envelope: IntelligenceProvenanceEnvelope) -> str:
-        """Return canonical JSON — byte-identical for identical inputs (IRET-F01, IRET-F03, IRET-REPR01)."""
+        """Return canonical JSON — byte-identical for identical inputs.
+
+        Satisfies: IRET-F01, IRET-F03, IRET-REPR01.
+        """
         payload = {
             "_notice": envelope._notice,
             "retrieved_at": envelope.retrieved_at,

@@ -8,13 +8,8 @@ markers (#AGGJOB#, #EXECUTION_ID, #ENDPOINT#, #LINEAGE#, #RUN#, #SET, #AUDIT, et
 """
 from __future__ import annotations
 
-from decimal import Decimal
-
-import pytest
-
 from release_confidence_platform.reliability_intelligence.engine import (
     IntelligenceEngine,
-    IntelligenceGateError,
 )
 
 # ---------------------------------------------------------------------------
@@ -209,10 +204,10 @@ def test_no_phase4_writes_on_first_generation():
     repo, publisher = _run_engine(has_existing=False)
     assert len(repo.write_calls) > 0, "Expected at least one write call"
     # If _assert_phase5_sk didn't raise, all writes are Phase 5-only.
-    for method, item in repo.write_calls:
+    for _method, item in repo.write_calls:
         sk = item.get("SK", "")
         assert "#INTJOB#" in sk or "#INTEL#" in sk, (
-            f"Write {method!r} targeted non-Phase-5 SK: {sk!r}"
+            f"Write targeted non-Phase-5 SK: {sk!r}"
         )
 
 
@@ -230,10 +225,10 @@ def test_no_phase4_writes_on_force_regeneration():
         force=True,
     )
     assert len(repo.write_calls) > 0, "Expected at least one write call on force re-generation"
-    for method, item in repo.write_calls:
+    for _method, item in repo.write_calls:
         sk = item.get("SK", "")
         assert "#INTJOB#" in sk or "#INTEL#" in sk, (
-            f"Force re-gen write {method!r} targeted non-Phase-5 SK: {sk!r}"
+            f"Force re-gen write targeted non-Phase-5 SK: {sk!r}"
         )
 
 
@@ -241,7 +236,7 @@ def test_no_phase4_writes_on_failed_retry():
     """Retrying a FAILED intelligence generation must only write to Phase 5 SK namespaces."""
     repo, publisher = _run_engine(has_existing=True)
     assert len(repo.write_calls) > 0
-    for method, item in repo.write_calls:
+    for _method, item in repo.write_calls:
         sk = item.get("SK", "")
         assert "#INTJOB#" in sk or "#INTEL#" in sk
 

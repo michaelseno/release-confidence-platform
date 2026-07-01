@@ -23,7 +23,6 @@ policy in phase4-aggregation-iam.yml instead.
 """
 from pathlib import Path
 
-
 IAM_FILE = Path("infra/resources/phase4-aggregation-iam.yml")
 
 # Complete set of DynamoDB actions that AuditFinalizationLambdaRole must

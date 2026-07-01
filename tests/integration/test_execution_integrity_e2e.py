@@ -77,7 +77,7 @@ class _StubOrchestrator:
         self._call_count = 0
 
     def run(self, event: dict[str, Any]) -> dict[str, Any]:
-        run_id = self._predefined_run_id if (self._predefined_run_id and self._call_count == 0) else str(uuid.uuid4())
+        run_id = self._predefined_run_id if (self._predefined_run_id and self._call_count == 0) else str(uuid.uuid4())  # noqa: E501
         self._call_count += 1
 
         client_id = event["client_id"]
@@ -262,7 +262,7 @@ def test_e2e_full_lifecycle_execution_finalization_aggregation_trigger():
         "WS-A fix may not be applied: sanitize() is still mutating run_id"
     )
     assert "[REDACTED]" not in phone_run["run_id"], (
-        "run_id must not contain [REDACTED] — sanitize() must not be called on persistence key material"
+        "run_id must not contain [REDACTED] — sanitize() must not be called on persistence key material"  # noqa: E501
     )
     assert "[REDACTED]" not in phone_run["raw_result_s3_key"], (
         "raw_result_s3_key must not contain [REDACTED]"
