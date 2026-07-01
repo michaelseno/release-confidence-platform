@@ -85,6 +85,26 @@ MAX_P99_RATIO_THRESHOLD = Decimal("3.0")
 # outcome_consistency_v1: Bernoulli variance p*(1-p) at or below this → CONSISTENT.
 VARIANCE_CONSISTENT_THRESHOLD = Decimal("0.05")
 
+# ---------------------------------------------------------------------------
+# Label-to-score mapping (Section 13.2)
+# ---------------------------------------------------------------------------
+
+# Must be referenced by scoring.py AND by the S3 artifact methodology_disclosure
+# label_to_score_mapping field. Defines the numeric value each analysis label
+# contributes to the composite score. INSUFFICIENT_DATA always maps to 0.5
+# (neutral — absence of evidence does not penalize or reward).
+LABEL_TO_SCORE: dict[str, Decimal] = {
+    LABEL_STABLE: Decimal("1.0"),
+    LABEL_DEGRADED: Decimal("0.0"),
+    LABEL_INSUFFICIENT_DATA: Decimal("0.5"),
+    LABEL_CONSISTENT: Decimal("1.0"),
+    LABEL_INCONSISTENT: Decimal("0.0"),
+    LABEL_NO_BURST_DETECTED: Decimal("1.0"),
+    LABEL_BURST_SUSPECTED: Decimal("0.0"),
+    LABEL_NO_SPIKE_DETECTED: Decimal("1.0"),
+    LABEL_SPIKE_SUSPECTED: Decimal("0.0"),
+}
+
 # Scoring: audit_score >= this → HIGH_CONFIDENCE label.
 HIGH_CONFIDENCE_THRESHOLD = Decimal("0.80")
 
