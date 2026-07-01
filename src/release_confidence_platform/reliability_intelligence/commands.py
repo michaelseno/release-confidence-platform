@@ -30,6 +30,10 @@ def build_intelligence_retrieve_parser(sub: argparse._SubParsersAction) -> None:
         )
         p.add_argument("--output", choices=("json", "human"), default="human")
         p.add_argument("--endpoint", default=None)
+        p.add_argument("--config-version", default="v1", dest="config_version")
+        p.add_argument(
+            "--aggregation-version", default="agg_v1", dest="aggregation_version"
+        )
         p.add_argument(
             "--intelligence-version",
             default="intel_v1",

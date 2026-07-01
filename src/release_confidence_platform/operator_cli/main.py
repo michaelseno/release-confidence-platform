@@ -214,7 +214,14 @@ def dispatch(args: argparse.Namespace) -> CommandResult:
             intel_svc = IntelligenceRetrievalService(intel_repo, intel_publisher)
             intel_formatter = IntelligenceFormatter()
             rendered = dispatch_intelligence_retrieve(args, intel_svc, intel_formatter)
-            return CommandResult(data={"rendered": rendered}, exit_code=0)
+            return CommandResult(
+                command=f"retrieve {retrieve_command}",
+                stage=getattr(args, "stage", None),
+                status="success",
+                summary=f"Retrieved {retrieve_command} for {getattr(args, 'audit', 'unknown')}",
+                data={"rendered": rendered},
+                exit_code=0,
+            )
 
         repo = RetrievalRepository(stage_config.audit_metadata_table, dynamodb_client)
         svc = RetrievalService(repo)
