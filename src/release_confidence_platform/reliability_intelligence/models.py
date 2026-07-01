@@ -92,6 +92,26 @@ class BurstResult:
     methodology_trace: dict
 
 
+@dataclass(frozen=True)
+class ConsistencyResult:
+    """Per-endpoint consistency analysis result from Phase 5.5.
+
+    Produced by consistency.py. Consumed by scoring.py and engine.py
+    for S3 artifact assembly.
+
+    Fields:
+        consistency_label: CONSISTENT | INCONSISTENT | INSUFFICIENT_DATA
+        methodology_trace: Trace dict for outcome_consistency_v1 — inputs, thresholds,
+            intermediate Bernoulli variance, and label determination explanation.
+            Persisted in the S3 intelligence artifact.
+    Note: hash() raises TypeError because methodology_trace is a dict.
+    ConsistencyResult is never used as a dict key or set member.
+    """
+
+    consistency_label: str
+    methodology_trace: dict
+
+
 @dataclass
 class AuditMetricsSummaryDTO:
     """Audit-level reliability summary aggregated from Phase 4 AuditAggregate and per-endpoint metrics.
