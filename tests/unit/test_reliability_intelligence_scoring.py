@@ -128,10 +128,19 @@ class TestPerEndpointScore:
         result = compute_endpoint_score(*_all_passing_score())
         assert result.composite_score == Decimal("1.000")
 
-    def test_all_insufficient_data_yields_0_500(self):
-        """SCORE-EP02: all INSUFFICIENT_DATA → 0.5 neutral per component → composite = 0.500."""
+    def test_all_insufficient_data_yields_0_250(self):
+        """SCORE-EP02 (corrected per Technical Design Section 13.3 Step 1): all INSUFFICIENT_DATA.
+
+        reliability_score = 0.0 (no executable reliability evidence; tech design strict rule).
+        stability_score = burst_score = consistency_score = 0.5 (INSUFFICIENT_DATA neutral).
+        composite = 0.50 * 0.0 + 0.20 * 0.5 + 0.15 * 0.5 + 0.15 * 0.5
+                  = 0.000 + 0.100 + 0.075 + 0.075 = 0.250
+
+        The QA plan draft listed 0.500 assuming reliability also uses neutral 0.5, but
+        the Technical Design is authoritative: reliability_score = 0.0 when no data.
+        """
         result = compute_endpoint_score(*_all_insufficient())
-        assert result.composite_score == Decimal("0.500")
+        assert result.composite_score == Decimal("0.250")
 
     def test_mixed_reliability_and_insufficient_data(self):
         """SCORE-EP03: reliability=0.9, all others INSUFFICIENT_DATA → 0.700.
@@ -194,10 +203,15 @@ class TestPerEndpointScore:
         )
         assert result.reliability_score == Decimal("0.870")
 
-    def test_reliability_score_neutral_when_insufficient_data(self):
-        """reliability_score = 0.5 (neutral) when is_insufficient_data — absence of evidence is not a penalty."""
+    def test_reliability_score_zero_when_insufficient_data(self):
+        """reliability_score = 0.0 when is_insufficient_data — no executable reliability evidence.
+
+        Reliability is the primary direct evidence signal. 0.5 neutral is appropriate for
+        derived analysis labels (stability/burst/consistency); reliability uses strict 0.0
+        per Technical Design Section 13.3 Step 1.
+        """
         result = compute_endpoint_score(*_all_insufficient())
-        assert result.reliability_score == Decimal("0.500")
+        assert result.reliability_score == Decimal("0.000")
 
     def test_stability_score_is_mean_of_both_labels(self):
         """stability_score = (STABLE + DEGRADED) / 2 = (1.0 + 0.0) / 2 = 0.500."""

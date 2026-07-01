@@ -30,7 +30,6 @@ from typing import Any
 
 from release_confidence_platform.reliability_intelligence.constants import (
     HIGH_CONFIDENCE_THRESHOLD,
-    INSUFFICIENT_DATA_SCORE,
     INTELLIGENCE_VERSION,
     LABEL_TO_SCORE,
     MODERATE_CONFIDENCE_THRESHOLD,
@@ -230,14 +229,16 @@ def build_methodology_disclosure() -> dict[str, Any]:
 
 
 def _reliability_score(endpoint_metrics: EndpointMetricsDTO) -> Decimal:
-    """Return success_rate as the reliability component, or INSUFFICIENT_DATA_SCORE (0.5) if no data.
+    """Return success_rate as the reliability component, or 0.0 if no executable reliability evidence.
 
-    When is_insufficient_data=True, there are zero executions — no evidence of success or failure.
-    The neutral score 0.5 applies here per the product principle: absence of evidence does not
-    penalize or reward. This aligns with SCORE-EP02 in the QA plan.
+    Per Technical Design Section 13.3 Step 1: when denominator = 0 or execution_count = 0,
+    reliability_score = 0.0. Reliability is the primary direct evidence component — the 0.5
+    neutral INSUFFICIENT_DATA score is appropriate for secondary derived labels (stability,
+    burst, consistency) but not for reliability, where no evidence means zero demonstrated
+    successful outcomes.
     """
     if endpoint_metrics.is_insufficient_data or endpoint_metrics.success_rate is None:
-        return INSUFFICIENT_DATA_SCORE.quantize(_PRECISION, rounding=ROUND_HALF_UP)
+        return _ZERO.quantize(_PRECISION, rounding=ROUND_HALF_UP)
     return endpoint_metrics.success_rate.quantize(_PRECISION, rounding=ROUND_HALF_UP)
 
 
