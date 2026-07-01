@@ -70,6 +70,28 @@ class StabilityResult:
     methodology_trace: dict
 
 
+@dataclass(frozen=True)
+class BurstResult:
+    """Per-endpoint burst analysis result from Phase 5.4.
+
+    Produced by burst.py. Consumed by scoring.py and engine.py
+    for S3 artifact assembly.
+
+    Fields:
+        failure_burst_label: NO_BURST_DETECTED | BURST_SUSPECTED | INSUFFICIENT_DATA
+        latency_spike_label: NO_SPIKE_DETECTED | SPIKE_SUSPECTED | INSUFFICIENT_DATA
+        methodology_trace: Combined trace dict for both failure_burst_v1 and
+            latency_spike_v1 — inputs, thresholds, intermediate values, and label
+            determination. Persisted in the S3 intelligence artifact.
+    Note: hash() raises TypeError because methodology_trace is a dict.
+    BurstResult is never used as a dict key or set member.
+    """
+
+    failure_burst_label: str
+    latency_spike_label: str
+    methodology_trace: dict
+
+
 @dataclass
 class AuditMetricsSummaryDTO:
     """Audit-level reliability summary aggregated from Phase 4 AuditAggregate and per-endpoint metrics.
