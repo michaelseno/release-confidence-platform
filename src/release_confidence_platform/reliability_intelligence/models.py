@@ -112,6 +112,59 @@ class ConsistencyResult:
     methodology_trace: dict
 
 
+@dataclass(frozen=True)
+class EndpointScoreResult:
+    """Per-endpoint composite score from Phase 5.6.
+
+    Produced by scoring.py. Consumed by engine.py for S3 artifact assembly.
+
+    Fields:
+        endpoint_id: Opaque endpoint identifier (passthrough).
+        composite_score: Weighted composite score [0.0, 1.0], rounded to 3 decimal places.
+        reliability_score: success_rate value, or 0.0 when is_insufficient_data.
+        stability_score: Mean of success_rate_stability and latency_stability label scores.
+        burst_score: Mean of failure_burst and latency_spike label scores.
+        consistency_score: consistency label score.
+        score_derivation: Static formula strings for S3 artifact traceability.
+    Note: hash() raises TypeError because score_derivation is a dict.
+    EndpointScoreResult is never used as a dict key or set member.
+    """
+
+    endpoint_id: str
+    composite_score: Decimal
+    reliability_score: Decimal
+    stability_score: Decimal
+    burst_score: Decimal
+    consistency_score: Decimal
+    score_derivation: dict
+
+
+@dataclass
+class AuditScoreResult:
+    """Audit-level composite score rollup from Phase 5.6.
+
+    Produced by scoring.py. Consumed by engine.py for S3 artifact assembly.
+
+    Not frozen: contains a list of EndpointScoreResult and a dict field.
+
+    Fields:
+        composite_score: Unweighted arithmetic mean of per-endpoint composite scores,
+            rounded to 3 decimal places (ROUND_HALF_UP). 0.0 when no endpoints.
+        score_label: HIGH_CONFIDENCE | MODERATE_CONFIDENCE | LOW_CONFIDENCE.
+        endpoint_count: Number of endpoints included in the rollup.
+        aggregate_set_hash: Lineage hash from AggregateSetCompletion (for S3 artifact).
+        component_breakdown: Per-component mean scores and weights for S3 artifact.
+        endpoint_scores: Per-endpoint EndpointScoreResult list.
+    """
+
+    composite_score: Decimal
+    score_label: str
+    endpoint_count: int
+    aggregate_set_hash: str | None
+    component_breakdown: dict
+    endpoint_scores: list[EndpointScoreResult] = field(default_factory=list)
+
+
 @dataclass
 class AuditMetricsSummaryDTO:
     """Audit-level reliability summary aggregated from Phase 4 AuditAggregate and per-endpoint metrics.
