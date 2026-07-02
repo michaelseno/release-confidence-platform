@@ -76,6 +76,26 @@ def test_sanitize_preserves_structural_identifiers_nested_in_result_lists(module
 
 
 @pytest.mark.parametrize("module_path", ["packages", "release_confidence_platform"])
+def test_sanitize_does_not_redact_intelligence_job_id(module_path):
+    """Phase 5 structural identifier intelligence_job_id must survive sanitize() byte-identical.
+
+    A UUID-derived intelligence_job_id whose hex segment contains a 10-digit run
+    matching PHONE_PATTERN (e.g. "2475004829") must not be redacted. This protects
+    the SK and s3_artifact_ref from corruption at write time.
+    """
+    sanitizer = __import__(f"{module_path}.sanitization.sanitizer", fromlist=["sanitize"])
+
+    # The value "intjob_48a87626e2f9-4f81-82ff-2475004829ec" contains the digit
+    # sequence "2475004829" which matches PHONE_PATTERN.
+    intel_job_id = "intjob_48a87626e2f9-4f81-82ff-2475004829ec"
+    result = sanitizer.sanitize({"intelligence_job_id": intel_job_id})
+
+    assert result["intelligence_job_id"] == intel_job_id, (
+        f"{module_path}: intelligence_job_id was redacted: {result['intelligence_job_id']!r}"
+    )
+
+
+@pytest.mark.parametrize("module_path", ["packages", "release_confidence_platform"])
 def test_sanitize_still_redacts_sensitive_keys_alongside_identifiers(module_path):
     """B-03: the identifier allowlist must not weaken unrelated PII/secret redaction —
     sensitive keys redact regardless of which other keys are present in the same dict."""

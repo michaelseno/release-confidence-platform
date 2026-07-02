@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed — Pending Phase 4A.3 HITL Approval
+Accepted — Phase 4A.3 HITL Approved; active as of Phase 5 completion (2026-07-01)
 
 ## Platform Constitutional Statement
 

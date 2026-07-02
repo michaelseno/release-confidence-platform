@@ -84,6 +84,21 @@ class IntelligenceGateError(ValidationError):
         super().__init__(message, error_type)
 
 
+class IntelligenceGenerationInProgressError(ValidationError):
+    """Raised when an intelligence generation is already in progress for this combination.
+
+    A concurrent generation is running; the caller must wait for it to complete or fail
+    before retrying. No Phase 5 DynamoDB records are written when this error is raised.
+    """
+
+    def __init__(
+        self,
+        message: str = "Intelligence generation is already in progress",
+        error_type: str = "INTELLIGENCE_GENERATION_IN_PROGRESS",
+    ) -> None:
+        super().__init__(message, error_type)
+
+
 class IntelligenceEngine:
     """Orchestrates the Phase 5 intelligence generation pipeline."""
 
@@ -164,6 +179,11 @@ class IntelligenceEngine:
 
         if existing:
             status = existing.get("status", "UNKNOWN")
+            if status == "IN_PROGRESS":
+                raise IntelligenceGenerationInProgressError(
+                    "Intelligence generation is already in progress for this combination. "
+                    "Wait for the current generation to complete before retrying."
+                )
             if status == "COMPLETE" and not force:
                 self.logger.log(
                     evt.INTELLIGENCE_ALREADY_EXISTS,
@@ -854,6 +874,7 @@ def _assemble_artifact(
         ep_id = ep_metrics.endpoint_id
         ep_record = endpoint_aggregates.get(ep_id, {})
         ep_fc = failure_classification_by_endpoint.get(ep_id, {})
+        fc_aggregate_absent = ep_metrics.execution_count > 0 and not ep_fc
         ep_stability = stability_results[ep_id]
         ep_burst = burst_results[ep_id]
         ep_consistency = consistency_results[ep_id]
@@ -891,9 +912,28 @@ def _assemble_artifact(
                 "timeout_count": "EndpointAggregate.timeout_count",
                 "latency_*": "EndpointAggregate.latency_distribution_ms.*",
                 "failure_classification_breakdown": (
-                    "FailureClassificationAggregate.classification_counts (scope=endpoint)"
+                    "EndpointAggregate.failure_classification_counts [ANOMALY: FailureClassificationAggregate absent for endpoint with non-zero execution_count]"
+                    if fc_aggregate_absent
+                    else "FailureClassificationAggregate.classification_counts (scope=endpoint)"
                 ),
             },
+            **(
+                {
+                    "data_quality_notes": [
+                        {
+                            "note_type": "MISSING_FAILURE_CLASSIFICATION_AGGREGATE",
+                            "description": (
+                                f"FailureClassificationAggregate record absent for endpoint {ep_id!r} "
+                                f"with execution_count={ep_metrics.execution_count}. "
+                                "failure_classification_breakdown sourced from "
+                                "EndpointAggregate.failure_classification_counts as fallback."
+                            ),
+                        }
+                    ]
+                }
+                if fc_aggregate_absent
+                else {}
+            ),
         }
 
         endpoint_score_section: dict[str, Any] = {

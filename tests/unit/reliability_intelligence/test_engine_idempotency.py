@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from release_confidence_platform.reliability_intelligence.engine import (
     IntelligenceEngine,
+    IntelligenceGenerationInProgressError,
 )
 
 # ---------------------------------------------------------------------------
@@ -359,3 +360,63 @@ def test_pending_status_proceeds():
         aggregation_version="agg_v1",
     )
     assert result["status"] == "COMPLETE"
+
+
+# ---------------------------------------------------------------------------
+# Test: IN_PROGRESS status → raises IntelligenceGenerationInProgressError
+# ---------------------------------------------------------------------------
+
+
+def test_in_progress_status_raises_error():
+    """IN_PROGRESS IntelligenceMetadata must raise IntelligenceGenerationInProgressError."""
+    existing = {
+        "status": "IN_PROGRESS",
+        "intelligence_job_id": "intjob_test",
+        "generation_count": 1,
+        "created_at": "2026-01-01T00:00:00Z",
+    }
+    engine, repo, publisher = _make_engine(existing_metadata=existing)
+
+    import pytest
+    with pytest.raises(IntelligenceGenerationInProgressError):
+        engine.generate(
+            client_id="client1",
+            audit_id="audit1",
+            audit_execution_id="exec1",
+            config_version="cfg_v1",
+            aggregation_version="agg_v1",
+            force=False,
+        )
+
+    assert len(repo.write_calls) == 0, (
+        f"No writes expected when IN_PROGRESS guard fires, got: {repo.write_calls}"
+    )
+    assert len(publisher.write_calls) == 0, (
+        "No S3 writes expected when IN_PROGRESS guard fires"
+    )
+
+
+def test_in_progress_status_raises_error_even_with_force():
+    """IN_PROGRESS guard must apply even when force=True."""
+    existing = {
+        "status": "IN_PROGRESS",
+        "intelligence_job_id": "intjob_test",
+        "generation_count": 1,
+        "created_at": "2026-01-01T00:00:00Z",
+    }
+    engine, repo, publisher = _make_engine(existing_metadata=existing)
+
+    import pytest
+    with pytest.raises(IntelligenceGenerationInProgressError):
+        engine.generate(
+            client_id="client1",
+            audit_id="audit1",
+            audit_execution_id="exec1",
+            config_version="cfg_v1",
+            aggregation_version="agg_v1",
+            force=True,
+        )
+
+    assert len(repo.write_calls) == 0, (
+        f"No writes expected when IN_PROGRESS guard fires with force=True, got: {repo.write_calls}"
+    )
