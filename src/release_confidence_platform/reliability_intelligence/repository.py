@@ -21,7 +21,6 @@ from typing import Any
 from botocore.exceptions import ClientError
 
 from release_confidence_platform.core.exceptions import StorageError
-from release_confidence_platform.sanitization.sanitizer import sanitize
 from release_confidence_platform.storage.dynamodb_codec import (
     decode_dynamodb_response,
     encode_dynamodb_call_kwargs,
@@ -271,11 +270,10 @@ class IntelligenceRepository:
             StorageError: On DynamoDB failure.
         """
         _assert_phase5_sk(item.get("SK", ""))
-        sanitized = sanitize(item)
         try:
             self._call(
                 "put_item",
-                Item=sanitized,
+                Item=item,
             )
         except ClientError as exc:
             raise storage_error_from_dynamodb_client_error(exc, operation="put_item") from exc
@@ -331,7 +329,7 @@ class IntelligenceRepository:
             self._call(
                 "put_item",
                 preserve_client_error_codes={"ConditionalCheckFailedException"},
-                Item=sanitize(item),
+                Item=item,
                 ConditionExpression="attribute_not_exists(PK) AND attribute_not_exists(SK)",
             )
         except ClientError as exc:
@@ -340,9 +338,8 @@ class IntelligenceRepository:
             raise
 
     def _update_item(self, key: dict[str, str], updates: dict[str, Any]) -> None:
-        sanitized_updates = sanitize(updates)
-        names = {f"#f{i}": field_name for i, field_name in enumerate(sanitized_updates)}
-        values = {f":v{i}": value for i, value in enumerate(sanitized_updates.values())}
+        names = {f"#f{i}": field_name for i, field_name in enumerate(updates)}
+        values = {f":v{i}": value for i, value in enumerate(updates.values())}
         assignments = ", ".join(f"{name} = :v{i}" for i, name in enumerate(names))
         self._call(
             "update_item",

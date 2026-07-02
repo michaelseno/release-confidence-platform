@@ -40,6 +40,7 @@ STRUCTURAL_IDENTIFIER_KEYS = frozenset(
         "aggregation_job_id",
         "config_version",
         "aggregation_version",
+        "intelligence_job_id",
     }
 )
 SENSITIVE_QUERY_KEYS = (

@@ -1141,6 +1141,8 @@ All Phase 5 CLI commands are registered under the existing `rcp` operator CLI in
 
 ### 16.2 Retrieval Commands
 
+**Amendment note (2026-07-02, HITL approved):** The original design specified ten retrieval commands. After Phase 5.8 validation, the `intel_v1` retrieval surface was formally reduced to four commands. The rationale is documented below.
+
 All retrieval commands follow the pattern:
 ```
 rcp retrieve <intelligence-command> \
@@ -1153,18 +1155,20 @@ rcp retrieve <intelligence-command> \
     [--intelligence-version <version>]
 ```
 
+**`intel_v1` retrieval commands (authoritative):**
+
 | Command | Data Source | Returns |
 | --- | --- | --- |
-| `retrieve intelligence-status` | DynamoDB | Status, `intelligence_job_id`, `composite_score`, `endpoint_count`, `s3_artifact_ref`, `completed_at` |
-| `retrieve intelligence-summary` | DynamoDB | Audit-level score summary, component breakdown, `aggregate_set_hash`, `intelligence_version` |
-| `retrieve intelligence-score` | DynamoDB | Composite score, component breakdown, weights, methodology version |
-| `retrieve intelligence-endpoints` | S3 artifact | Per-endpoint reliability metrics for all or `--endpoint`-filtered endpoint |
-| `retrieve intelligence-stability` | S3 artifact | Per-endpoint stability labels and methodology traces |
-| `retrieve intelligence-burst` | S3 artifact | Per-endpoint burst and spike labels and methodology traces |
-| `retrieve intelligence-consistency` | S3 artifact | Per-endpoint consistency labels and methodology traces |
-| `retrieve intelligence-evidence-trace` | S3 artifact | Per-endpoint evidence traces with Phase 4 source field references |
-| `retrieve intelligence-methodology` | S3 artifact | Full `methodology_disclosure` section |
-| `retrieve intelligence-lineage` | DynamoDB + S3 | `aggregate_set_hash`, `aggregation_job_id`, `audit_lineage_manifest_ref`, lineage chain back to Phase 4 |
+| `retrieve intelligence-status` | DynamoDB | Status, `intelligence_job_id`, `composite_score`, `score_label`, `endpoint_count`, `s3_artifact_ref`, `completed_at` |
+| `retrieve intelligence-summary` | DynamoDB | Full `IntelligenceMetadata` fields including composite score, component breakdown, `aggregate_set_hash`, `intelligence_version` |
+| `retrieve intelligence-detail` | S3 artifact | Complete S3 intelligence artifact JSON: all sections including `input_lineage`, `audit_reliability_summary`, `composite_score` with component breakdown, all per-endpoint analysis (`reliability_metrics`, `stability_analysis`, `burst_analysis`, `consistency_analysis`, `endpoint_score`), and `methodology_disclosure` |
+| `retrieve intelligence-methodology` | S3 artifact | `methodology_disclosure` section only |
+
+**Rationale for 4-command surface:**
+
+The originally specified per-section commands (`intelligence-stability`, `intelligence-burst`, `intelligence-consistency`, `intelligence-evidence-trace`, `intelligence-lineage`) are strictly filtered views of the S3 artifact. `retrieve intelligence-detail` returns the complete artifact and subsumes all of them. `retrieve intelligence-summary` provides the DynamoDB fast path for composite score and component breakdown, making `intelligence-score` redundant.
+
+The one capability not addressed by the current surface is `--endpoint`-scoped artifact lookup — reading per-endpoint detail for a single endpoint without loading the full artifact. This is a performance optimization, not a capability gap, since all per-endpoint data is available in `intelligence-detail`. It is deferred to a future `intel_v2` enhancement or a minor addition to `intelligence-detail`.
 
 **Provenance envelope** (required on all retrieval output):
 ```json
@@ -1183,7 +1187,7 @@ rcp retrieve <intelligence-command> \
 
 **Read-only invariant:** Phase 5 retrieval commands must not modify any Phase 5 or Phase 4 persisted artifact. Unconditional.
 
-**Retrieval data source routing:** Commands that return only summary/status data read from DynamoDB (`IntelligenceMetadata`). Commands that return per-endpoint analysis details or methodology traces read the S3 artifact via `publisher.py`. This allows DynamoDB-only fast-path for summary queries while keeping per-endpoint methodology detail in the authoritative S3 artifact.
+**Retrieval data source routing:** `intelligence-status` and `intelligence-summary` read from DynamoDB (`IntelligenceMetadata`) only — no S3 read required. `intelligence-detail` and `intelligence-methodology` read the S3 artifact via `publisher.py`. This provides a DynamoDB-only fast path for status and score summary queries while keeping per-endpoint methodology detail in the authoritative S3 artifact.
 
 ---
 

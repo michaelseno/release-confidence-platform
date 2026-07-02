@@ -303,7 +303,7 @@ Validate the composite scoring pipeline including per-endpoint score computation
 | Test ID | Test Description | Pass Criteria |
 | --- | --- | --- |
 | SCORE-EP01 | Per-endpoint composite score uses correct weights | **Given** `reliability_score = 1.0`, `stability_score = 1.0`, `burst_score = 1.0`, `consistency_score = 1.0`; **When** scored; **Then** `endpoint_composite_score = 1.0 * 0.50 + 1.0 * 0.20 + 1.0 * 0.15 + 1.0 * 0.15 = 1.000` |
-| SCORE-EP02 | INSUFFICIENT_DATA contributes 0.5 neutral score per component | **Given** all four analysis labels are `INSUFFICIENT_DATA`; **When** scored; **Then** `endpoint_composite_score = 0.5 * 0.50 + 0.5 * 0.20 + 0.5 * 0.15 + 0.5 * 0.15 = 0.500` |
+| SCORE-EP02 | Zero-execution endpoint: reliability_score = 0.0; secondary INSUFFICIENT_DATA components = 0.5 | **Given** `execution_count = 0` and all analysis labels are `INSUFFICIENT_DATA`; **When** scored; **Then** `reliability_score = 0.0` (no evidence — evidence-first principle per Technical Design Section 13.3 Step 1), `stability_score = 0.5`, `burst_score = 0.5`, `consistency_score = 0.5`; `endpoint_composite_score = 0.0 * 0.50 + 0.5 * 0.20 + 0.5 * 0.15 + 0.5 * 0.15 = 0.000 + 0.100 + 0.075 + 0.075 = 0.250`. Note: `INSUFFICIENT_DATA_SCORE = 0.5` applies exclusively to secondary analytical components (stability, burst, consistency); it does not apply to the primary reliability component. |
 | SCORE-EP03 | Mixed INSUFFICIENT_DATA and actual scores compute correctly | **Given** `reliability_score = 0.9`, `stability_score = 0.5` (INSUFFICIENT_DATA), `burst_score = 0.5` (INSUFFICIENT_DATA), `consistency_score = 0.5` (INSUFFICIENT_DATA); **When** scored; **Then** `endpoint_composite_score = 0.9 * 0.50 + 0.5 * 0.20 + 0.5 * 0.15 + 0.5 * 0.15 = 0.450 + 0.100 + 0.075 + 0.075 = 0.700` |
 | SCORE-EP04 | Weights sum to exactly 1.0 | `0.50 + 0.20 + 0.15 + 0.15 = 1.00`; confirmed via constants validation |
 | SCORE-EP05 | Score precision is 3 decimal places | **Given** a computation that yields an unrounded value (e.g., `0.9 * 0.50 + 0.8 * 0.20 + 0.9 * 0.15 + 0.7 * 0.15`); **When** scored; **Then** result is rounded to exactly 3 decimal places using half-up rounding |
@@ -556,7 +556,7 @@ The following fixtures must exist and be used by Phase 5.2–5.7 tests:
 | AC-P7 | `latency_spike_v1` correctly classifies using max/p99 ratio >3.0 | BURST-LS01 through BURST-LS05 |
 | AC-P8 | `outcome_consistency_v1` correctly classifies using Bernoulli variance >0.05 | CONS-OC01 through CONS-OC07, CONS-VAR01, CONS-VAR02 |
 | AC-P9 | Composite score computed with correct weights (0.50/0.20/0.15/0.15) | SCORE-EP01 through SCORE-EP07 |
-| AC-P10 | INSUFFICIENT_DATA contributes exactly 0.5 to score (neutral) | SCORE-EP02, SCORE-EP03 |
+| AC-P10 | INSUFFICIENT_DATA contributes 0.5 (neutral) to secondary analytical components (stability, burst, consistency); reliability_score = 0.0 when execution_count = 0 per evidence-first principle | SCORE-EP02, SCORE-EP03 |
 | AC-P11 | Score labels correctly assigned at boundaries (0.80, 0.50) | SCORE-LB01 through SCORE-LB08 |
 | AC-P12 | Unweighted arithmetic mean rollup for audit composite score | SCORE-ROLL01 through SCORE-ROLL05 |
 | AC-P13 | Phase 4 records never mutated by Phase 5 | XCUT-P4M01 through XCUT-P4M08 |
@@ -617,7 +617,7 @@ Any single failure in the following categories blocks Phase 5.8 closure regardle
 - Phase 6 consumer contract compatibility gate failure (any CON test failure)
 - Raw evidence accessed (any XCUT-RAW test failure)
 - Incorrect score weight (SCORE-EP01 failure or weight constant divergence)
-- INSUFFICIENT_DATA contributing a value other than 0.5 (SCORE-EP02 failure)
+- Secondary analytical component (stability, burst, or consistency) with INSUFFICIENT_DATA contributing a value other than 0.5 (SCORE-EP02 failure); or reliability_score returning a non-zero value when execution_count = 0
 
 ### 14.4 HITL Gate
 
