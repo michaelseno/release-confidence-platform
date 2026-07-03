@@ -210,6 +210,8 @@ def build_methodology_disclosure() -> dict[str, Any]:
         "burst_label_definitions": {
             "NO_BURST_DETECTED": "timeout proportion <= 0.20",
             "BURST_SUSPECTED": "timeout proportion > 0.20",
+            "NO_SPIKE_DETECTED": "max/p99 latency ratio <= 3.0",
+            "SPIKE_SUSPECTED": "max/p99 latency ratio > 3.0",
             "INSUFFICIENT_DATA": (
                 "execution_count < 10; spike: latency_count < 5 or p99/max not available"
             ),

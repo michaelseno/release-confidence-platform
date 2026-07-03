@@ -663,6 +663,15 @@ _SCORING_REQUIRED = [
 ]
 
 
+_BURST_LABEL_DEFINITIONS_REQUIRED = {
+    "NO_BURST_DETECTED",
+    "BURST_SUSPECTED",
+    "NO_SPIKE_DETECTED",
+    "SPIKE_SUSPECTED",
+    "INSUFFICIENT_DATA",
+}
+
+
 def test_con_19_methodology_disclosure_completeness(artifact: dict) -> None:
     """CON-19: methodology_disclosure has all required sub-sections per Section 3.2."""
     disclosure = artifact.get("methodology_disclosure", {})
@@ -673,6 +682,12 @@ def test_con_19_methodology_disclosure_completeness(artifact: dict) -> None:
     assert not missing_scoring, f"methodology_disclosure.scoring missing: {missing_scoring}"
     assert disclosure.get("limitations") is not None, "limitations must be present"
     assert isinstance(disclosure["limitations"], list), "limitations must be a list"
+    burst_defs = set(disclosure.get("burst_label_definitions", {}).keys())
+    missing_burst = _BURST_LABEL_DEFINITIONS_REQUIRED - burst_defs
+    assert not missing_burst, (
+        f"burst_label_definitions missing entries: {missing_burst}. "
+        "All emitted burst/spike labels must have a corresponding definition."
+    )
 
 
 # ---------------------------------------------------------------------------
