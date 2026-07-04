@@ -46,6 +46,111 @@ Before beginning any campaign:
 
 ---
 
+## Campaign 0 — Environment Verification
+
+Run before Campaign 01 begins. All checks must pass. Do not proceed if any check fails.
+
+### C0.1 — Branch and Working Tree
+
+```bash
+git fetch origin
+git status
+git log --oneline origin/main..main
+```
+
+| Check | Result |
+|---|---|
+| Current branch is `main` | [ ] PASS / [ ] FAIL |
+| Working tree is clean (no uncommitted changes) | [ ] PASS / [ ] FAIL |
+| Local `main` is up to date with `origin/main` (0 commits ahead) | [ ] PASS / [ ] FAIL |
+| PR #74 appears in `git log` (commit `1bcd016` present) | [ ] PASS / [ ] FAIL |
+
+### C0.2 — CLI Installation
+
+```bash
+which rcp
+rcp --help
+```
+
+| Check | Result |
+|---|---|
+| `rcp` resolves to venv binary | [ ] PASS / [ ] FAIL |
+| `rcp --help` lists `generate` and `retrieve` command groups | [ ] PASS / [ ] FAIL |
+| `retrieve` group lists `report-status`, `report-json`, `report-markdown` subcommands | [ ] PASS / [ ] FAIL |
+
+### C0.3 — AWS Connectivity
+
+```bash
+rcp config stage-info --stage dev
+```
+
+| Check | Result |
+|---|---|
+| Stage config resolves without error | [ ] PASS / [ ] FAIL |
+| DynamoDB table name is `release-confidence-platform-dev-metadata` | [ ] PASS / [ ] FAIL |
+| S3 bucket name resolves (non-empty) | [ ] PASS / [ ] FAIL |
+
+```bash
+aws sts get-caller-identity
+```
+
+| Check | Result |
+|---|---|
+| AWS credentials active (identity returned) | [ ] PASS / [ ] FAIL |
+| Account ID matches dev account (`463470948609`) | [ ] PASS / [ ] FAIL |
+
+### C0.4 — Phase 5 Artifacts Confirmed (Campaigns 01 & 02)
+
+Verify that Phase 5 S3 artifacts are still accessible at their known keys:
+
+```bash
+# Campaign 01 artifact
+rcp retrieve intelligence-status \
+  --client-id client_lineage_issue_verification_1_a6eab2b8 \
+  --audit-id audit_20260626_6f433adc \
+  --execution audexec_b146ca56faa44b7581686a0f1d5e11c7 \
+  --config-version v1 --aggregation-version agg_v1 --intelligence-version intel_v1 \
+  --stage dev
+
+# Campaign 02 artifact
+rcp retrieve intelligence-status \
+  --client-id client_lineage_issue_verification_2_1b5e3d6e \
+  --audit-id audit_20260626_c3927ce1 \
+  --execution audexec_00294bb91dc74d499e46c9788718b86a \
+  --config-version v1 --aggregation-version agg_v1 --intelligence-version intel_v1 \
+  --stage dev
+```
+
+| Check | Result |
+|---|---|
+| Campaign 01: `status = COMPLETE` | [ ] PASS / [ ] FAIL |
+| Campaign 01: `intelligence_job_id = intjob_1356942a5393419a86a6b277a828d802` | [ ] PASS / [ ] FAIL |
+| Campaign 01: `composite_score = 1.000` | [ ] PASS / [ ] FAIL |
+| Campaign 02: `status = COMPLETE` | [ ] PASS / [ ] FAIL |
+| Campaign 02: `intelligence_job_id = intjob_ab4e177fcf0e40288e30a9d1a3bbb992` | [ ] PASS / [ ] FAIL |
+| Campaign 02: `composite_score = 0.940` | [ ] PASS / [ ] FAIL |
+
+### C0.5 — Unit Suite Baseline
+
+```bash
+.venv/bin/python -m pytest tests/ -q 2>&1 | tail -3
+```
+
+| Check | Result |
+|---|---|
+| All tests pass (expected: 1139) | [ ] PASS / [ ] FAIL |
+| Zero failures | [ ] PASS / [ ] FAIL |
+
+Record actual test count: ___
+
+### C0 Result
+
+**Overall result:** [ ] PASS / [ ] FAIL
+
+All C0 checks must PASS before Campaign 01 begins. Any failure blocks campaign execution and requires investigation.
+
+---
+
 ## Validation Methodology
 
 Each campaign follows this fixed sequence. All steps are mandatory. No step may be skipped.
@@ -402,18 +507,125 @@ Each campaign is documented in a dedicated evidence file:
 
 ---
 
+## Cross-Campaign Validation
+
+Run after all three individual campaigns are complete. This step compares the three generated reports against each other to confirm system-level determinism and inter-report integrity.
+
+### XC.1 — Identical Inputs Remain Deterministic
+
+For each campaign, force-regenerate the report a second time (after the individual campaign's Step 12 is already complete) and confirm the content sections are unchanged:
+
+| Audit | `composite_score` (first gen) | `composite_score` (force re-gen) | Result |
+|---|---|---|---|
+| Campaign 01 | `1.000` | | [ ] PASS / [ ] FAIL |
+| Campaign 02 | `0.940` | | [ ] PASS / [ ] FAIL |
+| Campaign 03 | *(recorded)* | | [ ] PASS / [ ] FAIL |
+
+**Pass criterion:** `composite_score`, `score_label`, `endpoint_count`, and all `endpoints[*].endpoint_score` values are identical between the first generation and any subsequent force re-generation for the same audit.
+
+### XC.2 — Different Phase 5 Intelligence Produces Appropriately Different Reports
+
+Confirm that reports from different audits differ in the fields where they should differ:
+
+| Field | Campaign 01 | Campaign 02 | Campaign 03 | Observation |
+|---|---|---|---|---|
+| `executive_summary.composite_score_value` | `1.000` | `0.940` | *(record)* | Must differ where Phase 5 scores differ |
+| `intelligence_provenance.intelligence_job_id` | `intjob_1356942a5393...` | `intjob_ab4e177f...` | *(record)* | Must be unique per audit |
+| `intelligence_provenance.audit_id` | `audit_20260626_6f433adc` | `audit_20260626_c3927ce1` | *(record)* | Must be unique per audit |
+| `intelligence_provenance.aggregate_set_hash` | `e91c004...` | `7bafd96...` | *(record)* | Must differ (different Phase 4 aggregate sets) |
+| `input_lineage.source_raw_result_count` | `955` | `960` | *(record)* | Must reflect actual execution counts |
+| `identity.report_id` | *(unique)* | *(unique)* | *(unique)* | Must be globally unique across all reports |
+
+**Pass criterion:** Each report is correctly differentiated by its Phase 5 intelligence inputs. No two reports from different audits share the same `report_id`, `intelligence_job_id`, `audit_id`, or `aggregate_set_hash`.
+
+### XC.3 — No Report Drift
+
+Retrieve the JSON artifact for Campaign 01 a second time (after Campaigns 02 and 03 have completed) and confirm it is unchanged:
+
+```bash
+rcp retrieve report-json \
+  --client-id client_lineage_issue_verification_1_a6eab2b8 \
+  --audit-id audit_20260626_6f433adc \
+  --execution audexec_b146ca56faa44b7581686a0f1d5e11c7 \
+  --config-version v1 --aggregation-version agg_v1 --intelligence-version intel_v1 \
+  --report-version report_v1 --stage dev
+```
+
+Compare the following fields to the values recorded in Campaign 01 Step 2:
+
+| Field | Campaign 01 Step 2 Value | Post-Campaign 03 Value | Result |
+|---|---|---|---|
+| `report_job_id` (from `retrieve report-status`) | | | [ ] PASS / [ ] FAIL |
+| `executive_summary.composite_score_value` | `1.0` | | [ ] PASS / [ ] FAIL |
+| `executive_summary.score_label` | `HIGH_CONFIDENCE` | | [ ] PASS / [ ] FAIL |
+| `identity.report_id` | *(Campaign 01 value)* | | [ ] PASS / [ ] FAIL |
+| `identity.generated_at` | *(Campaign 01 value)* | | [ ] PASS / [ ] FAIL |
+
+**Pass criterion:** The Campaign 01 report artifact is byte-identical to its state at initial generation. Running subsequent campaigns for different audits does not alter any previously generated report.
+
+### XC.4 — No Previously Generated Report Changed After Subsequent Campaigns
+
+Confirm that running Campaign 02 and 03 did not create or modify any DynamoDB records belonging to Campaign 01's audit:
+
+```bash
+# Confirm Campaign 01 report-status still returns the original report_job_id
+rcp retrieve report-status \
+  --client-id client_lineage_issue_verification_1_a6eab2b8 \
+  --audit-id audit_20260626_6f433adc \
+  --execution audexec_b146ca56faa44b7581686a0f1d5e11c7 \
+  --config-version v1 --aggregation-version agg_v1 --intelligence-version intel_v1 \
+  --report-version report_v1 --stage dev
+```
+
+| Check | Result |
+|---|---|
+| `status = COMPLETE` (unchanged) | [ ] PASS / [ ] FAIL |
+| `report_job_id` unchanged from Campaign 01 Step 2 | [ ] PASS / [ ] FAIL |
+| `report_id` unchanged from Campaign 01 Step 2 | [ ] PASS / [ ] FAIL |
+| `completed_at` unchanged from Campaign 01 Step 2 | [ ] PASS / [ ] FAIL |
+
+**Pass criterion:** No field of the Campaign 01 ReportMetadata record was modified by Campaign 02 or 03 execution. Phase 6 report generation is fully scoped to its own audit coordinates.
+
+### XC.5 — Cross-Campaign Summary
+
+| Check | Result |
+|---|---|
+| All three `composite_score` values match their Phase 5 baselines | [ ] PASS / [ ] FAIL |
+| All three `report_id` values are globally unique | [ ] PASS / [ ] FAIL |
+| All three `aggregate_set_hash` values are unique (confirming distinct Phase 4 inputs) | [ ] PASS / [ ] FAIL |
+| No report drift detected for Campaign 01 after subsequent campaigns | [ ] PASS / [ ] FAIL |
+| Campaign 02 and 03 did not alter Campaign 01 DynamoDB records | [ ] PASS / [ ] FAIL |
+| Where Phase 5 inputs differ, Phase 6 reports differ appropriately | [ ] PASS / [ ] FAIL |
+| Where Phase 5 inputs are regenerated identically, Phase 6 report content is identical | [ ] PASS / [ ] FAIL |
+
+**Cross-Campaign Result:** [ ] PASS / [ ] FAIL
+
+---
+
 ## Campaign Acceptance Criteria
 
 All three campaigns must satisfy the following for Phase 6 closure:
 
-- [ ] All 14 validation steps passed for all three audits
-- [ ] No Phase 5 mutation observed in any campaign
-- [ ] Deterministic regeneration confirmed for all three audits
-- [ ] All 7 `retrieve report-*` CLI commands return correct output for all three audits
-- [ ] JSON, Markdown, and PDF outputs generated and verified for all three audits
-- [ ] Phase 5 → Phase 6 consumer contract validated for all three audits
-- [ ] Phase 6 → Phase 7 consumer contract validated for all three audits
+**Per-campaign (each of Campaigns 01, 02, 03):**
+- [ ] Campaign 0 environment verification passed before first campaign execution
+- [ ] All 14 validation steps passed
+- [ ] No Phase 5 mutation observed
+- [ ] Deterministic regeneration confirmed
+- [ ] All 7 `retrieve report-*` CLI commands return correct output
+- [ ] JSON, Markdown, and PDF outputs generated and verified
+- [ ] Phase 5 → Phase 6 consumer contract validated
+- [ ] Phase 6 → Phase 7 consumer contract validated
+
+**Cross-campaign (after all three campaigns complete):**
+- [ ] XC.1: Identical inputs remain deterministic across force regenerations
+- [ ] XC.2: Different Phase 5 intelligence produces appropriately different reports
+- [ ] XC.3: No report drift for Campaign 01 after subsequent campaigns
+- [ ] XC.4: No previously generated report changed after subsequent campaigns
+- [ ] XC.5: All cross-campaign summary checks pass
+
+**Process gate:**
 - [ ] HITL approval received for all three campaign evidence documents
+- [ ] HITL approval received for cross-campaign validation result
 
 ---
 
@@ -421,9 +633,11 @@ All three campaigns must satisfy the following for Phase 6 closure:
 
 Phase 6 is formally closed when:
 
-1. All three campaign evidence documents are complete.
-2. All acceptance criteria above are satisfied.
-3. HITL validation is received for the complete campaign set.
-4. GitHub Issues #64–#71 are closed.
+1. Campaign 0 environment verification passed.
+2. All three campaign evidence documents are complete with all 14 steps passing.
+3. Cross-campaign validation (XC.1–XC.5) passes.
+4. All acceptance criteria above are satisfied.
+5. HITL validation is received for the complete campaign set.
+6. GitHub Issues #64–#71 are closed.
 
 Phase 7 planning begins immediately after Phase 6 closure.
