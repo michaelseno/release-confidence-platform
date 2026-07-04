@@ -12,6 +12,10 @@ from release_confidence_platform.reliability_intelligence.commands import (
     build_intelligence_retrieve_parser,
     dispatch_intelligence_retrieve,
 )
+from release_confidence_platform.deterministic_reporting.commands import (
+    build_report_generate_parser,
+    dispatch_report_generate,  # noqa: F401 — used in Phase 6.4 dispatch wiring
+)
 from release_confidence_platform.retrieval.commands import build_retrieve_parser, dispatch_retrieve
 
 
@@ -139,6 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output", default="json", choices=("json", "human"),
         help="Output format (default: json)"
     )
+    build_report_generate_parser(generate_sub)
     return parser
 
 
@@ -280,6 +285,24 @@ def dispatch(args: argparse.Namespace) -> CommandResult:
                 summary=f"Intelligence generation {status_val.lower()} for {args.audit}",
                 data=result,
                 exit_code=0,
+            )
+        if generate_command == "report":
+            # Phase 6.3: parser and import contract established.
+            # Phase 6.4 will wire ReportRepository, ReportPublisher, and ReportingEngine.
+            from release_confidence_platform.deterministic_reporting.builder import (  # noqa: PLC0415
+                ReportBuilder,
+            )
+            from release_confidence_platform.deterministic_reporting.engine import (  # noqa: PLC0415
+                ReportingEngine,
+            )
+            from release_confidence_platform.deterministic_reporting.publisher import (  # noqa: PLC0415
+                ReportPublisher,
+            )
+            from release_confidence_platform.deterministic_reporting.repository import (  # noqa: PLC0415
+                ReportRepository,
+            )
+            raise NotImplementedError(
+                "Report generation infrastructure not yet wired (Phase 6.4)"
             )
         raise AssertionError(f"generate {generate_command}")
     if args.group == "client":
