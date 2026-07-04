@@ -16,6 +16,9 @@ from release_confidence_platform.deterministic_reporting.commands import (
     build_report_generate_parser,
     dispatch_report_generate,  # noqa: F401 — used in Phase 6.4 dispatch wiring
 )
+from release_confidence_platform.deterministic_reporting.report_retrieve_commands import (
+    build_report_retrieve_parser,
+)
 from release_confidence_platform.retrieval.commands import build_retrieve_parser, dispatch_retrieve
 
 
@@ -109,6 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
     retrieve_sub = retrieve.add_subparsers(dest="retrieve_command", required=True)
     build_retrieve_parser(retrieve_sub)
     build_intelligence_retrieve_parser(retrieve_sub)
+    build_report_retrieve_parser(retrieve_sub)
     generate = sub.add_parser("generate", help="Generate intelligence artifacts")
     generate_sub = generate.add_subparsers(dest="generate_command", required=True)
     intel_gen = generate_sub.add_parser(
@@ -224,6 +228,38 @@ def dispatch(args: argparse.Namespace) -> CommandResult:
                 stage=getattr(args, "stage", None),
                 status="success",
                 summary=f"Retrieved {retrieve_command} for {getattr(args, 'audit', 'unknown')}",
+                data={"rendered": rendered},
+                exit_code=0,
+            )
+
+        if retrieve_command.startswith("report-"):
+            from release_confidence_platform.deterministic_reporting.repository import (  # noqa: PLC0415
+                ReportRepository,
+            )
+            from release_confidence_platform.deterministic_reporting.publisher import (  # noqa: PLC0415
+                ReportPublisher,
+            )
+            from release_confidence_platform.deterministic_reporting.report_service import (  # noqa: PLC0415
+                ReportRetrievalService,
+            )
+            from release_confidence_platform.deterministic_reporting.report_retrieve_commands import (  # noqa: PLC0415
+                dispatch_report_retrieve,
+            )
+            from release_confidence_platform.deterministic_reporting.formatters.markdown import (  # noqa: PLC0415
+                MarkdownFormatter,
+            )
+
+            repo = ReportRepository(stage_config.audit_metadata_table, dynamodb_client)
+            s3_client = factory._session.client("s3")
+            publisher = ReportPublisher(stage_config.config_bucket, s3_client)
+            svc = ReportRetrievalService(repo, publisher)
+            formatter = MarkdownFormatter()
+            rendered = dispatch_report_retrieve(args, svc, formatter)
+            return CommandResult(
+                command=f"retrieve {retrieve_command}",
+                stage=getattr(args, "stage", None),
+                status="success",
+                summary=f"Retrieved {retrieve_command} for {getattr(args, 'audit_id', 'unknown')}",
                 data={"rendered": rendered},
                 exit_code=0,
             )
