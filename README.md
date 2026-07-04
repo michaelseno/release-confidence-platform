@@ -14,9 +14,10 @@ EventBridge Scheduler
   -> Config Resolver
   -> Runner Execution
   -> Sanitization
-  -> S3 Raw Evidence
-  -> DynamoDB Metadata
-  -> aggregation / analytics / reporting boundaries
+  -> S3 Raw Evidence + DynamoDB Metadata
+  -> Aggregation (Phase 4)
+  -> Intelligence / Scoring (Phase 5)
+  -> Deterministic Reporting (Phase 6)
 ```
 
 Key architectural boundaries:
@@ -28,7 +29,9 @@ Key architectural boundaries:
 - **Sanitization:** removes or masks sensitive values before persistence or logging.
 - **S3 raw evidence:** stores sanitized raw result evidence as the source of truth for later assessment.
 - **DynamoDB metadata:** stores audit lifecycle metadata, run metadata, schedule metadata, duplicate-delivery claims, and execution counters.
-- **Aggregation/analytics/reporting boundaries:** placeholder backend boundaries exist, but scoring, analytics workflows, generated reports, and dashboard behavior are not implemented in the current platform.
+- **Aggregation (Phase 4):** computes deterministic aggregate sets from raw evidence records; produces `AggregateSetCompletion` with a content-addressed `aggregate_set_hash`.
+- **Intelligence / Scoring (Phase 5):** consumes Phase 4 aggregates and produces per-endpoint and composite reliability scores with full methodology disclosure.
+- **Deterministic Reporting (Phase 6):** consumes Phase 5 intelligence artifacts and produces versioned `ReleaseConfidenceReport` objects in JSON, Markdown, and PDF formats. Reports are idempotent by default and content-deterministic across regenerations.
 
 ## Developer Setup
 
@@ -115,7 +118,7 @@ Environment variables use uppercase `SNAKE_CASE`, including `STAGE`, `AWS_REGION
 - Sanitization is required before persistence and before logging any execution-derived data.
 - Production target execution is blocked unless explicitly allowed by validated configuration, and production caps are stricter than non-production caps.
 - Scheduler duplicate delivery is handled with `schedule_occurrence_id` idempotency claims before execution.
-- The platform remains backend-only: no frontend dashboard, user onboarding, public self-service scheduling UI, scoring workflow, or generated reporting workflow is implemented.
+- The platform remains backend-only: no frontend dashboard, user onboarding, or public self-service scheduling UI is implemented. The operator CLI (`rcp`) provides engineering access to audit management, retrieval, and report generation.
 
 ## Mandatory Identifiers
 
