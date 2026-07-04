@@ -13,8 +13,8 @@ Every command requires `--stage dev|staging|prod`. AWS resources resolve from `c
 | `audit` | Validate, create, schedule, run, cancel, and list audits |
 | `client` | Discover known clients |
 | `config` | Inspect, download, and initialize audit configuration |
-| `retrieve` | Read-only engineering retrieval (Phase 4 aggregation + Phase 5 intelligence) |
-| `generate` | Generate Phase 5 intelligence artifacts |
+| `retrieve` | Read-only engineering retrieval (Phase 4 aggregation, Phase 5 intelligence, Phase 6 reports) |
+| `generate` | Generate Phase 5 intelligence artifacts and Phase 6 deterministic reports |
 
 ---
 
@@ -276,12 +276,13 @@ rcp config init \
 
 ## `retrieve`
 
-All `retrieve` commands are **read-only**. They never modify Phase 4 or Phase 5 artifacts. All output includes a provenance envelope for traceability.
+All `retrieve` commands are **read-only**. They never modify Phase 4, Phase 5, or Phase 6 artifacts. All output includes a provenance envelope for traceability (except `report-json` and `report-markdown`, which return raw artifact content).
 
-Two sub-groups are available:
+Three sub-groups are available:
 
 - **Phase 4 Aggregation Retrieval** — 15 commands covering aggregation results, orchestration state, execution history, and engineering logs
 - **Phase 5 Intelligence Retrieval** — 4 commands covering intelligence status, summary, full artifact detail, and methodology disclosure
+- **Phase 6 Report Retrieval** — 7 commands covering report status, executive summary, per-endpoint scores, methodology, evidence lineage, full JSON artifact, and Markdown output
 
 ---
 
@@ -378,6 +379,64 @@ rcp retrieve intelligence-detail \
 
 ---
 
+### Phase 6 Report Retrieval
+
+Seven read-only commands covering Phase 6 report status, formatted sections, full JSON artifact, and rendered Markdown.
+
+> **Argument note:** All `retrieve report-*` commands use `--client-id` and `--audit-id` (with `-id` suffix). This differs from `generate report` and the Phase 5 retrieval commands, which use `--client` and `--audit`.
+
+All Phase 6 report retrieval commands accept these base arguments:
+
+| Argument | Required | Description |
+|---|---|---|
+| `--client-id` | Yes | Client identifier |
+| `--audit-id` | Yes | Audit identifier |
+| `--execution` | Yes | Audit execution identity (`audexec_...`) |
+| `--config-version` | Yes | Configuration version (e.g., `v1`) |
+| `--aggregation-version` | Yes | Aggregation version (e.g., `agg_v1`) |
+| `--intelligence-version` | Yes | Intelligence version (e.g., `intel_v1`) |
+| `--report-version` | No | Report version (default: `report_v1`) |
+| `--stage` | Yes | Deployment stage |
+| `--output` | No | Output format: `text` (default) or `json` |
+
+---
+
+| Command | Data Source | Returns |
+|---|---|---|
+| `retrieve report-status` | DynamoDB | Report status and identifiers: `status`, `report_id`, `report_job_id`, `report_version`, `score_label`, `completed_at`. Includes provenance envelope. |
+| `retrieve report-summary` | DynamoDB + S3 | `executive_summary` section: composite score, score label, endpoint count, audit success rate, total executions, and `score_label_description`. Includes provenance envelope. |
+| `retrieve report-endpoints` | DynamoDB + S3 | Per-endpoint scores table: composite, reliability, stability, burst, and consistency columns for each endpoint. Includes provenance envelope. |
+| `retrieve report-methodology` | DynamoDB + S3 | Full `methodology_disclosure` section: algorithm names, component weights, thresholds, score label definitions, and documented limitations. Includes provenance envelope. |
+| `retrieve report-lineage` | DynamoDB + S3 | `input_lineage` section: `aggregate_set_hash`, `aggregation_job_id`, `source_raw_result_count`, and lineage page count. Includes provenance envelope. |
+| `retrieve report-json` | DynamoDB + S3 | Complete report artifact JSON (pretty-printed). No provenance envelope — raw artifact only. |
+| `retrieve report-markdown` | DynamoDB + S3 | Full Markdown-formatted report (7 sections). No provenance envelope — rendered output only. |
+
+**Example — executive summary:**
+```bash
+rcp retrieve report-summary \
+  --client-id client_abc \
+  --audit-id audit_20260626_6f433adc \
+  --execution audexec_b146ca56faa44b7581686a0f1d5e11c7 \
+  --config-version v1 \
+  --aggregation-version agg_v1 \
+  --intelligence-version intel_v1 \
+  --stage dev
+```
+
+**Example — Markdown report:**
+```bash
+rcp retrieve report-markdown \
+  --client-id client_abc \
+  --audit-id audit_20260626_6f433adc \
+  --execution audexec_b146ca56faa44b7581686a0f1d5e11c7 \
+  --config-version v1 \
+  --aggregation-version agg_v1 \
+  --intelligence-version intel_v1 \
+  --stage dev
+```
+
+---
+
 ## `generate`
 
 ### `generate intelligence`
@@ -429,11 +488,62 @@ rcp generate intelligence \
 
 ---
 
+### `generate report`
+
+Generate a Phase 6 deterministic release confidence report from an existing Phase 5 `COMPLETE` intelligence artifact. Idempotent by default — re-run returns `ALREADY_COMPLETE` without writing. Use `--force` to overwrite an existing complete artifact.
+
+> **Argument note:** `generate report` uses `--client` and `--audit` (no `-id` suffix), matching `generate intelligence`. The `retrieve report-*` commands use `--client-id` and `--audit-id`. See Phase 6 Report Retrieval below.
+
+```
+rcp generate report \
+  --client <client_id> \
+  --audit <audit_id> \
+  --execution <audit_execution_id> \
+  --stage <dev|staging|prod> \
+  [--config-version <version>] \
+  [--aggregation-version <version>] \
+  [--intelligence-version <version>] \
+  [--force] \
+  [--output json|human]
+```
+
+| Argument | Required | Description |
+|---|---|---|
+| `--client` | Yes | Client identifier |
+| `--audit` | Yes | Audit identifier |
+| `--execution` | Yes | Audit execution identity (`audexec_...`) |
+| `--stage` | Yes | Deployment stage |
+| `--config-version` | No | Configuration version (default: `v1`) |
+| `--aggregation-version` | No | Aggregation version to consume (default: `agg_v1`) |
+| `--intelligence-version` | No | Intelligence version to consume (default: `intel_v1`) |
+| `--force` | No | Re-generate and overwrite an existing `COMPLETE` report |
+| `--output` | No | Output format: `human` (default) or `json` |
+
+**Report version** is internally defaulted to `report_v1`; there is no `--report-version` argument on `generate report`.
+
+**Success output includes:** `status`, `report_id`, `report_job_id`, `report_version`, `composite_score`, `score_label`, `endpoint_count`, `s3_artifact_ref`.
+
+**Status values:**
+- `COMPLETE` — report generated and persisted
+- `ALREADY_COMPLETE` — existing complete artifact returned; no writes performed
+
+**Example:**
+```bash
+rcp generate report \
+  --client client_abc \
+  --audit audit_20260626_6f433adc \
+  --execution audexec_b146ca56faa44b7581686a0f1d5e11c7 \
+  --stage dev \
+  --output json
+```
+
+---
+
 ## Global Behavior
 
 - **`--stage`** is required on every command. AWS resource names (DynamoDB table, S3 bucket, region) resolve from `config/stages/{stage}.json`. Non-empty `RCP_*` environment variables override the file values.
-- **`--dry-run`** is available on mutating commands (`audit create`, `audit schedule`, `audit run`, `audit cancel`, `generate intelligence`). It validates inputs and runs computation without writing to any AWS resource.
-- **`--output`** defaults differ by command group. `audit`, `client`, `config` commands default to `text`. `retrieve` and `generate intelligence` commands default to `json` or `human` depending on the subcommand. Pass `--output json` to get machine-readable output on any command.
+- **`--dry-run`** is available on mutating commands (`audit create`, `audit schedule`, `audit run`, `audit cancel`, `generate intelligence`). `generate report` does not support `--dry-run`.
+- **`--output`** defaults differ by command group. `audit`, `client`, `config`, and `retrieve report-*` commands default to `text`. `generate intelligence` and `generate report` default to `human`. Pass `--output json` to get machine-readable output on any command.
 - The CLI is internal only. It does not accept or print secrets. Discovery and retrieval commands never access Secrets Manager, raw evidence S3 objects, or `raw-results/` prefixes.
 
 ---
