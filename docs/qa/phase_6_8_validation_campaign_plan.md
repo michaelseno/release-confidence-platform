@@ -631,8 +631,8 @@ All three campaigns must satisfy the following for Phase 6 closure:
 - [x] XC.5: All cross-campaign summary checks pass
 
 **Process gate:**
-- [ ] HITL approval received for all three campaign evidence documents
-- [ ] HITL approval received for cross-campaign validation result
+- [x] HITL approval received for all three campaign evidence documents
+- [x] HITL approval received for cross-campaign validation result (2026-07-04)
 
 ---
 
@@ -648,3 +648,17 @@ Phase 6 is formally closed when:
 6. GitHub Issues #64–#71 are closed.
 
 Phase 7 planning begins immediately after Phase 6 closure.
+
+---
+
+## Phase 6 Closure Declaration
+
+**Phase 6 — Deterministic Reporting is FORMALLY CLOSED.**
+
+- Closed: 2026-07-04
+- HITL approval received: 2026-07-04
+- All 8 subphases complete (6.1–6.8)
+- All 8 GitHub issues closed (#64–#71)
+- Campaign 0 + 3 campaigns + cross-campaign validation: ALL PASS
+- Unit suite at closure: 1139 tests, 0 failures
+- Phase 7 planning authorized to begin
