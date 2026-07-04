@@ -287,11 +287,10 @@ def dispatch(args: argparse.Namespace) -> CommandResult:
                 exit_code=0,
             )
         if generate_command == "report":
-            # Phase 6.3: parser and import contract established.
-            # Phase 6.4 will wire ReportRepository, ReportPublisher, and ReportingEngine.
-            from release_confidence_platform.deterministic_reporting.builder import (  # noqa: PLC0415
-                ReportBuilder,
+            from release_confidence_platform.config.stage_config import (  # noqa: PLC0415
+                StageConfigLoader,
             )
+            from release_confidence_platform.core.logging import StructuredLogger  # noqa: PLC0415
             from release_confidence_platform.deterministic_reporting.engine import (  # noqa: PLC0415
                 ReportingEngine,
             )
@@ -301,8 +300,31 @@ def dispatch(args: argparse.Namespace) -> CommandResult:
             from release_confidence_platform.deterministic_reporting.repository import (  # noqa: PLC0415
                 ReportRepository,
             )
-            raise NotImplementedError(
-                "Report generation infrastructure not yet wired (Phase 6.4)"
+            from release_confidence_platform.storage.aws_client_factory import (  # noqa: PLC0415
+                AwsClientFactory,
+            )
+
+            stage_config = StageConfigLoader().load(args.stage)
+            factory = AwsClientFactory(stage_config)
+            dynamodb_client = factory._session.client("dynamodb")
+            s3_client = factory._session.client("s3")
+
+            repo = ReportRepository(stage_config.audit_metadata_table, dynamodb_client)
+            publisher = ReportPublisher(stage_config.config_bucket, s3_client)
+            engine = ReportingEngine(repo, publisher, logger=StructuredLogger())
+            result = dispatch_report_generate(args, engine)
+            status_val = result.get("status", "COMPLETE")
+            cli_status = (
+                "success" if status_val in {"COMPLETE", "ALREADY_COMPLETE"}
+                else status_val.lower()
+            )
+            return CommandResult(
+                command="generate report",
+                stage=args.stage,
+                status=cli_status,
+                summary=f"Report generation {status_val.lower()} for {args.audit}",
+                data=result,
+                exit_code=0,
             )
         raise AssertionError(f"generate {generate_command}")
     if args.group == "client":
