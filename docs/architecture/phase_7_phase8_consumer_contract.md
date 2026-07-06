@@ -213,9 +213,9 @@ This is a point lookup. Phase 8 must verify `terminal_state = CERTIFIED` on the 
 
 | Terminal State | Certification Summary |
 | --- | --- |
-| `CERTIFIED` | `Audit platform integrity verified. All certification domains passed.` |
-| `CERTIFICATION_FAILED` | `Audit platform integrity verification failed. See disclosed_failures for details.` |
-| `CERTIFICATION_BLOCKED` | `Audit platform integrity verification blocked. One or more domains could not be evaluated. Operator review required.` |
+| `CERTIFIED` | `INTEGRITY_VERIFIED` |
+| `CERTIFICATION_FAILED` | `INTEGRITY_FAILED` |
+| `CERTIFICATION_BLOCKED` | `INTEGRITY_BLOCKED` |
 
 Phase 8 must not define, derive, or substitute an alternative summary mapping.
 
