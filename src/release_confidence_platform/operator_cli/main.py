@@ -20,6 +20,10 @@ from release_confidence_platform.deterministic_reporting.report_retrieve_command
     build_report_retrieve_parser,
 )
 from release_confidence_platform.retrieval.commands import build_retrieve_parser, dispatch_retrieve
+from release_confidence_platform.audit_platform_integrity.commands import build_certify_parser
+from release_confidence_platform.audit_platform_integrity.cert_retrieve_commands import (
+    build_cert_retrieve_parser,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -113,6 +117,10 @@ def build_parser() -> argparse.ArgumentParser:
     build_retrieve_parser(retrieve_sub)
     build_intelligence_retrieve_parser(retrieve_sub)
     build_report_retrieve_parser(retrieve_sub)
+    build_cert_retrieve_parser(retrieve_sub)
+    certify = sub.add_parser("certify", help="Run platform integrity certification")
+    certify_sub = certify.add_subparsers(dest="certify_command", required=True)
+    build_certify_parser(certify_sub)
     generate = sub.add_parser("generate", help="Generate intelligence artifacts")
     generate_sub = generate.add_subparsers(dest="generate_command", required=True)
     intel_gen = generate_sub.add_parser(
@@ -264,6 +272,37 @@ def dispatch(args: argparse.Namespace) -> CommandResult:
                 exit_code=0,
             )
 
+        if retrieve_command.startswith("cert-"):
+            from release_confidence_platform.audit_platform_integrity.repository import (  # noqa: PLC0415
+                CertificationRepository,
+            )
+            from release_confidence_platform.audit_platform_integrity.publisher import (  # noqa: PLC0415
+                CertificationPublisher,
+            )
+            from release_confidence_platform.audit_platform_integrity.cert_retrieve_commands import (  # noqa: PLC0415
+                CertificationRetrievalService,
+                dispatch_cert_retrieve,
+            )
+
+            s3_client = factory._session.client("s3")
+            cert_repo = CertificationRepository(
+                stage_config.audit_metadata_table,
+                dynamodb_client,
+                s3_client,
+                stage_config.config_bucket,
+            )
+            cert_publisher = CertificationPublisher(stage_config.config_bucket, s3_client)
+            cert_svc = CertificationRetrievalService(cert_repo, cert_publisher)
+            rendered = dispatch_cert_retrieve(args, cert_svc)
+            return CommandResult(
+                command=f"retrieve {retrieve_command}",
+                stage=getattr(args, "stage", None),
+                status="success",
+                summary=f"Retrieved {retrieve_command} for {getattr(args, 'audit_id', 'unknown')}",
+                data={"rendered": rendered},
+                exit_code=0,
+            )
+
         repo = RetrievalRepository(stage_config.audit_metadata_table, dynamodb_client)
         svc = RetrievalService(repo)
         return dispatch_retrieve(args, svc)
@@ -363,6 +402,53 @@ def dispatch(args: argparse.Namespace) -> CommandResult:
                 exit_code=0,
             )
         raise AssertionError(f"generate {generate_command}")
+    if args.group == "certify":
+        from release_confidence_platform.config.stage_config import (  # noqa: PLC0415
+            StageConfigLoader,
+        )
+        from release_confidence_platform.core.logging import StructuredLogger  # noqa: PLC0415
+        from release_confidence_platform.audit_platform_integrity.engine import (  # noqa: PLC0415
+            CertificationEngine,
+        )
+        from release_confidence_platform.audit_platform_integrity.repository import (  # noqa: PLC0415
+            CertificationRepository,
+        )
+        from release_confidence_platform.audit_platform_integrity.publisher import (  # noqa: PLC0415
+            CertificationPublisher,
+        )
+        from release_confidence_platform.audit_platform_integrity.commands import (  # noqa: PLC0415
+            dispatch_certify_audit,
+        )
+        from release_confidence_platform.storage.aws_client_factory import (  # noqa: PLC0415
+            AwsClientFactory,
+        )
+
+        stage_config = StageConfigLoader().load(args.stage)
+        factory = AwsClientFactory(stage_config)
+        dynamodb_client = factory._session.client("dynamodb")
+        s3_client = factory._session.client("s3")
+
+        cert_repo = CertificationRepository(
+            stage_config.audit_metadata_table,
+            dynamodb_client,
+            s3_client,
+            stage_config.config_bucket,
+        )
+        cert_publisher = CertificationPublisher(stage_config.config_bucket, s3_client)
+        engine = CertificationEngine(
+            cert_repo, cert_publisher, logger=StructuredLogger()
+        )
+        result = dispatch_certify_audit(args, engine)
+        terminal_state = result.get("terminal_state", "UNKNOWN")
+        cli_status = "success" if terminal_state == "CERTIFIED" else terminal_state.lower()
+        return CommandResult(
+            command="certify audit",
+            stage=args.stage,
+            status=cli_status,
+            summary=f"Certification {terminal_state.lower()} for {getattr(args, 'audit_id', 'unknown')}",
+            data=result,
+            exit_code=0,
+        )
     if args.group == "client":
         if args.client_command == "list":
             return services.client_list_command(args)
@@ -439,6 +525,8 @@ def _command_name(args: argparse.Namespace) -> str:
         return f"retrieve {getattr(args, 'retrieve_command', 'unknown')}"
     if getattr(args, "group", None) == "generate":
         return f"generate {getattr(args, 'generate_command', 'unknown')}"
+    if getattr(args, "group", None) == "certify":
+        return f"certify {getattr(args, 'certify_command', 'unknown')}"
     return f"audit {getattr(args, 'audit_command', 'unknown')}"
 
 
