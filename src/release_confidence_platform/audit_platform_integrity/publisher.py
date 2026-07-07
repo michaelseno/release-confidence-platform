@@ -55,3 +55,24 @@ class CertificationPublisher:
             raise StorageError(
                 f"Failed to write certificate S3 artifact: {exc}", "S3_CERTIFICATE_WRITE_FAILURE"
             ) from exc
+
+    def read_artifact(self, key: str) -> dict[str, Any]:
+        """Read and deserialize a certificate artifact JSON from S3.
+
+        Args:
+            key: S3 object key from CertificationMetadata.s3_certificate_ref.
+
+        Returns:
+            Parsed certificate artifact dict.
+
+        Raises:
+            StorageError: On any S3 GetObject failure or JSON parse failure.
+        """
+        try:
+            response = self.s3_client.get_object(Bucket=self.bucket_name, Key=key)
+            return json.loads(response["Body"].read().decode("utf-8"))
+        except Exception as exc:
+            raise StorageError(
+                f"Failed to read certificate S3 artifact: {exc}",
+                "S3_CERTIFICATE_READ_FAILURE",
+            ) from exc
