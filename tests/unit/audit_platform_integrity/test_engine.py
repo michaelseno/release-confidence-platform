@@ -20,6 +20,8 @@ from release_confidence_platform.audit_platform_integrity.models import (
     CertificationDomainResult,
     PlatformIntegrityCertificate,
 )
+from pydantic import ValidationError as PydanticValidationError
+
 from release_confidence_platform.core.exceptions import ValidationError
 
 # ---------------------------------------------------------------------------
@@ -445,8 +447,9 @@ def test_certification_blocked_when_required_section_absent():
     repo = _EngineTestRepository(report_artifact=broken_artifact)
     # model_validate will fail if endpoints is missing — this tests exception handling
     # where repository.read_report_artifact returns the artifact but Pydantic rejects it.
-    # In this case the engine raises during domain execution or report construction.
-    with pytest.raises(Exception):
+    # ReleaseConfidenceReport.endpoints is a required field with no default; model_validate
+    # raises pydantic.ValidationError which propagates through the engine's except block.
+    with pytest.raises(PydanticValidationError):
         _call_certify(repo)
 
 

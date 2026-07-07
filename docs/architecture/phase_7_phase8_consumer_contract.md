@@ -70,7 +70,7 @@ If Phase 8 references an audit engagement where `terminal_state` is not `CERTIFI
 | Field | Type | Description |
 | --- | --- | --- |
 | `certificate_version` | String | Certificate schema version (e.g., `cert_v1`) |
-| `certification_job_id` | String | Job ID of the most recent complete certification event |
+| `certjob_id` | String | Job ID of the most recent complete certification event |
 | `certificate_id` | String | Canonical certificate identifier |
 | `client_id` | String | Scoped client identifier |
 | `audit_id` | String | Scoped audit identifier |

@@ -760,12 +760,12 @@ PutItem:
 ### Certificate Artifact Key
 
 ```
-integrity/{client_id}/{audit_id}/{audit_execution_id}/{aggregation_version}/{intelligence_version}/{report_version}/{cert_version}/{certjob_id}/artifact.json
+integrity/{client_id}/{audit_id}/{audit_execution_id}/{config_version}/{aggregation_version}/{intelligence_version}/{report_version}/{cert_version}/{certjob_id}/artifact.json
 ```
 
 **Example:**
 ```
-integrity/client_abc/audit_xyz/audexec_0b1c2d3e/agg_v1/intel_v1/report_v1/cert_v1/certjob_4f5a6b7c8d9e0a1b2c3d4e5f/artifact.json
+integrity/client_abc/audit_xyz/audexec_0b1c2d3e/cfg_v1/agg_v1/intel_v1/report_v1/cert_v1/certjob_4f5a6b7c8d9e0a1b2c3d4e5f/artifact.json
 ```
 
 **Key properties:**
@@ -855,7 +855,7 @@ rcp certify audit \
 | --- | --- |
 | `--force` | Re-certify even if a `CERTIFIED` record already exists for this audit identity tuple |
 
-**Argument validation:** All identity arguments must pass `validate_identifier` before any DynamoDB access. Invalid identifiers abort with a structured validation error before the prerequisite gate.
+**Argument validation:** `validate_identifier` is called on the three primary identity arguments (`client_id`, `audit_id`, `execution`) before any DynamoDB or S3 access. Version string arguments (`config_version`, `aggregation_version`, `intelligence_version`, `report_version`, `cert_version`) are fixed-set values with restricted choices defined by the CLI parser and are not subject to `validate_identifier`. Invalid primary identifiers abort with a structured validation error before the prerequisite gate.
 
 **Output:**
 

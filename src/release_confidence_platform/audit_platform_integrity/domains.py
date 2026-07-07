@@ -197,6 +197,9 @@ def check_runner_health(report: ReleaseConfidenceReport) -> CertificationDomainR
             f"RH-2: endpoints with zero execution_count (no observations): {zero_exec}"
         )
 
+    # RH-3 SIMPLIFIED: Validates mathematical bounds only (0.0–1.0). Full threshold
+    # cross-check against methodology_disclosure error rate threshold is deferred.
+    # Tracked: Issue #83 — mandatory 7.8 campaign confirmation required.
     # RH-3: Failure rate (fail_count / execution_count) must be in [0.0, 1.0]
     checks_performed += 1
     invalid_rate = []
@@ -769,6 +772,9 @@ def check_scheduler_integrity(report: ReleaseConfidenceReport) -> CertificationD
             f"SI-1: executive_summary.total_executions must be > 0, got {total}"
         )
 
+    # SI-2 SIMPLIFIED: Uses floor/ceil of mean as variance bounds rather than reading
+    # variance threshold from methodology_disclosure. Deferred threshold cross-check.
+    # Tracked: Issue #83 — mandatory 7.8 campaign confirmation required.
     # SI-2: Execution density consistency —
     # each endpoint's execution_count must be in [floor(mean), ceil(mean)]
     # where mean = total_executions / endpoint_count
@@ -799,6 +805,10 @@ def check_scheduler_integrity(report: ReleaseConfidenceReport) -> CertificationD
             f"total_executions={total}, endpoint_count={ep_count}"
         )
 
+    # SI-3 SIMPLIFIED: Verifies limitations field is present but does not cross-check
+    # individual anomaly indicators against the limitations list. Full anomaly indicator
+    # enumeration requires methodology_disclosure fields not yet exposed in Phase 6 contract.
+    # Tracked: Issue #83 — mandatory 7.8 campaign confirmation required.
     # SI-3: methodology_disclosure.limitations present and not None
     # (scheduler anomaly disclosure availability check)
     checks_performed += 1

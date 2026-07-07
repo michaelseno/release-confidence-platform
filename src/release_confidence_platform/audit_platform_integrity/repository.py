@@ -304,6 +304,8 @@ class CertificationRepository:
         s3_report_artifact_ref: str,
         aggregate_set_hash: str,
         report_id: str,
+        certification_summary: str,
+        disclosed_failures: list[str],
     ) -> None:
         """Write or update the authoritative CertificationMetadata record.
 
@@ -338,6 +340,8 @@ class CertificationRepository:
             "report_version": report_version,
             "cert_version": cert_version,
             "terminal_state": terminal_state,
+            "certification_summary": certification_summary,
+            "disclosed_failures": disclosed_failures,
             "report_id": report_id,
             "s3_certificate_ref": s3_cert_ref,
             "s3_report_artifact_ref": s3_report_artifact_ref,

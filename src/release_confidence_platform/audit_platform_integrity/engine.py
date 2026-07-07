@@ -446,6 +446,8 @@ class CertificationEngine:
                 s3_report_artifact_ref=report_metadata["s3_artifact_ref"],
                 aggregate_set_hash=report_metadata.get("aggregate_set_hash", ""),
                 report_id=report_metadata.get("report_id", ""),
+                certification_summary=CERTIFICATION_SUMMARY_MAP[terminal_state],
+                disclosed_failures=disclosed_failures,
             )
 
         except Exception as exc:
