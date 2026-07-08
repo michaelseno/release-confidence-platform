@@ -65,7 +65,7 @@ _CERT_ARTIFACT = {
     },
     "result": {
         "terminal_state": "CERTIFIED",
-        "certification_summary": "All platform integrity checks passed. Report may be issued.",
+        "certification_summary": "INTEGRITY_VERIFIED",
         "disclosed_failures": [],
     },
     "domain_results": [

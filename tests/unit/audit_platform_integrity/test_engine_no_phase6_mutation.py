@@ -35,6 +35,7 @@ from release_confidence_platform.audit_platform_integrity.engine import Certific
 
 _PHASE6_PROHIBITED = (
     "#RPTJOB#",  # ReportJob records — never a write target for Phase 7
+    "#INTJOB#",  # IntelligenceJob records — never a write target for Phase 7
 )
 
 # Phase 7 allowed SK markers — all writes must contain at least one of these

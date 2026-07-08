@@ -60,6 +60,7 @@ from release_confidence_platform.audit_platform_integrity.identity import (
 )
 from release_confidence_platform.audit_platform_integrity.models import (
     CertificationAuditProvenance,
+    CertificationDomainResult,
     CertificationIdentity,
     CertificationResult,
     CertificationReportReference,
@@ -320,6 +321,7 @@ class CertificationEngine:
         # On any unrecoverable failure: update CertificationJob to FAILED and re-raise.
         # ------------------------------------------------------------------
         failure_stage: str = "unknown"
+        artifact_exc: Exception | None = None
         try:
             # Step 6: Update CertificationJob to IN_PROGRESS
             failure_stage = "certjob_in_progress_update"
@@ -336,31 +338,56 @@ class CertificationEngine:
                 certjob_id=certjob_id,
             )
 
-            # Step 7: Read Phase 6 S3 report artifact; construct ReleaseConfidenceReport
-            failure_stage = "reading_phase6_artifact"
-            artifact_dict = self.repository.read_report_artifact(
-                report_metadata["s3_artifact_ref"]
-            )
-            report = ReleaseConfidenceReport.model_validate(artifact_dict)
+            # Steps 7+8: Read Phase 6 S3 report artifact and execute domain checks.
+            # TN-12: If the artifact read or parse fails, all 8 domains are set to
+            # BLOCKED and the pipeline continues to produce a CERTIFICATION_BLOCKED
+            # certificate. The CertificationJob transitions to FAILED at step 15.
+            try:
+                # Step 7: Read Phase 6 S3 report artifact; construct ReleaseConfidenceReport
+                failure_stage = "reading_phase6_artifact"
+                artifact_dict = self.repository.read_report_artifact(
+                    report_metadata["s3_artifact_ref"]
+                )
+                report = ReleaseConfidenceReport.model_validate(artifact_dict)
 
-            # Step 8: Execute all 8 domain checks
-            failure_stage = "executing_domain_checks"
-            domain_results = [
-                check_runner_health(report),
-                check_evidence_completeness(report),
-                check_evidence_integrity(report, report_metadata),
-                check_evidence_lineage(report, report_metadata),
-                check_observation_coverage(report, report_metadata),
-                check_scheduler_integrity(report),
-                check_methodology_compliance(report),
-                check_report_integrity(report),
-            ]
+                # Step 8: Execute all 8 domain checks
+                failure_stage = "executing_domain_checks"
+                domain_results = [
+                    check_runner_health(report),
+                    check_evidence_completeness(report),
+                    check_evidence_integrity(report, report_metadata),
+                    check_evidence_lineage(report, report_metadata),
+                    check_observation_coverage(report, report_metadata),
+                    check_scheduler_integrity(report),
+                    check_methodology_compliance(report),
+                    check_report_integrity(report),
+                ]
 
-            # Assert exactly 8 domain results with correct identifiers
-            assert len(domain_results) == len(CERT_DOMAIN_IDENTIFIERS), (
-                f"Expected {len(CERT_DOMAIN_IDENTIFIERS)} domain results, "
-                f"got {len(domain_results)}"
-            )
+                # Assert exactly 8 domain results with correct identifiers
+                assert len(domain_results) == len(CERT_DOMAIN_IDENTIFIERS), (
+                    f"Expected {len(CERT_DOMAIN_IDENTIFIERS)} domain results, "
+                    f"got {len(domain_results)}"
+                )
+
+            except Exception as exc:
+                # TN-12: S3 artifact read or Pydantic parse failure → all domains BLOCKED.
+                # The pipeline continues and produces a CERTIFICATION_BLOCKED certificate.
+                # CertificationJob transitions to FAILED at step 15 with failure context.
+                artifact_exc = exc
+                domain_results = [
+                    CertificationDomainResult(
+                        domain=d,
+                        status="BLOCKED",
+                        checks_performed=0,
+                        checks_passed=0,
+                        failure_details=[
+                            f"Phase 6 S3 artifact read failure: "
+                            f"{type(exc).__name__}: {exc}"
+                        ],
+                        evidence_refs=[],
+                    )
+                    for d in CERT_DOMAIN_IDENTIFIERS
+                ]
 
             # Step 9: Determine terminal_state from domain results
             failure_stage = "determining_terminal_state"
@@ -446,6 +473,8 @@ class CertificationEngine:
                 s3_report_artifact_ref=report_metadata["s3_artifact_ref"],
                 aggregate_set_hash=report_metadata.get("aggregate_set_hash", ""),
                 report_id=report_metadata.get("report_id", ""),
+                certification_summary=CERTIFICATION_SUMMARY_MAP[terminal_state],
+                disclosed_failures=disclosed_failures,
             )
 
         except Exception as exc:
@@ -474,14 +503,31 @@ class CertificationEngine:
             raise
 
         # ------------------------------------------------------------------
-        # Step 15: Update CertificationJob COMPLETE; log terminal state
+        # Step 15: Update CertificationJob final status; log terminal state.
+        # TN-12: When the Phase 6 artifact read failed (artifact_exc is set), the
+        # certificate and metadata have been written but CertificationJob transitions
+        # to FAILED with failure context, per the TN-12 trust requirement.
+        # For all other terminal states (CERTIFIED, CERTIFICATION_FAILED), the job
+        # transitions to COMPLETE.
         # ------------------------------------------------------------------
-        try:
-            self.repository.update_certjob_complete(
-                client_id, audit_id, certjob_id, terminal_state, s3_key
-            )
-        except Exception:
-            pass  # Certificate and metadata already written; COMPLETE update is best-effort.
+        if artifact_exc is not None:
+            failure_reason_tn12 = type(artifact_exc).__name__
+            try:
+                self.repository.update_certjob_failed(
+                    client_id,
+                    audit_id,
+                    certjob_id,
+                    f"stage=reading_phase6_artifact; reason={failure_reason_tn12}",
+                )
+            except Exception:
+                pass  # Certificate and metadata already written; FAILED update is best-effort.
+        else:
+            try:
+                self.repository.update_certjob_complete(
+                    client_id, audit_id, certjob_id, terminal_state, s3_key
+                )
+            except Exception:
+                pass  # Certificate and metadata already written; COMPLETE update is best-effort.
 
         log_event = (
             evt.CERT_COMPLETE

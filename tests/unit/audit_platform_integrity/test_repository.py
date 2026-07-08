@@ -243,6 +243,8 @@ def test_write_cert_metadata_complete_asserts_phase7_sk():
             s3_report_artifact_ref="reports/test/artifact.json",
             aggregate_set_hash="hashTEST",
             report_id="report_abc",
+            certification_summary="INTEGRITY_VERIFIED",
+            disclosed_failures=[],
         )
 
 
@@ -271,6 +273,8 @@ def test_write_cert_metadata_complete_uses_correct_sk():
             s3_report_artifact_ref="reports/test/artifact.json",
             aggregate_set_hash="hashTEST",
             report_id="report_abc",
+            certification_summary="INTEGRITY_VERIFIED",
+            disclosed_failures=[],
         )
 
     item = captured["item"]

@@ -170,10 +170,12 @@ class _EngineTestRepository:
         report_metadata: dict[str, Any] | None = _COMPLETE_REPORT_METADATA,
         existing_cert_metadata: dict[str, Any] | None = None,
         report_artifact: dict[str, Any] | None = None,
+        read_artifact_raises: Exception | None = None,
     ) -> None:
         self._report_metadata = report_metadata
         self._existing_cert_metadata = existing_cert_metadata
         self._report_artifact = report_artifact or _REPORT_ARTIFACT
+        self._read_artifact_raises = read_artifact_raises
         self.write_calls: list[tuple[str, Any]] = []
 
     def get_report_metadata(self, *args, **kwargs) -> dict[str, Any] | None:
@@ -183,6 +185,8 @@ class _EngineTestRepository:
         return self._existing_cert_metadata
 
     def read_report_artifact(self, s3_artifact_ref: str) -> dict[str, Any]:
+        if self._read_artifact_raises is not None:
+            raise self._read_artifact_raises
         return self._report_artifact
 
     def write_certjob_pending(self, client_id, audit_id, certjob_id, identity_tuple):
@@ -439,15 +443,85 @@ def test_certification_failed_when_one_domain_fails():
 
 
 def test_certification_blocked_when_required_section_absent():
-    """Report artifact with missing required sections must produce CERTIFICATION_BLOCKED."""
-    # Remove the endpoints section to trigger multiple domain BLOCKED states.
+    """Report artifact with a missing required section must produce CERTIFICATION_BLOCKED.
+
+    When read_report_artifact returns an artifact dict that fails Pydantic validation
+    (e.g. missing the required 'endpoints' field), the inner try-except at steps 7+8
+    catches the PydanticValidationError and produces 8 BLOCKED domain results.
+    The pipeline completes and returns a CERTIFICATION_BLOCKED certificate.
+    """
+    # Remove the endpoints section so ReleaseConfidenceReport.model_validate raises.
     broken_artifact = {k: v for k, v in _REPORT_ARTIFACT.items() if k != "endpoints"}
     repo = _EngineTestRepository(report_artifact=broken_artifact)
-    # model_validate will fail if endpoints is missing — this tests exception handling
-    # where repository.read_report_artifact returns the artifact but Pydantic rejects it.
-    # In this case the engine raises during domain execution or report construction.
-    with pytest.raises(Exception):
-        _call_certify(repo)
+    result = _call_certify(repo)
+    assert isinstance(result, PlatformIntegrityCertificate)
+    assert result.result.terminal_state == "CERTIFICATION_BLOCKED"
+    assert result.result.certification_summary == "INTEGRITY_BLOCKED"
+    assert len(result.domain_results) == 8
+    assert all(r.status == "BLOCKED" for r in result.domain_results)
+
+
+def test_s3_read_failure_produces_certification_blocked_certificate():
+    """TN-12: S3 read failure on Phase 6 artifact must produce a CERTIFICATION_BLOCKED
+    certificate without raising, and transition CertificationJob to FAILED.
+
+    Acceptance criteria covered: AC-20, AC-22, AC-28.
+    """
+    from release_confidence_platform.audit_platform_integrity.constants import (
+        CERT_DOMAIN_IDENTIFIERS,
+        CERTIFICATION_SUMMARY_MAP,
+    )
+
+    repo = _EngineTestRepository(
+        read_artifact_raises=Exception("S3 NoSuchKey"),
+    )
+    publisher = _NullPublisher()
+
+    # Engine must NOT raise — it should return a certificate.
+    result = _call_certify(repo, publisher)
+
+    # Certificate type and terminal state
+    assert isinstance(result, PlatformIntegrityCertificate)
+    assert result.result.terminal_state == "CERTIFICATION_BLOCKED"
+
+    # Certification summary must match the CERTIFICATION_BLOCKED mapping.
+    assert result.result.certification_summary == CERTIFICATION_SUMMARY_MAP["CERTIFICATION_BLOCKED"]
+    assert result.result.certification_summary == "INTEGRITY_BLOCKED"
+
+    # Exactly 8 BLOCKED domain results, one per domain identifier.
+    assert len(result.domain_results) == 8
+    assert all(r.status == "BLOCKED" for r in result.domain_results)
+    assert all(r.checks_performed == 0 for r in result.domain_results)
+    assert all(r.checks_passed == 0 for r in result.domain_results)
+
+    # All 8 domain identifiers must be present in disclosed_failures.
+    assert len(result.result.disclosed_failures) == 8
+    for domain_id in CERT_DOMAIN_IDENTIFIERS:
+        assert domain_id in result.result.disclosed_failures, (
+            f"Expected {domain_id!r} in disclosed_failures"
+        )
+
+    # CERTIFICATION_BLOCKED certificate must be written to S3.
+    assert len(publisher.write_calls) == 1
+    s3_key, _ = publisher.write_calls[0]
+    assert s3_key.startswith("integrity/")
+
+    # CertificationJob must transition to FAILED (not COMPLETE) — TN-12 requirement.
+    certjob_methods = [call[0] for call in repo.write_calls]
+    assert "update_certjob_failed" in certjob_methods, (
+        f"Expected update_certjob_failed in write_calls; got: {certjob_methods}"
+    )
+    assert "update_certjob_complete" not in certjob_methods, (
+        "update_certjob_complete must NOT be called when TN-12 is triggered"
+    )
+
+    # failure_stage and failure_reason must be populated in the FAILED record.
+    failed_call = next(
+        call for call in repo.write_calls if call[0] == "update_certjob_failed"
+        and "stage=reading_phase6_artifact" in call[1].get("error", "")
+    )
+    assert "stage=reading_phase6_artifact" in failed_call[1]["error"]
+    assert "reason=" in failed_call[1]["error"]
 
 
 def test_infrastructure_failure_after_pending_updates_certjob_to_failed():

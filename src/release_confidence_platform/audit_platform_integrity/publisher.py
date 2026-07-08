@@ -66,8 +66,12 @@ class CertificationPublisher:
             Parsed certificate artifact dict.
 
         Raises:
+            AssertionError: If key does not start with 'integrity/'. Programming-error guard.
             StorageError: On any S3 GetObject failure or JSON parse failure.
         """
+        assert key.startswith("integrity/"), (
+            f"read_artifact key must start with 'integrity/', got: {key!r}"
+        )
         try:
             response = self.s3_client.get_object(Bucket=self.bucket_name, Key=key)
             return json.loads(response["Body"].read().decode("utf-8"))

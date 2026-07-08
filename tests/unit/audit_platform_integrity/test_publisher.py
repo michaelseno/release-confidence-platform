@@ -116,3 +116,33 @@ def test_write_artifact_determinism():
     publisher.write_artifact(_KEY, _ARTIFACT)
     second_body = s3.put_object.call_args.kwargs["Body"]
     assert first_body == second_body
+
+
+# ---------------------------------------------------------------------------
+# read_artifact tests
+# ---------------------------------------------------------------------------
+
+
+def test_read_artifact_raises_assertion_error_on_non_integrity_prefix():
+    """read_artifact must raise AssertionError if key does not start with 'integrity/'."""
+    publisher, s3 = _make_publisher()
+    bad_key = "reports/client1/audit1/artifact.json"
+    with pytest.raises(AssertionError) as exc_info:
+        publisher.read_artifact(bad_key)
+    assert "integrity/" in str(exc_info.value)
+
+
+def test_read_artifact_raises_assertion_error_on_intelligence_prefix():
+    """read_artifact must reject keys with intelligence/ prefix."""
+    publisher, _ = _make_publisher()
+    bad_key = "intelligence/client1/audit1/artifact.json"
+    with pytest.raises(AssertionError):
+        publisher.read_artifact(bad_key)
+
+
+def test_read_artifact_accepts_integrity_prefix():
+    """read_artifact must not raise AssertionError when key starts with 'integrity/'."""
+    publisher, s3 = _make_publisher()
+    s3.get_object.return_value = {"Body": MagicMock(read=lambda: b'{"terminal_state": "CERTIFIED"}')}
+    result = publisher.read_artifact(_KEY)
+    assert result["terminal_state"] == "CERTIFIED"
