@@ -427,6 +427,7 @@ class ReportingEngine:
             "score_label": report.executive_summary.score_label,
             "endpoint_count": report.executive_summary.endpoint_count,
             "s3_artifact_ref": s3_key,
+            "aggregate_set_hash": report.intelligence_provenance.aggregate_set_hash,
             "completed_at": complete_at,
             "updated_at": complete_at,
         }

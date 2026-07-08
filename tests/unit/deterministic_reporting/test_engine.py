@@ -358,3 +358,23 @@ def test_s3_artifact_written_before_complete():
     publisher = _NullPublisher()
     _call_generate(repo, publisher)
     assert len(publisher.write_calls) == 1
+
+
+def test_report_metadata_complete_includes_aggregate_set_hash():
+    """ReportMetadata COMPLETE update must include aggregate_set_hash (Phase 6→7 consumer contract)."""
+    repo = _EngineTestRepository()
+    publisher = _NullPublisher()
+    _call_generate(repo, publisher)
+
+    # Find the update_report_metadata_fields call that sets status=COMPLETE.
+    complete_call = next(
+        (item for name, item in repo.write_calls
+         if name == "update_report_metadata_fields" and item.get("status") == "COMPLETE"),
+        None,
+    )
+    assert complete_call is not None, "No COMPLETE update_report_metadata_fields call found"
+    assert "aggregate_set_hash" in complete_call, (
+        "aggregate_set_hash missing from ReportMetadata COMPLETE update; "
+        "Phase 6→7 consumer contract requires this field"
+    )
+    assert complete_call["aggregate_set_hash"] == "hashTEST"
