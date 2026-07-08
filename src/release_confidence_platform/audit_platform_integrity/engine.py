@@ -337,6 +337,10 @@ class CertificationEngine:
             )
 
             # Step 7: Read Phase 6 S3 report artifact; construct ReleaseConfidenceReport
+            # TN-12 DEFERRED (MVP): S3 read failure here raises an unhandled exception
+            # and transitions CertificationJob to FAILED without producing a
+            # CERTIFICATION_BLOCKED certificate. Producing a BLOCKED certificate on
+            # infrastructure failure is deferred post-MVP. Track via Issue #83.
             failure_stage = "reading_phase6_artifact"
             artifact_dict = self.repository.read_report_artifact(
                 report_metadata["s3_artifact_ref"]
