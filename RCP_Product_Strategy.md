@@ -62,14 +62,25 @@ Features that compromise trust must never be implemented, regardless of improvem
 
 # Product Positioning
 
-RCP is positioned as:
+## External Positioning (Approved — Phase 8)
 
-- Independent API Reliability Audit Platform
-- Release Confidence Platform
-- Operational Reliability Audit Platform
-- Evidence-driven Reliability Assessment Platform
+**Primary:** Independent API Reliability Audit Platform
 
-RCP is NOT positioned as:
+**Product identity:** Release Confidence Platform
+
+**Secondary:** Evidence-Based Release Confidence Platform
+
+> **Retired:** "Operational Reliability Intelligence" is retired from all external-facing positioning. See ADR: `docs/architecture/adr_phase_8_commercialization_positioning.md`.
+
+## Primary External Differentiator
+
+RCP operates **pre-release** to generate the evidence that informs a release confidence decision.
+
+This timing distinction — pre-release, not post-release — is the first differentiator that must appear in all external-facing positioning. It separates RCP from monitoring, synthetic monitoring, and observability platforms, which operate post-release.
+
+## Category Boundaries
+
+RCP is not positioned as:
 
 - API testing framework
 - QA automation platform
@@ -82,6 +93,8 @@ RCP is NOT positioned as:
 - Observability platform
 - AI testing platform
 - Autonomous QA platform
+
+> **Note:** This boundary list is an internal constitutional constraint and an objection-handling reference. It is not approved for use as primary external positioning copy. See ADR: `docs/architecture/adr_phase_8_commercialization_positioning.md`.
 
 RCP complements testing and monitoring.
 
