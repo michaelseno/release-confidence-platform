@@ -1,0 +1,159 @@
+# ADR: Evidence Retention — Technically Enforced Custody Period, Legal Hold, and Disposal Traceability
+
+## Status
+
+Proposed — Workstream A1 Planning Deliverable (SDLC planning only; implementation not authorized)
+
+## Context
+
+`infra/resources/s3.yml` (`RawResultsBucket`) has `VersioningConfiguration.Status: Enabled` and no `LifecycleConfiguration`. `infra/resources/dynamodb.yml` (`MetadataTable`) defines no TTL attribute. Confirmed by direct infrastructure inspection in both independent SDLC Verification Gate review passes (`docs/review/evidence_governance_baseline_v1_0_sdlc_verification_claude.md`, `..._opencode.md`): every audit's raw execution evidence (Phase 1/2), aggregates (Phase 4), intelligence (Phase 5), reports (Phase 6), and certificates (Phase 7) — every S3 object version and every DynamoDB record, regardless of which phase wrote it — is retained indefinitely today. This is the direct opposite of the Evidence Governance Baseline's default: evidence shall not outlive its authorized governance purpose.
+
+`docs/product/evidence_governance_workstream_a_product_spec.md` (FR-A1-1 through FR-A1-6, AC-A1-1 through AC-A1-8) requires a technically enforced, automated custody-period disposal mechanism covering both storage systems, a legal hold override, a durable disposal record, and an externally supplied custody-period parameter (the duration value itself is explicitly out of scope for this ADR and for Workstream A).
+
+Three design dimensions required explicit architectural resolution:
+
+1. **Legal hold override mechanism.** Both S3 Lifecycle rules and DynamoDB TTL are unconditional, AWS-managed mechanisms — neither has a native per-object "pause" concept once a rule/attribute is configured. A hold must suspend disposal without disabling enforcement platform-wide.
+2. **Disposal traceability.** DynamoDB TTL deletion is an asynchronous, best-effort AWS background process (documented as typically completing within 48 hours of expiry, not synchronously on expiry) and does not invoke any application hook at delete time. S3 Lifecycle expiration similarly runs as a daily batch process, not a synchronous per-object action. FR-A1-5 / AC-A1-6 require a durable, queryable disposal record; a design that assumes either mechanism fires a synchronous callback is not viable.
+3. **Custody-period parameterization.** FR-A1-3 / AC-A1-5 require the custody-period duration to be external configuration, not a hardcoded value baked into the mechanism, and AC-A1-8 requires the design to explicitly state how the pre-Workstream-A evidence backlog is handled rather than leaving it undefined.
+
+## Decision
+
+### Decision 1: Two Independent, AWS-Native Enforcement Mechanisms — S3 Lifecycle for `RawResultsBucket`, DynamoDB TTL for `MetadataTable`
+
+No new storage system, queue, or archival tier is introduced. Enforcement is added to the two existing resources using their respective AWS-native retention primitives: an S3 `LifecycleConfiguration` rule on `RawResultsBucket`, and a TTL attribute (`ttl_disposal_at`) on `MetadataTable`. This preserves the "Coverage of all evidence classes... regardless of which phase wrote them" requirement (FR-A1-6) without introducing per-phase opt-in logic — both mechanisms apply uniformly across the single bucket and single table already shared by every phase.
+
+### Decision 2: Legal Hold via Object Tagging + Lifecycle Tag-Filter Inversion (S3), Not S3 Object Lock
+
+S3 Object Lock is rejected as the legal-hold mechanism for `RawResultsBucket` (see Alternative 1) because Object Lock can only be enabled at bucket creation (or via an AWS Support-mediated exception process) — it cannot be retroactively enabled on the already-deployed, already-versioned `RawResultsBucket` through ordinary infrastructure-as-code deployment. Requiring bucket recreation to adopt Object Lock is operationally disruptive and out of proportion to what legal hold requires here.
+
+Instead:
+
+- Every object written to `RawResultsBucket` is tagged at write time with `rcp-legal-hold=false` and `rcp-evidence-class={class}` (`raw_evidence` | `intelligence` | `report` | `certificate`, mapped from the writing phase's S3 key prefix).
+- The S3 Lifecycle rule's `Filter` matches on `Tag: {Key: rcp-legal-hold, Value: false}`. S3 Lifecycle tag filters require an exact match; an object tagged `rcp-legal-hold=true` will not match this filter and is therefore excluded from both `Expiration` and `NoncurrentVersionExpiration` actions under that rule.
+- Placing a legal hold flips the tag to `rcp-legal-hold=true` on **every extant version** of every object under the audit identity's S3 key prefixes (current version and all noncurrent versions, since S3 object tags are versioned — a tag set on the current version does not retroactively apply to noncurrent versions). Releasing a hold flips the tag back to `false`.
+- `Expiration.Days` (current-version disposal) is computed from each object's own creation timestamp — not a mutable clock — so no recomputation is needed on release for current versions: the very next daily lifecycle evaluation cycle picks up any current-version object whose age already exceeds the threshold, satisfying AC-A1-4 ("enforcement must resume, not silently skip the now-expired evidence") without any additional bookkeeping.
+- `NoncurrentVersionExpiration.NoncurrentDays`, by contrast, is computed from **when a version became noncurrent** (i.e., when a newer version was written to the same key), not from the version's own original creation timestamp. This is a distinct clock from both `Expiration.Days` and from the DynamoDB-side `custody_expires_at` clock (`created_at + custody_period_seconds`). Under this platform's prevailing write pattern — every evidence artifact receives a unique, event-scoped S3 key (`write_raw_results_once` enforces write-once-per-key via an existence check before `put_object`; Phase 6/Phase 7 artifacts embed `report_job_id`/`certjob_id` in their key path, so force re-generation writes a *new* key rather than overwriting) — noncurrent versions are not expected to arise from ordinary evidence writes at all; they would only arise from a code path that re-`PutObject`s the *same* key (the one identified instance today is `S3StorageClient.write_json`'s `overwrite=True` parameter, used for configuration artifacts, not raw evidence). Where a noncurrent version does arise, its `NoncurrentDays`-based expiration timing is **an accepted, documented divergence** from the primary `custody_expires_at` clock for MVP scope, not a resolved parity guarantee — S3 Lifecycle does not support a per-object, creation-date-anchored noncurrent expiration; `NoncurrentDays` is a single rule-level value. AC-A1-7 is still satisfied in the sense that matters (noncurrent versions are guaranteed to expire via the daily lifecycle sweep and do not persist indefinitely), but the exact disposal instant for a noncurrent version does not track the same clock as the record's original custody-period computation.
+
+### Decision 3: Legal Hold via TTL-Attribute Removal, Not TTL-Value Mutation (DynamoDB)
+
+Every DynamoDB record subject to enforcement carries two distinct fields, deliberately separated:
+
+- `custody_expires_at` (Number, epoch seconds) — the deterministic, always-computed expiry instant (`created_at + custody_period_seconds`). This field is never modified by hold state changes; it is the record's permanent "when would this expire absent any hold" fact.
+- `ttl_disposal_at` (Number, epoch seconds) — the actual DynamoDB Time to Live attribute configured on `MetadataTable`. This is the only field DynamoDB's TTL sweep acts on.
+
+At write time, `ttl_disposal_at = custody_expires_at`. Placing a legal hold issues `UpdateItem REMOVE ttl_disposal_at` across every item under the audit identity's partition (query `PK = CLIENT#{client_id}`, `SK begins_with AUDIT#{audit_id}`). A record with no `ttl_disposal_at` attribute is permanently exempt from DynamoDB TTL processing — this is standard, documented DynamoDB TTL behavior (items missing the configured TTL attribute are never targeted for deletion). Releasing a hold restores `ttl_disposal_at = MAX(custody_expires_at, now)`, clamping to "now" if the custody period already elapsed while the hold was active, so the record becomes immediately eligible rather than silently skipped (AC-A1-4).
+
+### Decision 4: Disposal Record Triggered by DynamoDB Streams (TTL path) and S3 Event Notifications (Lifecycle path) — Never Assumed as a Synchronous Hook
+
+Neither AWS mechanism offers a synchronous "disposal happened, here is your chance to react" callback. The disposal record (FR-A1-5, AC-A1-6) is therefore built as an asynchronous, event-driven side effect of each mechanism's own native event stream, using the standard AWS pattern for each:
+
+- **DynamoDB path:** `MetadataTable` Streams is enabled (`StreamViewType: NEW_AND_OLD_IMAGES`). A new Lambda (`evidenceDisposalRecorder`) subscribes to the stream and filters for `REMOVE` events where the record's `userIdentity.principalId == "dynamodb.amazonaws.com"` — the documented DynamoDB Streams marker distinguishing TTL-driven deletions from ordinary application `DeleteItem` calls (which RCP does not currently perform, but the distinction is load-bearing for correctness going forward). Only TTL-attributed removals produce disposal records.
+- **S3 path:** `RawResultsBucket` S3 Event Notifications are configured for `s3:LifecycleExpiration:*` events (covering both current-version `Delete` and, for the versioned bucket, `DeleteMarkerCreated`), routed through EventBridge to the same disposal-recording Lambda (or a sibling with an identical write path).
+
+This is architecturally new infrastructure not present in any existing phase (see "Infrastructure Impact" below) — Phase 4's evidence lineage manifests and `aggregate_set_hash` establish the *pattern* of durable, queryable evidence-provenance records in the same single table, but no existing phase uses DynamoDB Streams or S3 Event Notifications. This ADR extends the established persistence pattern (a new immutable record type in `MetadataTable`, following the platform's Job-log convention) onto new event-driven infrastructure that the eventual-consistency constraint makes unavoidable.
+
+The resulting `DisposalRecord` is written to `MetadataTable` under a new, non-colliding sort-key namespace (`#DISPOSAL#`) and is itself explicitly exempted from `ttl_disposal_at` assignment — a disposal record is a compliance/audit-trail artifact, not evidence subject to its own custody clock; auto-disposing the record of a disposal would defeat FR-A1-5's purpose. `DisposalRecord.recorded_at` (when RCP became aware) is modeled as distinct from `DisposalRecord.disposed_at` (AWS's own best-available deletion timestamp) to make the eventual-consistency window explicit rather than assumed away.
+
+`#DISPOSAL#` is written exclusively by `evidenceDisposalRecorder`'s own repository code path. The hold-management repository code path (used by `RetentionService`, Decision 2/3) is a structurally separate class with its own SK-write guard asserting it may write only `#LEGALHOLD#` — mirroring the `_assert_phase7_sk` pattern already established in `audit_platform_integrity/repository.py:49`, which guards Phase 7's own writes against straying outside `#CERTJOB#`/`#CERT#`. This is a code-level, programming-error guard, not an IAM-enforced boundary: DynamoDB IAM fine-grained access control conditions on the partition key (`dynamodb:LeadingKeys`) but not on sort-key substrings, so IAM cannot itself restrict `PutItem` calls to items whose SK contains `#DISPOSAL#`. The exclusivity guarantee rests on the same code-structural discipline Phase 7 already relies on for its own namespace separation, applied symmetrically to both new A1 repository classes (see Technical Design §5.2, §6, §12).
+
+### Decision 5: Custody Period as Externally Supplied, Per-Evidence-Class Stack Configuration
+
+The custody-period duration is never hardcoded in application code or in the CloudFormation lifecycle rule literal. It is expressed as a per-evidence-class, per-stage parameter in `infra/serverless.yml`'s `custom` section (mirroring the existing `logRetentionInDays` per-stage pattern already in that file), consumed in two places from the same source of truth:
+
+- Directly by `resources/s3.yml`'s `LifecycleConfiguration.Days` / `NoncurrentDays` (CloudFormation-time).
+- As Lambda environment variables, consumed by application write paths (Phase 1/2/4/5/6/7 record-write call sites) to compute `custody_expires_at` at write time.
+
+No default value is defined by this ADR. Per AC-A1-5, the mechanism must be fully designed and code-complete without a duration value; the actual number is a separate, lower-priority Product Strategy decision (SDLC Verification Gate §9 item 6). Deployment of the S3 lifecycle rule itself is consequently gated on that value being supplied — a CloudFormation `LifecycleConfiguration` rule requires a concrete numeric `Days`, so the infrastructure change can be written and reviewed now but cannot be deployed to any stage until the parameter is populated.
+
+### Decision 6: Backlog Handling Is a Distinct, Explicitly Flagged Migration Decision (Not Silently Resolved)
+
+See "Assumption Requiring Confirmation" below. This ADR does not decide backlog policy; it documents the recommended default and requires confirmation before implementation.
+
+### Decision 7: Failure Destinations Are Mandatory on Both `evidenceDisposalRecorder` Event Source Mappings, With an Alarm on Dead-Letter Depth
+
+`evidenceDisposalRecorder`'s two event sources (the `MetadataTable` DynamoDB Streams event source mapping, and the EventBridge rule delivering S3 `LifecycleExpiration` notifications) are each configured with an explicit failure destination — an SQS dead-letter queue (`evidenceDisposalRecorderDLQ`) — rather than relying on retry-then-silent-drop default behavior. The DynamoDB Streams mapping additionally sets `BisectBatchOnFunctionError: true` and a bounded `MaximumRetryAttempts`, so a single malformed record in a batch cannot indefinitely block or silently discard the rest of the batch. A CloudWatch alarm on the DLQ's `ApproximateNumberOfMessagesVisible` metric is provisioned so a dropped disposal-recording attempt is an observable, alerted condition, not a silent gap in FR-A1-5's durable-record guarantee. See Technical Design §6 and §13 for the concrete configuration.
+
+## Rationale
+
+### Why tag-filter inversion instead of Object Lock
+
+Object Lock is the AWS-idiomatic mechanism for true legal hold (`s3:PutObjectLegalHold`), but it is a bucket-creation-time property. `RawResultsBucket` is already deployed with versioning enabled and in active use; retrofitting Object Lock would require either an AWS Support-mediated bucket-level exception (not guaranteed to be granted, not something this platform can depend on) or a bucket migration (create new bucket, copy all objects and versions, cut over, decommission old bucket) — a materially larger, riskier, and slower change than what FR-A1-4 requires. The tag-filter inversion pattern is a documented, supported AWS approach for conditional lifecycle exclusion and works on the bucket as it exists today.
+
+### Why TTL-attribute removal instead of TTL-value mutation
+
+Setting `ttl_disposal_at` to a far-future sentinel value on hold would work but conflates "held" with "expires very late," which is fragile (a bug or misconfigured sentinel could silently un-hold evidence) and loses the clean distinction between "the custody clock" and "the AWS deletion trigger." Removing the TTL attribute entirely is the more defensible design: DynamoDB's own TTL semantics guarantee an item with no TTL attribute is never a deletion candidate, so the hold is enforced by DynamoDB itself, not by trusting a computed future date to remain correct.
+
+### Why event-driven disposal recording rather than a polling reconciliation job
+
+A cron-style Lambda that periodically diffs the table/bucket against a "what should still exist" expectation was considered and rejected (see Alternative 3): it requires maintaining a separate durable inventory to diff against — which duplicates exactly the tracking problem the disposal record is meant to solve — and introduces a detection lag bounded only by the poll interval. Subscribing directly to each AWS mechanism's own change-event stream is lower-latency, requires no separate inventory, and is the standard, documented pattern for reacting to DynamoDB TTL deletions specifically.
+
+### Why the same disposal record schema for both S3 and DynamoDB disposals
+
+A single `DisposalRecord` type (differentiated only by `disposal_mechanism` and `disposed_identity_ref` shape) keeps the compliance-facing query surface ("show me everything disposed for this audit identity") to one record type and one sort-key namespace, consistent with the platform's existing convention of one queryable record type per concern rather than parallel per-source schemas.
+
+### Why a mandatory dead-letter queue rather than relying on structured-log-and-retry alone
+
+FR-A1-5 requires disposal to produce a *durable, queryable* record — not merely a best-effort attempt. Lambda event source mappings retry a bounded number of times by default and then, absent an explicit failure destination, simply drop the failed batch with only a CloudWatch Logs trace as evidence anything went wrong. For a compliance-facing guarantee, "the record might exist, check the logs" is not durable in the sense FR-A1-5 requires. An explicit DLQ turns a dropped disposal-recording attempt into a queryable, alertable artifact in its own right, and the CloudWatch alarm ensures an operator is notified rather than discovering the gap only during an after-the-fact compliance audit.
+
+## Consequences
+
+### What This Architecture Enables
+
+- Evidence in both `RawResultsBucket` and `MetadataTable` is disposed of automatically once its custody period elapses, with no scheduled operator task required — closing the "operator-discipline-only" gap both SDLC review passes identified.
+- Legal hold is a genuine technical override, not a configuration flag that disables enforcement platform-wide; only the held audit identity's evidence is exempted.
+- Every disposal action produces a durable, queryable record, satisfying the Evidence Principle that disposal itself must not become an unaccountable action.
+- The custody-period value remains a pure configuration input; Product Strategy can set or later change it without any code change.
+
+### Constraints This Architecture Creates
+
+- **Legal hold placement/release on S3 is not instantaneous for large evidence sets.** Because tags are per-version and must be set on every extant version under an audit identity's key prefixes, placing a hold on an audit with a large evidence footprint requires enumerating and re-tagging potentially many object versions. This is an operational latency characteristic that must be surfaced to operators (see Technical Design, Reliability section), not a correctness gap — the hold record itself (`LegalHold` DynamoDB item) is written atomically and immediately; the S3 re-tagging sweep is the part that takes wall-clock time proportional to evidence volume.
+- **Disposal records lag actual disposal by an unspecified, eventually-consistent window.** DynamoDB TTL deletion is best-effort within ~48 hours of expiry; S3 Lifecycle evaluation runs once per day. `DisposalRecord.recorded_at` will therefore trail the true evidence age at disposal by a variable amount. Any compliance report built on `DisposalRecord` data must treat "disposed by" as approximate, not exact-to-the-second.
+- **This ADR introduces new infrastructure (DynamoDB Streams, EventBridge S3 notifications, a new Lambda, a dead-letter queue) that does not exist in any current phase.** This is a genuine infrastructure expansion, not a reuse of an existing pattern, and must be reviewed accordingly (see Non-Negotiable Invariants and Traceability).
+- **`#DISPOSAL#` write-exclusivity is a code-level guarantee, not an IAM-level one.** DynamoDB IAM policies cannot condition `PutItem` on sort-key substrings (only on the partition key, via `dynamodb:LeadingKeys`), so the guarantee that only `evidenceDisposalRecorder` writes `#DISPOSAL#` items rests on the same per-repository-class SK-write assertion pattern Phase 7 already relies on for its own namespace separation — a defense against programming error, not a hard security boundary. This is an accepted, documented limitation of DynamoDB's access-control model, not unique to this design.
+- **The mechanism cannot be operationally activated (the lifecycle rule cannot deploy) until Product Strategy supplies the custody-period value(s).** The code and infrastructure templates can be complete and reviewed without that value; the deployment step is gated on it.
+- **Retroactive restoration of already-disposed evidence is impossible.** A legal hold placed after evidence has already been disposed cannot undo the disposal; this is a hard AWS-mechanism limitation (deletion is deletion), not a gap in this design, and must be stated explicitly to operators rather than discovered operationally (per the Product Spec's own Edge Cases section).
+
+## Alternatives Considered
+
+### Alternative 1: Enable S3 Object Lock on `RawResultsBucket` for Legal Hold
+
+Rejected. Object Lock cannot be retroactively enabled on the existing, already-versioned, already-populated `RawResultsBucket` without an AWS Support-mediated exception or a full bucket migration. Both paths are materially riskier and slower than the tag-filter inversion approach, for a workstream explicitly scoped to correction, not re-platforming.
+
+### Alternative 2: Set `ttl_disposal_at` to a Far-Future Sentinel Value to Represent "Held"
+
+Rejected. Conflates hold state with a computed date, is fragile against sentinel-value bugs, and loses the clean separation between "the evidence's real expiry" and "the value DynamoDB acts on." TTL-attribute removal is a stronger, AWS-semantics-backed guarantee.
+
+### Alternative 3: Polling Reconciliation Job Instead of Stream/Event-Driven Disposal Recording
+
+Rejected. Requires maintaining a separate durable "expected inventory" to diff against, which duplicates the very tracking problem the disposal record exists to solve, and introduces detection latency bounded by poll interval rather than by AWS's own event delivery latency. DynamoDB Streams and S3 Event Notifications are the standard, purpose-built mechanisms for this exact problem.
+
+### Alternative 4: A Single Combined Custody-Period Value for All Evidence Classes
+
+Rejected as the mandated design. The Product Spec's Constraints section is explicit: "Must not assume a single, uniform custody period across all evidence classes unless Product Strategy explicitly confirms that assumption." The per-evidence-class parameterization in Decision 5 keeps this option open without foreclosing a future uniform-value decision — a uniform value can always be supplied as the same number for every class; the reverse (retrofitting per-class granularity onto a hardcoded uniform value) would require a code change.
+
+### Alternative 5: Retroactively Apply the Full Custody Period to Pre-Existing Evidence, Clocked From Original `created_at`
+
+Rejected as the recommended default (see Assumption below). This would cause a mass, simultaneous disposal event across the entire pre-Workstream-A evidence backlog the moment the mechanism activates in a given stage — an operationally dangerous "big bang" deletion with no operator control over timing or blast radius.
+
+## Non-Negotiable Invariants
+
+These invariants govern the A1 disposal mechanism and are carried forward into the Technical Design and any future implementation:
+
+1. A `DisposalRecord` must never itself carry a `ttl_disposal_at` attribute; disposal records are compliance artifacts exempt from the custody-period mechanism they document.
+2. A legal hold, once active, must exempt the held audit identity's evidence from disposal regardless of elapsed custody period, until explicitly released.
+3. The custody-period duration must never be hardcoded in application code or in CloudFormation resource literals; it is sourced exclusively from stage/evidence-class configuration.
+4. Disposal recording must never assume a synchronous callback from either AWS mechanism; it must be built as a consumer of each mechanism's own asynchronous event stream (DynamoDB Streams for TTL; S3 Event Notifications for Lifecycle).
+5. Retroactive restoration of disposed evidence is not a supported operation; a legal hold placed after disposal has occurred has no retroactive effect.
+6. `#DISPOSAL#` sort-key items must be written exclusively by `evidenceDisposalRecorder`'s own repository code path; the hold-management repository code path used by `RetentionService` must carry an explicit SK-write guard preventing it from ever constructing a `#DISPOSAL#`-shaped write, mirroring `_assert_phase7_sk` in `audit_platform_integrity/repository.py`.
+7. Both `evidenceDisposalRecorder` event source mappings (DynamoDB Streams and the S3-notification EventBridge rule) must configure an explicit failure destination (dead-letter queue); a dropped disposal-recording attempt must be an observable, alertable condition, never a silent no-op.
+
+## Traceability
+
+- Brownfield Initiative: `docs/product/evidence_governance_workstream_a_brownfield_initiative.md`
+- Product Specification: `docs/product/evidence_governance_workstream_a_product_spec.md` (FR-A1-1 through FR-A1-6; AC-A1-1 through AC-A1-8)
+- Technical Design: `docs/architecture/evidence_governance_workstream_a1_retention_enforcement_technical_design.md`
+- SDLC Verification Gate reviews: `docs/review/evidence_governance_baseline_v1_0_sdlc_verification_claude.md`, `docs/review/evidence_governance_baseline_v1_0_sdlc_verification_opencode.md`
+- Phase 4 Evidence Lineage ADR (precedent for durable, queryable provenance records in the same single table): `docs/architecture/adr_phase_4_evidence_lineage_aggregation.md`
+- Sanitization Boundary ADR (governs `client_id`/`audit_id`/key-material handling in all new `evidence_retention/` records — `sanitize()` must never reach persistence-bound dicts): `docs/architecture/adr_sanitization_boundary.md`
+- Infrastructure under change: `infra/resources/s3.yml`, `infra/resources/dynamodb.yml`, `infra/serverless.yml`
+- Product Constitution: `RCP_Product_Strategy.md`
