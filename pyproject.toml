@@ -21,6 +21,7 @@ rcp = "release_confidence_platform.operator_cli.main:main"
 dev = [
   "pytest>=8,<9",
   "ruff>=0.5,<1",
+  "pyyaml>=6,<7",
 ]
 
 [tool.setuptools]

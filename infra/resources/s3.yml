@@ -10,6 +10,88 @@ Resources:
         RestrictPublicBuckets: true
       VersioningConfiguration:
         Status: Enabled
+      # Evidence Governance Workstream A1 (ADR: adr_evidence_retention_disposal_enforcement.md;
+      # Technical Design: evidence_governance_workstream_a1_retention_enforcement_technical_design.md,
+      # Section 5/Decision 1-2). One rule per evidence-class S3 prefix, each
+      # filtered on Prefix + the rcp-legal-hold=false tag (ADR Decision 2 --
+      # tag-filter inversion, not S3 Object Lock, since Object Lock cannot be
+      # retroactively enabled on this already-versioned, already-populated
+      # bucket). An object/version tagged rcp-legal-hold=true is excluded from
+      # both Expiration and NoncurrentVersionExpiration by S3's exact-match
+      # tag filter semantics -- this is the legal-hold override mechanism.
+      #
+      # Days/NoncurrentDays are sourced exclusively from
+      # custom.custodyPeriodDays.<evidence_class>.${self:provider.stage} in
+      # serverless.yml (no fallback value is supplied there for any stage,
+      # mirroring the existing logRetentionInDays pattern in this same file)
+      # -- per ADR Non-Negotiable Invariant 3 / Decision 5, the custody-period
+      # duration must never be hardcoded here. If a stage's value is unset,
+      # Serverless Framework variable resolution fails at package/deploy time
+      # (an unresolved-variable error), not a silent default -- deployment
+      # cannot proceed without the value being explicitly supplied. See
+      # Technical Design Section 14/17 and ADR "Constraints This Architecture
+      # Creates" for why this deployment step is intentionally gated.
+      LifecycleConfiguration:
+        Rules:
+          - Id: raw-evidence-custody-expiration
+            Status: Enabled
+            Filter:
+              And:
+                Prefix: raw-results/
+                Tags:
+                  - Key: rcp-legal-hold
+                    Value: "false"
+            Expiration:
+              Days: ${self:custom.custodyPeriodDays.raw_evidence.${self:provider.stage}}
+            NoncurrentVersionExpiration:
+              NoncurrentDays: ${self:custom.custodyPeriodDays.raw_evidence.${self:provider.stage}}
+          - Id: intelligence-custody-expiration
+            Status: Enabled
+            Filter:
+              And:
+                Prefix: intelligence/
+                Tags:
+                  - Key: rcp-legal-hold
+                    Value: "false"
+            Expiration:
+              Days: ${self:custom.custodyPeriodDays.intelligence.${self:provider.stage}}
+            NoncurrentVersionExpiration:
+              NoncurrentDays: ${self:custom.custodyPeriodDays.intelligence.${self:provider.stage}}
+          - Id: report-custody-expiration
+            Status: Enabled
+            Filter:
+              And:
+                Prefix: reports/
+                Tags:
+                  - Key: rcp-legal-hold
+                    Value: "false"
+            Expiration:
+              Days: ${self:custom.custodyPeriodDays.report.${self:provider.stage}}
+            NoncurrentVersionExpiration:
+              NoncurrentDays: ${self:custom.custodyPeriodDays.report.${self:provider.stage}}
+          - Id: certificate-custody-expiration
+            Status: Enabled
+            Filter:
+              And:
+                Prefix: integrity/
+                Tags:
+                  - Key: rcp-legal-hold
+                    Value: "false"
+            Expiration:
+              Days: ${self:custom.custodyPeriodDays.certificate.${self:provider.stage}}
+            NoncurrentVersionExpiration:
+              NoncurrentDays: ${self:custom.custodyPeriodDays.certificate.${self:provider.stage}}
+      # ADR Decision 4 -- S3 Lifecycle expiration is a daily batch process with
+      # no synchronous callback; disposal recording is built as an
+      # asynchronous consumer of this bucket's own event stream via
+      # EventBridge, never assumed as a synchronous hook. This flag only
+      # enables EventBridge delivery for the bucket; the EventBridge rule(s)
+      # that filter for s3:LifecycleExpiration:* and target the
+      # evidenceDisposalRecorder Lambda are A1.3/A1.4 scope (that Lambda does
+      # not exist yet -- see evidence-retention-dlq.yml and this subphase's
+      # implementation report for the explicit scope boundary).
+      NotificationConfiguration:
+        EventBridgeConfiguration: {}
 Outputs:
   RawResultsBucketName:
     Description: Runtime raw results and backend config bucket name.

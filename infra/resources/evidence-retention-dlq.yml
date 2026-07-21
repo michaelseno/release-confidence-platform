@@ -1,0 +1,69 @@
+# Evidence Governance Workstream A1 -- ADR Decision 7 / Non-Negotiable
+# Invariant 7 (adr_evidence_retention_disposal_enforcement.md); Technical
+# Design Section 6/13 (evidence_governance_workstream_a1_retention_enforcement_technical_design.md).
+#
+# Both evidenceDisposalRecorder event sources (the MetadataTable DynamoDB
+# Streams event source mapping, and the EventBridge rule delivering S3
+# s3:LifecycleExpiration:* notifications) must configure an explicit failure
+# destination rather than relying on default retry-then-silent-drop
+# behavior, so a dropped disposal-recording attempt is an observable,
+# alertable condition -- never a silent gap in FR-A1-5's durable-record
+# guarantee.
+#
+# evidenceDisposalRecorder itself (the Lambda function, its event source
+# mappings, and the EventBridge rule that would target
+# evidenceDisposalRecorderDLQ.DestinationConfig.OnFailure /
+# DeadLetterConfig) is A1.3/A1.4 scope and does not exist yet -- this file
+# defines only the queue and its depth alarm, both of which stand on their
+# own without any Lambda reference. No placeholder/stub Lambda resource is
+# defined here; none is required for these two resources to be valid,
+# deployable CloudFormation.
+Resources:
+  evidenceDisposalRecorderDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: ${self:service}-${self:provider.stage}-evidence-disposal-recorder-dlq
+      # 14 days is the maximum SQS retention period, chosen so a dropped
+      # disposal-recording attempt remains inspectable/redriveable for as
+      # long as AWS allows, consistent with the "operator inspects and
+      # manually redrives" manual-intervention design (Technical Design
+      # Section 13 -- no automated redrive is designed for A1).
+      MessageRetentionPeriod: 1209600
+
+  evidenceDisposalRecorderDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: ${self:service}-${self:provider.stage}-evidence-disposal-recorder-dlq-depth
+      AlarmDescription: >-
+        Fires when evidenceDisposalRecorderDLQ has one or more visible
+        messages -- a disposal-recording attempt (DynamoDB Streams TTL path
+        or S3 Lifecycle EventBridge path) exhausted its retry budget without
+        producing a DisposalRecord. FR-A1-5 requires disposal to be a
+        durable, queryable record, not a best-effort attempt whose failure
+        is discoverable only in CloudWatch Logs.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value:
+            Fn::GetAtt:
+              - evidenceDisposalRecorderDLQ
+              - QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  EvidenceDisposalRecorderDLQArn:
+    Description: SQS DLQ ARN for evidenceDisposalRecorder failure destinations (A1.3/A1.4 wiring).
+    Value:
+      Fn::GetAtt:
+        - evidenceDisposalRecorderDLQ
+        - Arn
+  EvidenceDisposalRecorderDLQUrl:
+    Description: SQS DLQ URL for evidenceDisposalRecorder failure destinations (A1.3/A1.4 wiring).
+    Value:
+      Ref: evidenceDisposalRecorderDLQ

@@ -88,6 +88,31 @@ custom:
     dev: 14
     staging: 30
     prod: 90
+  # Evidence Governance Workstream A1 -- ADR Decision 5 / Non-Negotiable
+  # Invariant 3 (adr_evidence_retention_disposal_enforcement.md); Technical
+  # Design Section 5/14/17
+  # (evidence_governance_workstream_a1_retention_enforcement_technical_design.md).
+  #
+  # Per-evidence-class, per-stage custody-period duration, sourced here as
+  # the single external configuration input consumed by
+  # resources/s3.yml's LifecycleConfiguration.Days/NoncurrentDays. The
+  # custody-period duration value itself is a separate, lower-priority
+  # Product Strategy decision (AC-A1-5) and is deliberately left unset for
+  # every evidence class and every stage below -- mirroring the
+  # no-fallback-value pattern already used by logRetentionInDays directly
+  # above. Referencing an unset stage key (e.g.
+  # ${self:custom.custodyPeriodDays.raw_evidence.dev}) fails Serverless
+  # Framework variable resolution at package/deploy time with an
+  # unresolved-variable error; this is an intentional fail-closed gate, not
+  # a silent default -- the S3 lifecycle rules cannot deploy to any stage
+  # until Product Strategy supplies real values here. No custody-period
+  # duration value may be added to this block by any change other than that
+  # explicit Product Strategy decision.
+  custodyPeriodDays:
+    raw_evidence: {}
+    intelligence: {}
+    report: {}
+    certificate: {}
 
 package:
   patterns:
@@ -148,3 +173,4 @@ resources:
   - ${file(resources/iam.yml)}
   - ${file(resources/phase4-aggregation-iam.yml)}
   - ${file(resources/scheduler.yml)}
+  - ${file(resources/evidence-retention-dlq.yml)}

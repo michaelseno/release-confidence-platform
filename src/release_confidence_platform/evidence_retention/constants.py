@@ -94,3 +94,31 @@ LEGAL_HOLD_TAG_VALUE_FALSE = "false"
 
 LEGALHOLD_SK_MARKER = "#LEGALHOLD"
 DISPOSAL_SK_MARKER = "#DISPOSAL"
+
+# ---------------------------------------------------------------------------
+# CustodySweepClient (A1.2/A1.3) — cross-phase DynamoDB attribute names and
+# S3 evidence-class prefixes requiring custody-sweep coverage. Defined here
+# now for the same single-source-of-truth reason as the S3 legal-hold tag
+# constants above (Technical Design Section 6/11 amendment).
+# ---------------------------------------------------------------------------
+
+TTL_DISPOSAL_AT_ATTRIBUTE = "ttl_disposal_at"
+CUSTODY_EXPIRES_AT_ATTRIBUTE = "custody_expires_at"
+
+# S3 key prefixes requiring CustodySweepClient's per-version legal-hold
+# tagging sweep coverage (Technical Design Section 5.2/8): raw execution
+# evidence (Phase 1/2/3), intelligence (Phase 5), reports (Phase 6),
+# certificates (Phase 7). Confirmed by direct inspection of each phase's
+# write path (packages/storage/s3_client.py, reliability_intelligence/
+# identity.py, deterministic_reporting/identity.py,
+# audit_platform_integrity/identity.py::build_cert_s3_key) — each writes
+# under f"{prefix}/{client_id}/{audit_id}/...". Phase 4 aggregation is
+# DynamoDB-only in the current schema (confirmed: aggregation/repository.py
+# and aggregation/lineage.py never call any S3 client) and therefore has no
+# corresponding entry here.
+S3_EVIDENCE_CLASS_PREFIXES: tuple[str, ...] = (
+    "raw-results",
+    "intelligence",
+    "reports",
+    "integrity",
+)
