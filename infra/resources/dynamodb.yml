@@ -14,6 +14,34 @@ Resources:
           KeyType: HASH
         - AttributeName: SK
           KeyType: RANGE
+      # Evidence Governance Workstream A1 (ADR: adr_evidence_retention_disposal_enforcement.md;
+      # Technical Design: evidence_governance_workstream_a1_retention_enforcement_technical_design.md,
+      # Section 5/Decision 3). ttl_disposal_at is the only attribute
+      # DynamoDB's TTL sweep acts on -- distinct from custody_expires_at,
+      # which is never mutated by hold state changes (ADR Decision 3
+      # rationale). Legal hold is enforced by REMOVE-ing this attribute
+      # (Alternative 2, a far-future sentinel value, was rejected), not by
+      # disabling TTL platform-wide: an item with no ttl_disposal_at
+      # attribute is never a TTL deletion candidate, per standard DynamoDB
+      # TTL semantics.
+      TimeToLiveSpecification:
+        AttributeName: ttl_disposal_at
+        Enabled: true
+      # ADR Decision 4/7 -- TTL deletion is asynchronous and best-effort
+      # (~48h) with no synchronous callback. DynamoDB Streams is the
+      # standard, purpose-built mechanism for reacting to TTL-driven REMOVE
+      # events (filtered by userIdentity.principalId ==
+      # dynamodb.amazonaws.com) to produce a durable DisposalRecord
+      # (FR-A1-5/AC-A1-6). NEW_AND_OLD_IMAGES is required because the
+      # disposal recorder needs OLD_IMAGE to extract client_id/audit_id/
+      # evidence_class/created_at from the just-deleted item. The Lambda that
+      # consumes this stream (evidenceDisposalRecorder) is A1.3/A1.4 scope
+      # and does not exist yet -- enabling Streams here is a template change
+      # only and does not by itself wire up any consumer or imply this has
+      # been applied to any real AWS table (see this subphase's
+      # implementation report).
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
 Outputs:
   MetadataTableName:
     Description: Runtime metadata DynamoDB table name.
