@@ -1,5 +1,116 @@
 # Implementation Report
 
+## 0b. Correction Addendum 2 — A1.3b.1 Evidence-Class Persistence (2026-07-25, GitHub Issue #95)
+
+A second, narrowly-scoped correction round, distinct from and subsequent to
+the §0 packaging-gap addendum below. This round closes the gap that TD
+§18.1's Category 2 table itself disclosed as left open by the original
+A1.3b round: `RunMetadata`'s CREATE path persisted `custody_expires_at`/
+`ttl_disposal_at` but not `evidence_class`, even though TD §18.1 requires
+`evidence_class` to be persisted explicitly, as a plain DynamoDB attribute,
+on every Category 2 record.
+
+**What changed in this round, and nothing else:**
+
+- `packages/storage/dynamodb_client.py::_run_metadata_custody_fields()` now
+  also returns `"evidence_class": "raw_evidence"` in the dict it computes,
+  alongside the existing `custody_expires_at`/`ttl_disposal_at` keys. The
+  value is a fixed module-level constant (`_RUN_METADATA_EVIDENCE_CLASS`),
+  guarded at import time by `assert _RUN_METADATA_EVIDENCE_CLASS in
+  EVIDENCE_CLASSES` (imported from `evidence_retention/constants.py`) — not
+  a parameter, not derived from the caller's `item` dict, not overridable by
+  any caller. Because `put_started_once`'s existing merge order was already
+  `{**item, **_run_metadata_custody_fields()}` (custody-fields dict second),
+  the fixed value already wins over any same-named key in a caller-supplied
+  `item` without any further code change — verified by a new test, not
+  assumed.
+- `update_terminal`'s existing code comment (previously naming only
+  `custody_expires_at`/`ttl_disposal_at`) was extended to also name
+  `evidence_class` as a field this method must never reference. No
+  behavioral change to `update_terminal` — it already never referenced
+  `evidence_class`, since it only ever writes fields explicitly present in
+  the caller's `updates` dict.
+- No new retry/conflict-handling logic was added. A new test
+  (`test_put_started_once_repeated_call_raises_duplicate_run_id_error`)
+  verifies, rather than assumes, that the existing conditional-put +
+  `DuplicateRunIdError`-on-`ConditionalCheckFailedException` behavior is
+  unchanged: a second `put_started_once` call for the same `run_id` is
+  rejected outright, and the first-written record (including its
+  `evidence_class`) is unaffected by the rejected second attempt.
+- `tests/unit/test_run_metadata_custody_fields.py` gained 4 new tests
+  (14 total, up from 10): `evidence_class == "raw_evidence"` on CREATE;
+  `evidence_class` is a member of `EVIDENCE_CLASSES`; a caller-supplied
+  `item` containing a different `evidence_class` key cannot override the
+  hardcoded value; repeated CREATE raises `DuplicateRunIdError` and leaves
+  the first record's `evidence_class` unaffected. The existing
+  `test_update_terminal_never_touches_custody_fields` test and the existing
+  fail-closed tests were extended in place (not duplicated) to also assert
+  on `evidence_class`.
+- `packages/storage/s3_client.py` was **not modified**. The existing
+  `tests/unit/test_raw_evidence_s3_tagging.py` (3 tests) was run unmodified
+  and passes, confirming the existing raw-evidence S3 tagging is unaffected
+  by this round.
+- No custody-period values or defaults, no environment-variable wiring
+  changes, no deployment, no retroactive update or backfill/migration of any
+  pre-existing `RunMetadata` record, no `AggregationRepository.update_job`
+  change, no A1.3c/A1.3d (Phase 4–7) write-path work, and no change to the
+  bounded `EVIDENCE_CLASSES` set — all explicitly out of scope for this
+  round and confirmed untouched by `git diff --stat` (see §10-equivalent
+  validation below).
+
+**DynamoDB attribute name used: the literal string `"evidence_class"`.**
+No distinct named constant for this DynamoDB attribute existed in
+`evidence_retention/constants.py` prior to this round (only
+`EVIDENCE_CLASS_TAG_KEY = "rcp-evidence-class"`, which is the *S3 tag key*
+name used by `write_raw_results_once`'s tagging, not a DynamoDB attribute
+name). `"evidence_class"` is used directly as a dict key in
+`_run_metadata_custody_fields()`, matching TD §18.1's own table (which
+calls the attribute `evidence_class`, not a prefixed or namespaced variant)
+and matching `DisposalRecord.evidence_class`'s field name exactly in
+`evidence_retention/models.py`. No new constant was added to
+`evidence_retention/constants.py` for this — the existing `EVIDENCE_CLASSES`
+bounded set is reused for the import-time membership assertion, but the
+attribute-name literal itself was kept local to
+`packages/storage/dynamodb_client.py` to avoid touching
+`evidence_retention/constants.py` at all for a single-write-path,
+single-value use, consistent with this round's minimal-footprint scope.
+
+**Files touched by this round:** `packages/storage/dynamodb_client.py`
+(+37/-9 lines) and `tests/unit/test_run_metadata_custody_fields.py`
+(+110/-2 lines). No other file. No commit was made — the working tree is
+left as-is for QA/human review, per instruction.
+
+**Validation for this round:**
+
+```
+$ uv run pytest -q tests/unit/test_run_metadata_custody_fields.py -v
+14 passed in 0.04s
+
+$ uv run pytest -q tests/unit/test_raw_evidence_s3_tagging.py -v
+3 passed in 0.02s
+
+$ uv run pytest -q
+1543 passed, 2 skipped in 2.63s
+(1539 passed / 2 skipped after the prior §0 correction round; +4 new tests
+= 1543. Zero regressions.)
+
+$ uv run ruff check packages/storage/dynamodb_client.py tests/unit/test_run_metadata_custody_fields.py
+All checks passed!
+
+$ git diff --stat
+ packages/storage/dynamodb_client.py            |  72 +++++++++++-----
+ tests/unit/test_run_metadata_custody_fields.py | 110 +++++++++++++++++++++++--
+ 2 files changed, 155 insertions(+), 27 deletions(-)
+```
+
+No pre-existing `RunMetadata` record was mutated by this round: the change
+is confined to `_run_metadata_custody_fields()`, called only from
+`put_started_once` (the CREATE path, gated by
+`ConditionExpression="attribute_not_exists(PK) AND attribute_not_exists(SK)"`);
+`update_terminal` (the only other write path touching an existing record)
+was not modified in behavior, only in its documenting comment. No
+migration, backfill, or scan-and-update script was written or run.
+
 ## 0. Correction Addendum (2026-07-25, GitHub Issue #95)
 
 Product Strategy authorized a narrow, precisely-bounded correction to this
