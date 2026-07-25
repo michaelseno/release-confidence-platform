@@ -1,5 +1,5 @@
-"""Evidence Governance Workstream A1.3b -- packages/storage/dynamodb_client.py
-custody-field tests.
+"""Evidence Governance Workstream A1.3b/A1.3b.1 --
+packages/storage/dynamodb_client.py custody-field and evidence_class tests.
 
 Covers Technical Design Section 18.1 (Category 2 -- evidence-derived
 artifact) and Section 11 rows 1-2 (RunMetadata CREATE / FINALIZATION):
@@ -12,6 +12,10 @@ artifact) and Section 11 rows 1-2 (RunMetadata CREATE / FINALIZATION):
     without the custody fields when that configuration is unresolvable.
   * update_terminal (FINALIZATION, not regeneration -- RunMetadata has no
     regeneration path) never touches either field.
+  * (A1.3b.1) put_started_once also persists a fixed, non-caller-overridable
+    evidence_class="raw_evidence" attribute, a member of the bounded
+    EVIDENCE_CLASSES set, per TD Section 18.1's Category 2 table -- the gap
+    the TD itself disclosed as left open by the original A1.3b round.
 """
 
 from __future__ import annotations
@@ -23,11 +27,12 @@ import pytest
 from botocore.exceptions import ClientError
 
 from packages.core.constants.engine import RUN_STATUS_COMPLETED, RUN_STATUS_STARTED
-from packages.core.exceptions import StorageError
+from packages.core.exceptions import DuplicateRunIdError, StorageError
 from packages.storage.dynamodb_client import (
     CUSTODY_PERIOD_DAYS_RAW_EVIDENCE_ENV_VAR,
     DynamoDBMetadataClient,
 )
+from release_confidence_platform.evidence_retention.constants import EVIDENCE_CLASSES
 
 CLIENT_ID = "client1"
 AUDIT_ID = "audit1"
@@ -140,6 +145,53 @@ def test_custody_expires_at_is_not_hardcoded_and_scales_with_configured_days(mon
 
 
 # ---------------------------------------------------------------------------
+# put_started_once -- evidence_class (A1.3b.1 correction)
+# ---------------------------------------------------------------------------
+
+
+def test_put_started_once_sets_evidence_class_raw_evidence(monkeypatch):
+    monkeypatch.setenv(CUSTODY_PERIOD_DAYS_RAW_EVIDENCE_ENV_VAR, "30")
+    stub = CapturingDynamoStub()
+    client = DynamoDBMetadataClient("test_table", stub)
+
+    client.put_started_once(_make_item())
+
+    persisted = stub.put_item_calls[0]["Item"]
+    assert persisted["evidence_class"] == "raw_evidence"
+
+
+def test_run_metadata_evidence_class_is_member_of_bounded_evidence_classes(monkeypatch):
+    monkeypatch.setenv(CUSTODY_PERIOD_DAYS_RAW_EVIDENCE_ENV_VAR, "30")
+    stub = CapturingDynamoStub()
+    client = DynamoDBMetadataClient("test_table", stub)
+
+    client.put_started_once(_make_item())
+
+    persisted = stub.put_item_calls[0]["Item"]
+    assert persisted["evidence_class"] in EVIDENCE_CLASSES
+
+
+def test_put_started_once_caller_cannot_override_evidence_class(monkeypatch):
+    """A caller-supplied item that already contains a *different*
+    evidence_class value must not be able to override the hardcoded
+    "raw_evidence" value -- evidence_class is fixed and non-caller-
+    controlled for this write path (TD Section 18.1 Category 2)."""
+    monkeypatch.setenv(CUSTODY_PERIOD_DAYS_RAW_EVIDENCE_ENV_VAR, "30")
+    stub = CapturingDynamoStub()
+    client = DynamoDBMetadataClient("test_table", stub)
+    item = _make_item()
+    item["evidence_class"] = "certificate"  # attempted override
+
+    client.put_started_once(item)
+
+    persisted = stub.put_item_calls[0]["Item"]
+    assert persisted["evidence_class"] == "raw_evidence"
+    # The caller's own dict must also remain unmutated (existing invariant),
+    # so its attempted override value is untouched on its side too.
+    assert item["evidence_class"] == "certificate"
+
+
+# ---------------------------------------------------------------------------
 # put_started_once -- fail closed when custody-period config is unresolvable
 # ---------------------------------------------------------------------------
 
@@ -156,6 +208,11 @@ def test_put_started_once_fails_closed_when_custody_period_env_var_unset(monkeyp
     # The write must never have been attempted -- fail closed, not a
     # partial/silent write missing the custody fields.
     assert stub.put_item_calls == []
+    # All-or-nothing: no partial record (e.g. evidence_class alone, or
+    # custody fields without evidence_class) was ever written -- there is no
+    # stored item under this key at all.
+    keys = client.keys(CLIENT_ID, AUDIT_ID, RUN_ID)
+    assert (keys["PK"], keys["SK"]) not in stub.items
 
 
 @pytest.mark.parametrize("bad_value", ["", "0", "-5", "not-a-number", "3.5"])
@@ -172,6 +229,40 @@ def test_put_started_once_fails_closed_for_invalid_custody_period_values(monkeyp
 
 
 # ---------------------------------------------------------------------------
+# put_started_once -- repeated CREATE attempts (idempotency contract)
+# ---------------------------------------------------------------------------
+
+
+def test_put_started_once_repeated_call_raises_duplicate_run_id_error(monkeypatch):
+    """Verifies, not assumes, the existing public idempotency contract:
+    a second put_started_once call for the same (PK, SK) is rejected outright
+    by the existing ConditionExpression, raising DuplicateRunIdError -- not
+    converted into an idempotent no-op, and not silently accepted with a
+    second (possibly different) evidence_class value. Since evidence_class is
+    a fixed constant, not caller-supplied, there is no code path where two
+    different values could ever be attempted for the same key; this test
+    proves the rejection itself, not a hypothetical value conflict."""
+    monkeypatch.setenv(CUSTODY_PERIOD_DAYS_RAW_EVIDENCE_ENV_VAR, "30")
+    stub = CapturingDynamoStub()
+    client = DynamoDBMetadataClient("test_table", stub)
+
+    client.put_started_once(_make_item())
+    keys = client.keys(CLIENT_ID, AUDIT_ID, RUN_ID)
+    first_persisted = dict(stub.items[(keys["PK"], keys["SK"])])
+
+    with pytest.raises(DuplicateRunIdError):
+        client.put_started_once(_make_item())
+
+    # Exactly one successful put_item call was ever recorded.
+    assert len(stub.put_item_calls) == 1
+    # The first-written record (including its evidence_class) is unaffected
+    # by the second, rejected attempt.
+    stored_after_rejection = stub.items[(keys["PK"], keys["SK"])]
+    assert stored_after_rejection == first_persisted
+    assert stored_after_rejection["evidence_class"] == "raw_evidence"
+
+
+# ---------------------------------------------------------------------------
 # update_terminal -- negative test: never touches custody fields
 # ---------------------------------------------------------------------------
 
@@ -181,8 +272,8 @@ def test_update_terminal_never_touches_custody_fields(monkeypatch):
     RunMetadata record, not a regeneration -- RunMetadata has no
     regeneration path at all (Technical Design Section 18.1). This must
     never set, recompute, remove, or otherwise reference
-    custody_expires_at/ttl_disposal_at, regardless of what custody
-    configuration is present at call time."""
+    custody_expires_at/ttl_disposal_at/evidence_class, regardless of what
+    custody configuration is present at call time."""
     monkeypatch.setenv(CUSTODY_PERIOD_DAYS_RAW_EVIDENCE_ENV_VAR, "30")
     stub = CapturingDynamoStub()
     client = DynamoDBMetadataClient("test_table", stub)
@@ -192,6 +283,7 @@ def test_update_terminal_never_touches_custody_fields(monkeypatch):
     original = stub.items[(key["PK"], key["SK"])]
     original_custody_expires_at = original["custody_expires_at"]
     original_ttl_disposal_at = original["ttl_disposal_at"]
+    original_evidence_class = original["evidence_class"]
 
     client.update_terminal(
         key,
@@ -207,13 +299,15 @@ def test_update_terminal_never_touches_custody_fields(monkeypatch):
     stored = stub.items[(key["PK"], key["SK"])]
     assert stored["custody_expires_at"] == original_custody_expires_at
     assert stored["ttl_disposal_at"] == original_ttl_disposal_at
+    assert stored["evidence_class"] == original_evidence_class
     assert stored["status"] == RUN_STATUS_COMPLETED
 
     # Negative test proper: inspect the actual UpdateExpression update_terminal
-    # issued and assert neither field name was ever named in it -- not just
-    # "the stored value happens to be unchanged," which could pass even if
-    # update_terminal set the field to the same value it already had.
+    # issued and assert none of the three field names was ever named in it --
+    # not just "the stored value happens to be unchanged," which could pass
+    # even if update_terminal set the field to the same value it already had.
     update_call = stub.update_item_calls[-1]
     touched_attribute_names = set(update_call.get("ExpressionAttributeNames", {}).values())
     assert "custody_expires_at" not in touched_attribute_names
     assert "ttl_disposal_at" not in touched_attribute_names
+    assert "evidence_class" not in touched_attribute_names

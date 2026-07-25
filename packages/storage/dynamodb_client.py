@@ -12,6 +12,7 @@ from packages.core.constants.engine import RUN_STATUSES
 from packages.core.exceptions import DuplicateRunIdError, StorageError
 from release_confidence_platform.evidence_retention.constants import (
     CUSTODY_EXPIRES_AT_ATTRIBUTE,
+    EVIDENCE_CLASSES,
     TTL_DISPOSAL_AT_ATTRIBUTE,
 )
 
@@ -35,6 +36,24 @@ from release_confidence_platform.evidence_retention.constants import (
 CUSTODY_PERIOD_DAYS_RAW_EVIDENCE_ENV_VAR = "CUSTODY_PERIOD_DAYS_RAW_EVIDENCE"
 
 _SECONDS_PER_DAY = 86400
+
+# Evidence Governance Workstream A1.3b.1 (Technical Design Section 18.1,
+# Category 2 table -- corrects a gap disclosed in the TD's own text:
+# "Known gap in already-merged A1.3b ... does not persist evidence_class").
+# RunMetadata always points at raw execution evidence (raw-results/), so
+# this value is a fixed, hardcoded constant -- never a parameter to
+# _run_metadata_custody_fields(), never derived from the caller-supplied
+# item, and never overridable by any caller. It matches, by value only (the
+# two are computed independently per Section 18.1's Category 2 rule), the
+# same fixed value already hardcoded on the sibling S3 write path's tagging
+# (packages/storage/s3_client.py::_RAW_EVIDENCE_TAGGING,
+# EVIDENCE_CLASS_TAG_KEY: "raw_evidence") and DisposalRecord.evidence_class's
+# field naming convention (evidence_retention/models.py).
+_RUN_METADATA_EVIDENCE_CLASS = "raw_evidence"
+assert _RUN_METADATA_EVIDENCE_CLASS in EVIDENCE_CLASSES, (
+    f"{_RUN_METADATA_EVIDENCE_CLASS!r} must be a member of the bounded "
+    "EVIDENCE_CLASSES set (evidence_retention/constants.py)"
+)
 
 
 def _resolve_custody_period_days_env(env_var: str) -> int:
@@ -67,8 +86,9 @@ def _resolve_custody_period_days_env(env_var: str) -> int:
     )
 
 
-def _run_metadata_custody_fields() -> dict[str, int]:
-    """Compute custody_expires_at/ttl_disposal_at for a RunMetadata CREATE.
+def _run_metadata_custody_fields() -> dict[str, int | str]:
+    """Compute custody_expires_at/ttl_disposal_at/evidence_class for a
+    RunMetadata CREATE.
 
     Ordinary CREATE only: no hold can exist yet for a record that does not
     exist yet, so ttl_disposal_at is unconditionally set equal to
@@ -76,6 +96,13 @@ def _run_metadata_custody_fields() -> dict[str, int]:
     regeneration (Technical Design Section 18.4), and RunMetadata has no
     regeneration path (Section 18.1 classifies it CREATE + FINALIZATION
     only).
+
+    evidence_class is a fixed constant (_RUN_METADATA_EVIDENCE_CLASS), not
+    computed from anything -- included here so put_started_once's single
+    merge (`{**item, **_run_metadata_custody_fields()}`) both establishes
+    all three governed fields atomically and guarantees the fixed value
+    always wins over any same-named key the caller's `item` might already
+    contain (Technical Design Section 18.1 Category 2 table).
     """
     custody_period_days = _resolve_custody_period_days_env(
         CUSTODY_PERIOD_DAYS_RAW_EVIDENCE_ENV_VAR
@@ -85,6 +112,7 @@ def _run_metadata_custody_fields() -> dict[str, int]:
     return {
         CUSTODY_EXPIRES_AT_ATTRIBUTE: custody_expires_at,
         TTL_DISPOSAL_AT_ATTRIBUTE: custody_expires_at,
+        "evidence_class": _RUN_METADATA_EVIDENCE_CLASS,
     }
 
 
@@ -103,12 +131,17 @@ class DynamoDBMetadataClient:
     def put_started_once(self, item: dict[str, Any]) -> None:
         if item.get("status") not in RUN_STATUSES:
             raise StorageError("Invalid run status", "STORAGE_ERROR")
-        # Evidence Governance Workstream A1.3b: custody fields are computed
-        # here, at write time, and merged into a copy of the caller-supplied
-        # item -- the caller's own dict is never mutated (apps/backend/
-        # orchestrator/service.py retains its own reference to started_item
-        # for failure-path bookkeeping and must not observe this write's
-        # internal fields).
+        # Evidence Governance Workstream A1.3b/A1.3b.1: custody fields
+        # (custody_expires_at/ttl_disposal_at) and evidence_class are
+        # computed here, at write time, and merged into a copy of the
+        # caller-supplied item -- the caller's own dict is never mutated
+        # (apps/backend/orchestrator/service.py retains its own reference to
+        # started_item for failure-path bookkeeping and must not observe
+        # this write's internal fields). The custody-fields dict is merged
+        # second (`{**item, **_run_metadata_custody_fields()}`), so its
+        # fixed evidence_class value always overrides any same-named key the
+        # caller's item might already contain -- evidence_class is never
+        # caller-controlled for this write path.
         item_with_custody = {**item, **_run_metadata_custody_fields()}
         try:
             self._call(
@@ -123,17 +156,18 @@ class DynamoDBMetadataClient:
             raise _storage_error_from_dynamodb_client_error(exc, operation="put_item") from exc
 
     def update_terminal(self, key: dict[str, str], updates: dict[str, Any]) -> None:
-        # Evidence Governance Workstream A1.3b (Technical Design Section 11
-        # row 1 / Section 18.1, Category 2): this is a terminal-status
-        # transition on an already-existing RunMetadata record, not a
-        # regeneration (RunMetadata has no regeneration path at all -- see
-        # _run_metadata_custody_fields above). This method must NEVER
-        # recompute, set, or otherwise reference custody_expires_at or
-        # ttl_disposal_at -- only the fields the caller explicitly supplies
-        # in `updates` (status/completed_at/raw_result_s3_key/
-        # failure_summary today) are ever written. Do not add either field
-        # to this method under any circumstance without a corresponding
-        # Technical Design change.
+        # Evidence Governance Workstream A1.3b/A1.3b.1 (Technical Design
+        # Section 11 row 1 / Section 18.1, Category 2): this is a
+        # terminal-status transition on an already-existing RunMetadata
+        # record, not a regeneration (RunMetadata has no regeneration path
+        # at all -- see _run_metadata_custody_fields above). This method
+        # must NEVER recompute, set, or otherwise reference
+        # custody_expires_at, ttl_disposal_at, or evidence_class -- only the
+        # fields the caller explicitly supplies in `updates`
+        # (status/completed_at/raw_result_s3_key/failure_summary today) are
+        # ever written. Do not add any of these three fields to this method
+        # under any circumstance without a corresponding Technical Design
+        # change.
         if updates.get("status") not in RUN_STATUSES:
             raise StorageError("Invalid run status", "STORAGE_ERROR")
         expression_names = {f"#k{i}": k for i, k in enumerate(updates)}
