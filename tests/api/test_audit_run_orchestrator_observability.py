@@ -38,7 +38,7 @@ class FakeS3Api:
             raise FileNotFoundError(Key)
         return {}
 
-    def put_object(self, Bucket, Key, Body, ContentType):  # noqa: N803, ARG002
+    def put_object(self, Bucket, Key, Body, ContentType, Tagging=None):  # noqa: N803, ARG002
         self.objects[Key] = json.loads(Body.decode())
 
 
@@ -217,10 +217,10 @@ def test_validation_and_config_failures_emit_error_logs_and_structured_failure(
 
 def test_raw_result_and_metadata_failures_emit_error_logs_and_structured_failure():
     class FailingRawWrite(FakeS3Api):
-        def put_object(self, Bucket, Key, Body, ContentType):  # noqa: N803, ARG002
+        def put_object(self, Bucket, Key, Body, ContentType, Tagging=None):  # noqa: N803, ARG002
             if Key.startswith("raw-results/"):
                 raise RuntimeError("token=secret-token-value")
-            super().put_object(Bucket, Key, Body, ContentType)
+            super().put_object(Bucket, Key, Body, ContentType, Tagging)
 
     class FailingMetadata(FakeDynamo):
         def put_item(self, TableName, Item, ConditionExpression):  # noqa: N803, ARG002

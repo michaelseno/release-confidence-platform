@@ -54,7 +54,7 @@ class FakeS3Api:
             raise FileNotFoundError(Key)
         return {}
 
-    def put_object(self, Bucket, Key, Body, ContentType):  # noqa: N803, ARG002
+    def put_object(self, Bucket, Key, Body, ContentType, Tagging=None):  # noqa: N803, ARG002
         self.objects[Key] = json.loads(Body.decode())
 
 
@@ -1164,10 +1164,10 @@ def test_config_load_failure_emits_sanitized_error_log() -> None:
 
 def test_raw_result_write_failure_emits_sanitized_error_log() -> None:
     class FailingPutS3(FakeS3Api):
-        def put_object(self, Bucket, Key, Body, ContentType):  # noqa: N803, ARG002
+        def put_object(self, Bucket, Key, Body, ContentType, Tagging=None):  # noqa: N803, ARG002
             if Key.startswith("raw-results/"):
                 raise RuntimeError("token=secret-token-value")
-            super().put_object(Bucket, Key, Body, ContentType)
+            super().put_object(Bucket, Key, Body, ContentType, Tagging)
 
     logger = CapturingLogger()
     response = CoreEngineOrchestrator(

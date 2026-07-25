@@ -5,12 +5,34 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
+from urllib.parse import urlencode
 
 from botocore.exceptions import ClientError
 
 from packages.core.constants.engine import RAW_RESULT_KEY_TEMPLATE
 from packages.core.exceptions import ConfigError, DuplicateRunIdError, StorageError
 from packages.sanitization.sanitizer import sanitize
+from release_confidence_platform.evidence_retention.constants import (
+    EVIDENCE_CLASS_TAG_KEY,
+    LEGAL_HOLD_TAG_KEY,
+    LEGAL_HOLD_TAG_VALUE_FALSE,
+)
+
+# Evidence Governance Workstream A1.3b (Technical Design Section 18.1,
+# Category 1 -- governed evidence; ADR Decision 2). write_raw_results_once is
+# the sole PutObject call site for raw execution evidence (Technical Design
+# Section 11 row 3) -- every call writes a raw_evidence-class object, so
+# rcp-evidence-class is a hardcoded constant here (confirmed by the Technical
+# Design), not sourced from any per-call parameter. rcp-legal-hold always
+# starts false at write time; CustodySweepClient (already implemented,
+# A1.2) is the only code path that ever flips it to true, on legal hold
+# placement.
+_RAW_EVIDENCE_TAGGING = urlencode(
+    {
+        LEGAL_HOLD_TAG_KEY: LEGAL_HOLD_TAG_VALUE_FALSE,
+        EVIDENCE_CLASS_TAG_KEY: "raw_evidence",
+    }
+)
 
 
 class S3StorageClient:
@@ -94,6 +116,7 @@ class S3StorageClient:
                 Key=key,
                 Body=json.dumps(sanitized, sort_keys=True).encode("utf-8"),
                 ContentType="application/json",
+                Tagging=_RAW_EVIDENCE_TAGGING,
             )
         except ClientError as exc:
             raise _storage_error_from_s3_client_error(exc, key=key, operation="put_object") from exc

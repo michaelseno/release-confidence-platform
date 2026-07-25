@@ -135,6 +135,7 @@ package:
     - '../src/release_confidence_platform/core/**'
     - '../src/release_confidence_platform/audit_lifecycle/**'
     - '../src/release_confidence_platform/sanitization/**'
+    - '../src/release_confidence_platform/evidence_retention/**'
     - '!../packages/**/__pycache__/**'
     - '!../packages/**/*.pyc'
 

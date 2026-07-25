@@ -22,7 +22,7 @@ class S3:
             raise FileNotFoundError(Key)
         return {}
 
-    def put_object(self, Bucket, Key, Body, ContentType):  # noqa: N803, ARG002
+    def put_object(self, Bucket, Key, Body, ContentType, Tagging=None):  # noqa: N803, ARG002
         self.objects[Key] = json.loads(Body.decode())
 
 
