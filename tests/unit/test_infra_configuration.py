@@ -314,6 +314,27 @@ def test_serverless_defines_no_evidence_disposal_recorder_function() -> None:
     assert "evidenceDisposalRecorder" not in serverless_template.get("functions", {})
 
 
+def test_serverless_package_patterns_include_evidence_retention_module() -> None:
+    """Evidence Governance Workstream A1.3b correction (GitHub Issue #95).
+
+    `packages/storage/dynamodb_client.py` and `packages/storage/s3_client.py`
+    import `release_confidence_platform.evidence_retention.constants`. Since
+    `package.patterns` is a single global list applied to all 4 Lambda
+    functions (no per-function override exists in this file), that module
+    must be included here or any function that packages those two storage
+    modules would raise `ModuleNotFoundError` at cold start once deployed.
+    This is a static/structural assertion on the parsed YAML list -- it does
+    not invoke the Serverless CLI (see
+    test_serverless_variable_resolution_requires_serverless_cli above for why
+    that boundary exists).
+    """
+    with Path("infra/serverless.yml").open(encoding="utf-8") as fh:
+        serverless_template = yaml.safe_load(fh)
+
+    patterns = serverless_template["package"]["patterns"]
+    assert "../src/release_confidence_platform/evidence_retention/**" in patterns
+
+
 def test_custody_period_days_config_defines_no_value_for_any_stage() -> None:
     """AC-A1-5 / ADR Non-Negotiable Invariant 3: no custody-period duration
     value may exist anywhere in serverless.yml for any evidence class or any

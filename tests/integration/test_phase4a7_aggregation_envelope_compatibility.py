@@ -157,7 +157,9 @@ class _FakeS3:
             raise FileNotFoundError(Key)
         return {}
 
-    def put_object(self, Bucket: str, Key: str, Body: bytes, ContentType: str) -> None:
+    def put_object(
+        self, Bucket: str, Key: str, Body: bytes, ContentType: str, Tagging: str | None = None
+    ) -> None:
         self.objects[Key] = json.loads(Body.decode())
 
 

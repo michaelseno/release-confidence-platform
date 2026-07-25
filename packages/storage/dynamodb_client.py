@@ -2,12 +2,90 @@
 
 from __future__ import annotations
 
+import os
+from datetime import UTC, datetime
 from typing import Any
 
 from botocore.exceptions import ClientError
 
 from packages.core.constants.engine import RUN_STATUSES
 from packages.core.exceptions import DuplicateRunIdError, StorageError
+from release_confidence_platform.evidence_retention.constants import (
+    CUSTODY_EXPIRES_AT_ATTRIBUTE,
+    TTL_DISPOSAL_AT_ATTRIBUTE,
+)
+
+# Evidence Governance Workstream A1.3b (Technical Design Section 18.1,
+# Category 2 -- evidence-derived artifact; ADR Decision 5 / Non-Negotiable
+# Invariant 3).
+#
+# RunMetadata's custody_expires_at/ttl_disposal_at are computed independently
+# at this write's own time from custody_period_days.raw_evidence.${stage} --
+# never copied from the sibling raw-evidence S3 write, never hardcoded (see
+# _resolve_custody_period_days_env below).
+#
+# This env var name is a forward-declared consumption point only. No change
+# in this subphase wires it into infra/serverless.yml's provider.environment
+# block (that is an infra change, out of A1.3b's authorized scope) or into
+# any Lambda handler's client construction. Until a follow-up, separately
+# authorized change does so, this variable is unset in every deployed stage
+# (dev/staging/prod), and put_started_once fails closed on every invocation
+# rather than silently writing RunMetadata without the custody fields -- see
+# the implementation report for this subphase for the full flagged gap.
+CUSTODY_PERIOD_DAYS_RAW_EVIDENCE_ENV_VAR = "CUSTODY_PERIOD_DAYS_RAW_EVIDENCE"
+
+_SECONDS_PER_DAY = 86400
+
+
+def _resolve_custody_period_days_env(env_var: str) -> int:
+    """Read a positive-integer custody-period-days value from the environment.
+
+    Never assumes or hardcodes a duration value (ADR Non-Negotiable Invariant
+    3): the value is read fresh from the environment on every call, so a
+    later-populated environment variable takes effect without a code change.
+
+    Raises:
+        StorageError: ``CUSTODY_PERIOD_CONFIG_MISSING`` if the variable is
+            unset, empty, non-numeric, or not a positive integer -- the
+            caller must fail closed rather than write the record without
+            custody_expires_at/ttl_disposal_at.
+    """
+    raw_value = os.environ.get(env_var)
+    if raw_value is not None:
+        try:
+            parsed = int(raw_value)
+        except ValueError:
+            parsed = None
+        if parsed is not None and parsed > 0:
+            return parsed
+    raise StorageError(
+        f"Custody-period configuration is unresolvable at runtime (environment "
+        f"variable {env_var} is unset, empty, or not a positive integer); refusing "
+        "to write a governed record without custody_expires_at/ttl_disposal_at "
+        "rather than silently omitting them or assuming a duration.",
+        "CUSTODY_PERIOD_CONFIG_MISSING",
+    )
+
+
+def _run_metadata_custody_fields() -> dict[str, int]:
+    """Compute custody_expires_at/ttl_disposal_at for a RunMetadata CREATE.
+
+    Ordinary CREATE only: no hold can exist yet for a record that does not
+    exist yet, so ttl_disposal_at is unconditionally set equal to
+    custody_expires_at here -- the hold-conditional branch only applies on
+    regeneration (Technical Design Section 18.4), and RunMetadata has no
+    regeneration path (Section 18.1 classifies it CREATE + FINALIZATION
+    only).
+    """
+    custody_period_days = _resolve_custody_period_days_env(
+        CUSTODY_PERIOD_DAYS_RAW_EVIDENCE_ENV_VAR
+    )
+    now_epoch_seconds = int(datetime.now(UTC).timestamp())
+    custody_expires_at = now_epoch_seconds + custody_period_days * _SECONDS_PER_DAY
+    return {
+        CUSTODY_EXPIRES_AT_ATTRIBUTE: custody_expires_at,
+        TTL_DISPOSAL_AT_ATTRIBUTE: custody_expires_at,
+    }
 
 
 class DynamoDBMetadataClient:
@@ -25,11 +103,18 @@ class DynamoDBMetadataClient:
     def put_started_once(self, item: dict[str, Any]) -> None:
         if item.get("status") not in RUN_STATUSES:
             raise StorageError("Invalid run status", "STORAGE_ERROR")
+        # Evidence Governance Workstream A1.3b: custody fields are computed
+        # here, at write time, and merged into a copy of the caller-supplied
+        # item -- the caller's own dict is never mutated (apps/backend/
+        # orchestrator/service.py retains its own reference to started_item
+        # for failure-path bookkeeping and must not observe this write's
+        # internal fields).
+        item_with_custody = {**item, **_run_metadata_custody_fields()}
         try:
             self._call(
                 "put_item",
                 preserve_client_error_codes={"ConditionalCheckFailedException"},
-                Item=item,
+                Item=item_with_custody,
                 ConditionExpression="attribute_not_exists(PK) AND attribute_not_exists(SK)",
             )
         except ClientError as exc:
@@ -38,6 +123,17 @@ class DynamoDBMetadataClient:
             raise _storage_error_from_dynamodb_client_error(exc, operation="put_item") from exc
 
     def update_terminal(self, key: dict[str, str], updates: dict[str, Any]) -> None:
+        # Evidence Governance Workstream A1.3b (Technical Design Section 11
+        # row 1 / Section 18.1, Category 2): this is a terminal-status
+        # transition on an already-existing RunMetadata record, not a
+        # regeneration (RunMetadata has no regeneration path at all -- see
+        # _run_metadata_custody_fields above). This method must NEVER
+        # recompute, set, or otherwise reference custody_expires_at or
+        # ttl_disposal_at -- only the fields the caller explicitly supplies
+        # in `updates` (status/completed_at/raw_result_s3_key/
+        # failure_summary today) are ever written. Do not add either field
+        # to this method under any circumstance without a corresponding
+        # Technical Design change.
         if updates.get("status") not in RUN_STATUSES:
             raise StorageError("Invalid run status", "STORAGE_ERROR")
         expression_names = {f"#k{i}": k for i, k in enumerate(updates)}

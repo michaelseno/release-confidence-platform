@@ -24,6 +24,19 @@ class ConditionalWriteError(StorageError):
         super().__init__(message, "CONDITIONAL_WRITE_FAILED")
 
 
+# Evidence Governance Workstream A1.3b (Technical Design Section 18.7). This
+# is a rejection guard, not a full allowlist of update_job's legitimate
+# field vocabulary -- AggregationJob is Category 3 (operational coordination
+# metadata, Technical Design Section 18.1) and is permanently excluded from
+# custody-field treatment. update_job's generic `dict[str, Any]` -> dynamic
+# UpdateExpression construction has no field allowlist otherwise, so nothing
+# else stops a future caller from smuggling either retention-governed field
+# through it. Tactical and local to this specific gap -- see Section 18.7's
+# own clarification that this is not a precedent for retrofitting similar
+# guards onto other update methods.
+_RETENTION_GOVERNED_FIELD_NAMES = frozenset({"ttl_disposal_at", "custody_expires_at"})
+
+
 class AggregationRepository:
     def __init__(self, table_name: str, dynamodb_client: Any):
         self.table_name = table_name
@@ -67,6 +80,14 @@ class AggregationRepository:
         return self._call("get_item", Key=key).get("Item")
 
     def update_job(self, key: dict[str, str], updates: dict[str, Any]) -> None:
+        forbidden = _RETENTION_GOVERNED_FIELD_NAMES & updates.keys()
+        if forbidden:
+            raise AssertionError(
+                "AggregationJob.update_job must never set retention-governed "
+                f"fields {sorted(forbidden)!r}; AggregationJob is Category 3 "
+                "(operational coordination metadata) and is permanently "
+                "excluded from custody-field treatment."
+            )
         names = {f"#f{i}": key for i, key in enumerate(updates)}
         values = {f":v{i}": value for i, value in enumerate(sanitize(updates).values())}
         assignments = ", ".join(f"{name} = :v{i}" for i, name in enumerate(names))
