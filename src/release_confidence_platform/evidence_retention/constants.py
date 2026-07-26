@@ -122,3 +122,75 @@ S3_EVIDENCE_CLASS_PREFIXES: tuple[str, ...] = (
     "reports",
     "integrity",
 )
+
+# ---------------------------------------------------------------------------
+# LegalHold.sweep_status bounded set (Legal-Hold Correction B1; Technical
+# Design Section 19.1; ADR Non-Negotiable Invariant 23).
+#
+# Tracks completion of the *current* hold episode's pre-existing-record
+# sweep, independent of `status` (ADR Decision 9): `status=ACTIVE` answers
+# "is this audit currently held"; `sweep_status` answers "has the sweep for
+# the current episode finished". Reset to PENDING at the start of every
+# PLACE and every RELEASE (each transition has its own sweep). B1 defines
+# and stores this field and gates resumability on it (Technical Design
+# Section 19.2 step 4 / 19.3 step 2); B1 does not itself perform any sweep
+# (that remains CustodySweepClient's, already-merged, unchanged scope) or
+# the S3 marker/reconciliation steps that also drive this field toward
+# COMPLETE/FAILED (Legal-Hold Correction B2, not part of B1).
+# ---------------------------------------------------------------------------
+
+SWEEP_STATUS_PENDING = "PENDING"
+SWEEP_STATUS_IN_PROGRESS = "IN_PROGRESS"
+SWEEP_STATUS_COMPLETE = "COMPLETE"
+SWEEP_STATUS_FAILED = "FAILED"
+SWEEP_STATUSES: frozenset[str] = frozenset({
+    SWEEP_STATUS_PENDING,
+    SWEEP_STATUS_IN_PROGRESS,
+    SWEEP_STATUS_COMPLETE,
+    SWEEP_STATUS_FAILED,
+})
+
+# ---------------------------------------------------------------------------
+# Canary-marker status bounded set (Technical Design Section 19.5.1).
+#
+# B1 scope note: these fields (marker_status on LegalHoldEvent;
+# marker_s3_key/marker_confirmed_last_modified on both LegalHold and
+# LegalHoldEvent) are additive plumbing only -- B1 adds them to the models
+# and repository method signatures so Legal-Hold Correction B2 (the S3
+# canary-marker mechanism itself) has somewhere durable to persist to. B1
+# has no S3 client dependency anywhere and never sets marker_status to
+# anything other than its initial PENDING default.
+# ---------------------------------------------------------------------------
+
+MARKER_STATUS_PENDING = "PENDING"
+MARKER_STATUS_CONFIRMED = "CONFIRMED"
+MARKER_STATUS_FAILED = "FAILED"
+MARKER_STATUSES: frozenset[str] = frozenset({
+    MARKER_STATUS_PENDING,
+    MARKER_STATUS_CONFIRMED,
+    MARKER_STATUS_FAILED,
+})
+
+# ---------------------------------------------------------------------------
+# DynamoDB TransactWriteItems hold-state coordination (Technical Design
+# Section 19.4 step 4/5, Section 19.5.6). An engineering reliability choice
+# (Technical Design Section 19.4 step 4), not a product tradeoff -- shared
+# by both the DynamoDB governed-record coordination mechanism (B1 scope) and
+# canary-marker establishment retry (B2 scope, reuses the same reasoned
+# value per Technical Design Section 19.5.6 rather than re-justifying it).
+# ---------------------------------------------------------------------------
+
+MAX_HOLD_COORDINATION_RETRY_ATTEMPTS = 3
+
+# ---------------------------------------------------------------------------
+# Governed error classification for retry exhaustion (Technical Design
+# Section 19.15). Both codes are defined here now so the classification
+# table is complete and consistent; B1's own code paths only ever raise
+# HOLD_STATE_CONCURRENCY_EXCEEDED_CODE -- HOLD_MARKER_ESTABLISHMENT_FAILED_CODE
+# is reserved for the S3 canary-marker mechanism (Legal-Hold Correction B2,
+# not part of B1), which never runs in B1 since B1 has no S3 client
+# dependency at all.
+# ---------------------------------------------------------------------------
+
+HOLD_STATE_CONCURRENCY_EXCEEDED_CODE = "HOLD_STATE_CONCURRENCY_EXCEEDED"
+HOLD_MARKER_ESTABLISHMENT_FAILED_CODE = "HOLD_MARKER_ESTABLISHMENT_FAILED"

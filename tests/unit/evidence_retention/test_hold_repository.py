@@ -2,6 +2,14 @@
 
 Mirrors the test style of tests/unit/audit_platform_integrity/test_repository.py
 for _assert_phase7_sk.
+
+Legal-Hold Correction B1: write_hold_event/legal_hold_event_key/
+get_legal_hold_event now require an explicit hold_version parameter (ADR
+Non-Negotiable Invariant 25), and upsert_hold now requires explicit
+hold_version/sweep_status parameters (ADR Invariant 12; Technical Design
+Section 19.1). The tests below are updated for those signature changes and
+extended with new coverage for the corrected SK shape, the new fields, and
+required behavior 13 (existing A1.1 namespace guards remain intact).
 """
 
 from __future__ import annotations
@@ -27,7 +35,8 @@ def _make_repo() -> HoldRepository:
 
 
 # ---------------------------------------------------------------------------
-# _assert_retention_sk direct tests
+# _assert_retention_sk direct tests (required behavior 13: existing A1.1
+# namespace guards remain intact under the corrected SK shape)
 # ---------------------------------------------------------------------------
 
 
@@ -38,8 +47,10 @@ def test_assert_retention_sk_accepts_legal_hold_current_state_sk():
 
 
 def test_assert_retention_sk_accepts_legal_hold_event_sk():
-    """LegalHoldEvent SK (#LEGALHOLD#{hold_id}) must pass."""
-    sk = f"AUDIT#{_AUDIT_ID}#LEGALHOLD#{_HOLD_ID}"
+    """LegalHoldEvent SK (#LEGALHOLD#{hold_id}#{hold_version}) must pass
+    under the corrected, hold_version-discriminated shape (ADR Invariant 25).
+    """
+    sk = f"AUDIT#{_AUDIT_ID}#LEGALHOLD#{_HOLD_ID}#1"
     _assert_retention_sk(sk)  # Must not raise
 
 
@@ -72,6 +83,15 @@ def test_assert_retention_sk_rejects_sk_with_both_markers():
         _assert_retention_sk(bad_sk)
 
 
+def test_assert_retention_sk_rejects_disposal_sk_even_with_hold_version_shape():
+    """A #DISPOSAL#-shaped SK must still be rejected even if it happens to
+    carry a trailing numeric segment resembling a hold_version — the guard
+    must key off the namespace markers only, not the corrected SK's shape."""
+    bad_sk = f"AUDIT#{_AUDIT_ID}#DISPOSAL#{_DISPOSAL_ID}#1"
+    with pytest.raises(AssertionError):
+        _assert_retention_sk(bad_sk)
+
+
 # ---------------------------------------------------------------------------
 # Key construction helpers
 # ---------------------------------------------------------------------------
@@ -86,13 +106,24 @@ def test_legal_hold_key_shape():
     }
 
 
-def test_legal_hold_event_key_shape():
+def test_legal_hold_event_key_shape_includes_hold_version():
     repo = _make_repo()
-    key = repo.legal_hold_event_key(_CLIENT_ID, _AUDIT_ID, _HOLD_ID)
+    key = repo.legal_hold_event_key(_CLIENT_ID, _AUDIT_ID, _HOLD_ID, 1)
     assert key == {
         "PK": f"CLIENT#{_CLIENT_ID}",
-        "SK": f"AUDIT#{_AUDIT_ID}#LEGALHOLD#{_HOLD_ID}",
+        "SK": f"AUDIT#{_AUDIT_ID}#LEGALHOLD#{_HOLD_ID}#1",
     }
+
+
+def test_legal_hold_event_key_distinct_for_place_and_release_of_same_episode():
+    """The direct regression test for the defect ADR Invariant 25 fixes:
+    a PLACE (hold_version=1) and its paired RELEASE (hold_version=2), which
+    share the same hold_id, must never produce the same SK."""
+    repo = _make_repo()
+    place_key = repo.legal_hold_event_key(_CLIENT_ID, _AUDIT_ID, _HOLD_ID, 1)
+    release_key = repo.legal_hold_event_key(_CLIENT_ID, _AUDIT_ID, _HOLD_ID, 2)
+    assert place_key != release_key
+    assert place_key["SK"] != release_key["SK"]
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +140,13 @@ def test_get_legal_hold_returns_none_when_not_found():
 
 def test_get_legal_hold_returns_item_when_found():
     repo = _make_repo()
-    item = {"PK": f"CLIENT#{_CLIENT_ID}", "SK": f"AUDIT#{_AUDIT_ID}#LEGALHOLD", "status": "ACTIVE"}
+    item = {
+        "PK": f"CLIENT#{_CLIENT_ID}",
+        "SK": f"AUDIT#{_AUDIT_ID}#LEGALHOLD",
+        "status": "ACTIVE",
+        "hold_version": 1,
+        "sweep_status": "PENDING",
+    }
     with patch.object(repo, "_get_item", return_value=item):
         result = repo.get_legal_hold(_CLIENT_ID, _AUDIT_ID)
     assert result == item
@@ -133,8 +170,22 @@ def test_get_legal_hold_uses_correct_key():
 def test_get_legal_hold_event_returns_none_when_not_found():
     repo = _make_repo()
     with patch.object(repo, "_get_item", return_value=None):
-        result = repo.get_legal_hold_event(_CLIENT_ID, _AUDIT_ID, _HOLD_ID)
+        result = repo.get_legal_hold_event(_CLIENT_ID, _AUDIT_ID, _HOLD_ID, 1)
     assert result is None
+
+
+def test_get_legal_hold_event_uses_hold_version_discriminated_key():
+    repo = _make_repo()
+    captured = {}
+
+    def fake_get_item(key):
+        captured["key"] = key
+        return None
+
+    with patch.object(repo, "_get_item", side_effect=fake_get_item):
+        repo.get_legal_hold_event(_CLIENT_ID, _AUDIT_ID, _HOLD_ID, 2)
+
+    assert captured["key"]["SK"] == f"AUDIT#{_AUDIT_ID}#LEGALHOLD#{_HOLD_ID}#2"
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +205,7 @@ def test_write_hold_event_calls_put_once():
             client_id=_CLIENT_ID,
             audit_id=_AUDIT_ID,
             hold_id=_HOLD_ID,
+            hold_version=1,
             action="PLACE",
             actor="operator_a",
             reason="litigation hold",
@@ -164,10 +216,38 @@ def test_write_hold_event_calls_put_once():
 
     item = captured["item"]
     assert item["PK"] == f"CLIENT#{_CLIENT_ID}"
-    assert item["SK"] == f"AUDIT#{_AUDIT_ID}#LEGALHOLD#{_HOLD_ID}"
+    assert item["SK"] == f"AUDIT#{_AUDIT_ID}#LEGALHOLD#{_HOLD_ID}#1"
     assert item["record_type"] == "legal_hold_event"
+    assert item["hold_version"] == 1
     assert item["action"] == "PLACE"
     assert item["s3_versions_retagged_count"] == 3
+
+
+def test_write_hold_event_defaults_marker_fields_to_pending_plumbing_state():
+    """Legal-Hold Correction B1 never sets marker_status to anything other
+    than its initial default -- proving the plumbing default here, not any
+    marker-establishment behavior (B2 scope)."""
+    repo = _make_repo()
+    captured = {}
+
+    with patch.object(repo, "_put_once", side_effect=lambda item: captured.update(item=item)):
+        repo.write_hold_event(
+            client_id=_CLIENT_ID,
+            audit_id=_AUDIT_ID,
+            hold_id=_HOLD_ID,
+            hold_version=1,
+            action="PLACE",
+            actor="operator_a",
+            reason="litigation hold",
+            timestamp="2026-07-18T00:00:00.000Z",
+            s3_versions_retagged_count=0,
+            dynamodb_items_updated_count=0,
+        )
+
+    item = captured["item"]
+    assert item["marker_status"] == "PENDING"
+    assert item["marker_s3_key"] is None
+    assert item["marker_confirmed_last_modified"] is None
 
 
 def test_write_hold_event_asserts_retention_sk():
@@ -178,6 +258,7 @@ def test_write_hold_event_asserts_retention_sk():
             client_id=_CLIENT_ID,
             audit_id=_AUDIT_ID,
             hold_id=_HOLD_ID,
+            hold_version=2,
             action="RELEASE",
             actor="operator_a",
             reason="litigation hold released",
@@ -185,6 +266,44 @@ def test_write_hold_event_asserts_retention_sk():
             s3_versions_retagged_count=0,
             dynamodb_items_updated_count=0,
         )
+
+
+def test_write_hold_event_place_and_release_of_same_episode_use_distinct_keys():
+    """End-to-end regression proof (required behavior 4): a PLACE and its
+    paired RELEASE, sharing hold_id, never write to the same SK."""
+    repo = _make_repo()
+    captured_items = []
+
+    with patch.object(
+        repo, "_put_once", side_effect=lambda item: captured_items.append(item)
+    ):
+        repo.write_hold_event(
+            client_id=_CLIENT_ID,
+            audit_id=_AUDIT_ID,
+            hold_id=_HOLD_ID,
+            hold_version=1,
+            action="PLACE",
+            actor="operator_a",
+            reason="litigation hold",
+            timestamp="2026-07-18T00:00:00.000Z",
+            s3_versions_retagged_count=0,
+            dynamodb_items_updated_count=0,
+        )
+        repo.write_hold_event(
+            client_id=_CLIENT_ID,
+            audit_id=_AUDIT_ID,
+            hold_id=_HOLD_ID,
+            hold_version=2,
+            action="RELEASE",
+            actor="operator_a",
+            reason="litigation hold released",
+            timestamp="2026-07-19T00:00:00.000Z",
+            s3_versions_retagged_count=0,
+            dynamodb_items_updated_count=0,
+        )
+
+    assert len(captured_items) == 2
+    assert captured_items[0]["SK"] != captured_items[1]["SK"]
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +324,8 @@ def test_upsert_hold_calls_put_item():
             audit_id=_AUDIT_ID,
             status="ACTIVE",
             hold_id=_HOLD_ID,
+            hold_version=1,
+            sweep_status="PENDING",
             placed_at="2026-07-18T00:00:00.000Z",
             placed_by="operator_a",
             reason="litigation hold",
@@ -216,9 +337,13 @@ def test_upsert_hold_calls_put_item():
     assert item["SK"] == f"AUDIT#{_AUDIT_ID}#LEGALHOLD"
     assert item["record_type"] == "legal_hold"
     assert item["status"] == "ACTIVE"
+    assert item["hold_version"] == 1
+    assert item["sweep_status"] == "PENDING"
     assert item["hold_count"] == 1
     assert item["released_at"] is None
     assert item["released_by"] is None
+    assert item["marker_s3_key"] is None
+    assert item["marker_confirmed_last_modified"] is None
 
 
 def test_upsert_hold_released_state():
@@ -234,6 +359,8 @@ def test_upsert_hold_released_state():
             audit_id=_AUDIT_ID,
             status="RELEASED",
             hold_id=_HOLD_ID,
+            hold_version=2,
+            sweep_status="PENDING",
             placed_at="2026-07-18T00:00:00.000Z",
             placed_by="operator_a",
             reason="litigation hold",
@@ -244,6 +371,7 @@ def test_upsert_hold_released_state():
 
     item = captured["item"]
     assert item["status"] == "RELEASED"
+    assert item["hold_version"] == 2
     assert item["released_at"] == "2026-07-19T00:00:00.000Z"
     assert item["released_by"] == "operator_b"
 
@@ -257,8 +385,35 @@ def test_upsert_hold_asserts_retention_sk():
             audit_id=_AUDIT_ID,
             status="ACTIVE",
             hold_id=_HOLD_ID,
+            hold_version=1,
+            sweep_status="PENDING",
             placed_at="2026-07-18T00:00:00.000Z",
             placed_by="operator_a",
             reason="litigation hold",
             hold_count=1,
         )
+
+
+def test_upsert_hold_persists_sweep_status_independent_of_status():
+    """Required behavior 7: status and sweep_status are never conflated."""
+    repo = _make_repo()
+    captured = {}
+
+    with patch.object(repo, "_put_item", side_effect=lambda item: captured.update(item=item)):
+        repo.upsert_hold(
+            client_id=_CLIENT_ID,
+            audit_id=_AUDIT_ID,
+            status="ACTIVE",
+            hold_id=_HOLD_ID,
+            hold_version=3,
+            sweep_status="FAILED",
+            placed_at="2026-07-18T00:00:00.000Z",
+            placed_by="operator_a",
+            reason="litigation hold",
+            hold_count=2,
+        )
+
+    # status=ACTIVE and sweep_status=FAILED coexist -- neither is derived
+    # from, or overrides, the other.
+    assert captured["item"]["status"] == "ACTIVE"
+    assert captured["item"]["sweep_status"] == "FAILED"
