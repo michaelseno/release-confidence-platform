@@ -42,6 +42,8 @@ def _valid_legal_hold_data(**overrides: Any) -> dict[str, Any]:
         "audit_id": _AUDIT_ID,
         "status": "ACTIVE",
         "hold_id": hold_id,
+        "hold_version": 1,
+        "sweep_status": "PENDING",
         "placed_at": "2026-07-18T00:00:00.000Z",
         "placed_by": "operator_a",
         "reason": "litigation hold",
@@ -53,11 +55,13 @@ def _valid_legal_hold_data(**overrides: Any) -> dict[str, Any]:
 
 def _valid_legal_hold_event_data(**overrides: Any) -> dict[str, Any]:
     hold_id = generate_hold_id()
+    hold_version = overrides.get("hold_version", 1)
     data = {
         "PK": f"CLIENT#{_CLIENT_ID}",
-        "SK": f"AUDIT#{_AUDIT_ID}#LEGALHOLD#{hold_id}",
+        "SK": f"AUDIT#{_AUDIT_ID}#LEGALHOLD#{hold_id}#{hold_version}",
         "record_type": "legal_hold_event",
         "hold_id": hold_id,
+        "hold_version": hold_version,
         "client_id": _CLIENT_ID,
         "audit_id": _AUDIT_ID,
         "action": "PLACE",
@@ -146,6 +150,47 @@ def test_legal_hold_rejects_hold_count_below_one():
         LegalHold(**data)
 
 
+# ---------------------------------------------------------------------------
+# LegalHold — hold_version / sweep_status (Legal-Hold Correction B1;
+# Technical Design Section 19.1; ADR Non-Negotiable Invariants 12/23)
+# ---------------------------------------------------------------------------
+
+
+def test_legal_hold_accepts_all_bounded_sweep_statuses():
+    for sweep_status in ("PENDING", "IN_PROGRESS", "COMPLETE", "FAILED"):
+        hold = LegalHold(**_valid_legal_hold_data(sweep_status=sweep_status))
+        assert hold.sweep_status == sweep_status
+
+
+def test_legal_hold_rejects_unknown_sweep_status():
+    data = _valid_legal_hold_data(sweep_status="DONE")
+    with pytest.raises(ValidationError):
+        LegalHold(**data)
+
+
+def test_legal_hold_rejects_hold_version_below_one():
+    data = _valid_legal_hold_data(hold_version=0)
+    with pytest.raises(ValidationError):
+        LegalHold(**data)
+
+
+def test_legal_hold_status_and_sweep_status_are_independent_fields():
+    """Required behavior 7/8: status=ACTIVE with sweep_status still PENDING
+    must construct validly -- status is never derived from sweep_status or
+    vice versa, and ACTIVE alone must not be conflated with fully enforced."""
+    hold = LegalHold(**_valid_legal_hold_data(status="ACTIVE", sweep_status="PENDING"))
+    assert hold.status == "ACTIVE"
+    assert hold.sweep_status == "PENDING"
+
+
+def test_legal_hold_marker_fields_default_to_none():
+    """B1 plumbing default -- B2 (S3 canary marker) is the only mechanism
+    that ever sets these to a non-None value."""
+    hold = LegalHold(**_valid_legal_hold_data())
+    assert hold.marker_s3_key is None
+    assert hold.marker_confirmed_last_modified is None
+
+
 def test_legal_hold_to_dict_returns_plain_dict():
     hold = LegalHold(**_valid_legal_hold_data())
     result = hold.to_dict()
@@ -199,6 +244,52 @@ def test_legal_hold_event_rejects_negative_dynamodb_count():
     data = _valid_legal_hold_event_data(dynamodb_items_updated_count=-1)
     with pytest.raises(ValidationError):
         LegalHoldEvent(**data)
+
+
+# ---------------------------------------------------------------------------
+# LegalHoldEvent — hold_version / marker_* (Legal-Hold Correction B1; ADR
+# Non-Negotiable Invariant 25; Technical Design Section 19.5.1)
+# ---------------------------------------------------------------------------
+
+
+def test_legal_hold_event_rejects_hold_version_below_one():
+    data = _valid_legal_hold_event_data(hold_version=0)
+    with pytest.raises(ValidationError):
+        LegalHoldEvent(**data)
+
+
+def test_legal_hold_event_marker_status_defaults_to_pending():
+    event = LegalHoldEvent(**_valid_legal_hold_event_data())
+    assert event.marker_status == "PENDING"
+    assert event.marker_s3_key is None
+    assert event.marker_confirmed_last_modified is None
+
+
+def test_legal_hold_event_accepts_all_bounded_marker_statuses():
+    for marker_status in ("PENDING", "CONFIRMED", "FAILED"):
+        event = LegalHoldEvent(**_valid_legal_hold_event_data(marker_status=marker_status))
+        assert event.marker_status == marker_status
+
+
+def test_legal_hold_event_rejects_unknown_marker_status():
+    data = _valid_legal_hold_event_data(marker_status="UNKNOWN")
+    with pytest.raises(ValidationError):
+        LegalHoldEvent(**data)
+
+
+def test_legal_hold_event_place_and_release_of_same_hold_id_have_distinct_hold_version():
+    """Required behavior 2/4: PLACE and its paired RELEASE share hold_id but
+    must carry distinct hold_version values, and therefore distinct SKs."""
+    hold_id = generate_hold_id()
+    place = LegalHoldEvent(
+        **_valid_legal_hold_event_data(hold_id=hold_id, hold_version=1, action="PLACE")
+    )
+    release = LegalHoldEvent(
+        **_valid_legal_hold_event_data(hold_id=hold_id, hold_version=2, action="RELEASE")
+    )
+    assert place.hold_id == release.hold_id
+    assert place.hold_version != release.hold_version
+    assert place.SK != release.SK
 
 
 def test_legal_hold_event_to_dict_returns_plain_dict():

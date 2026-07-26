@@ -25,6 +25,25 @@ they are deferred to whichever later subphase (A1.2/A1.3) implements
 RetentionService; that implementation will need its own, differently-scoped
 access path for those operations. See the A1.1 implementation report for the
 full rationale.
+
+Scope note (Legal-Hold Correction B1): this repository gains the
+hold_version / sweep_status / marker_* fields Technical Design Section 19.1
+and Section 19.5.1 require on LegalHold, and hold_version / marker_* on
+LegalHoldEvent, plus the required LegalHoldEvent SK correction (ADR
+Non-Negotiable Invariant 25; Technical Design Section 19.5.1's "Required
+consequence", Section 19.5.2): the SK is now
+AUDIT#{audit_id}#LEGALHOLD#{hold_id}#{hold_version}, not hold_id alone —
+hold_id is held constant across a PLACE/RELEASE episode pair (ADR Invariant
+21), so hold_id alone would make RELEASE's event write collide with its
+paired PLACE's at the identical key. legal_hold_event_key(),
+get_legal_hold_event(), and write_hold_event() all gain a required
+hold_version parameter as a direct result. This remains strict CRUD only —
+still no S3 access, no cross-phase DynamoDB access, and _assert_retention_sk()
+is unchanged. The PLACE/RELEASE transition *sequencing* that decides what
+hold_id/hold_version/sweep_status value to pass into these CRUD methods on a
+given invocation (Technical Design Section 19.2/19.3) lives in
+hold_transitions.py, not here, preserving this module's existing "CRUD only"
+scope.
 """
 
 from __future__ import annotations
@@ -39,6 +58,7 @@ from release_confidence_platform.evidence_retention.constants import (
     LEGAL_HOLD_EVENT_RECORD_TYPE,
     LEGAL_HOLD_RECORD_TYPE,
     LEGALHOLD_SK_MARKER,
+    MARKER_STATUS_PENDING,
 )
 from release_confidence_platform.storage.dynamodb_codec import (
     decode_dynamodb_response,
@@ -96,12 +116,17 @@ class HoldRepository:
         }
 
     def legal_hold_event_key(
-        self, client_id: str, audit_id: str, hold_id: str
+        self, client_id: str, audit_id: str, hold_id: str, hold_version: int
     ) -> dict[str, str]:
-        """Build the PK/SK key dict for a LegalHoldEvent record."""
+        """Build the PK/SK key dict for a LegalHoldEvent record.
+
+        hold_version is a required per-transition discriminator (ADR
+        Non-Negotiable Invariant 25) — hold_id alone is insufficient once
+        Invariant 21 holds it constant across a PLACE/RELEASE episode pair.
+        """
         return {
             "PK": f"CLIENT#{client_id}",
-            "SK": f"AUDIT#{audit_id}#LEGALHOLD#{hold_id}",
+            "SK": f"AUDIT#{audit_id}#LEGALHOLD#{hold_id}#{hold_version}",
         }
 
     # ------------------------------------------------------------------
@@ -116,13 +141,15 @@ class HoldRepository:
         return self._get_item(self.legal_hold_key(client_id, audit_id))
 
     def get_legal_hold_event(
-        self, client_id: str, audit_id: str, hold_id: str
+        self, client_id: str, audit_id: str, hold_id: str, hold_version: int
     ) -> dict[str, Any] | None:
-        """Read a single LegalHoldEvent record by its hold_id.
+        """Read a single LegalHoldEvent record by its (hold_id, hold_version).
 
         Returns the record dict if found, or None if absent.
         """
-        return self._get_item(self.legal_hold_event_key(client_id, audit_id, hold_id))
+        return self._get_item(
+            self.legal_hold_event_key(client_id, audit_id, hold_id, hold_version)
+        )
 
     # ------------------------------------------------------------------
     # Writes — LegalHoldEvent (immutable log)
@@ -133,26 +160,45 @@ class HoldRepository:
         client_id: str,
         audit_id: str,
         hold_id: str,
+        hold_version: int,
         action: str,
         actor: str,
         reason: str,
         timestamp: str,
         s3_versions_retagged_count: int,
         dynamodb_items_updated_count: int,
+        marker_s3_key: str | None = None,
+        marker_status: str = MARKER_STATUS_PENDING,
+        marker_confirmed_last_modified: str | None = None,
     ) -> None:
         """Write a new LegalHoldEvent record (conditional, write-once).
 
+        hold_version is a required per-transition SK discriminator (ADR
+        Non-Negotiable Invariant 25) — see legal_hold_event_key(). Every
+        PLACE and every RELEASE of a given audit identity must pass a
+        distinct hold_version (ADR Invariant 12's monotonicity is what makes
+        this write-once-per-key guarantee hold across an entire episode,
+        including a PLACE/RELEASE pair sharing one hold_id, per Invariant 21).
+
+        marker_s3_key/marker_status/marker_confirmed_last_modified are
+        additive plumbing for the S3 canary-marker mechanism (Technical
+        Design Section 19.5.1; Legal-Hold Correction B2, not part of B1).
+        Callers in B1's own scope never pass a value other than the
+        defaults.
+
         Raises:
             AssertionError: If the computed SK is not a retention SK.
-            ConditionalWriteError: If an event with this hold_id already exists.
+            ConditionalWriteError: If an event with this
+                (hold_id, hold_version) already exists.
             StorageError: On DynamoDB client or request failure.
         """
-        key = self.legal_hold_event_key(client_id, audit_id, hold_id)
+        key = self.legal_hold_event_key(client_id, audit_id, hold_id, hold_version)
         _assert_retention_sk(key["SK"])
         item = {
             **key,
             "record_type": LEGAL_HOLD_EVENT_RECORD_TYPE,
             "hold_id": hold_id,
+            "hold_version": hold_version,
             "client_id": client_id,
             "audit_id": audit_id,
             "action": action,
@@ -161,6 +207,9 @@ class HoldRepository:
             "timestamp": timestamp,
             "s3_versions_retagged_count": s3_versions_retagged_count,
             "dynamodb_items_updated_count": dynamodb_items_updated_count,
+            "marker_s3_key": marker_s3_key,
+            "marker_status": marker_status,
+            "marker_confirmed_last_modified": marker_confirmed_last_modified,
         }
         self._put_once(item)
 
@@ -174,22 +223,41 @@ class HoldRepository:
         audit_id: str,
         status: str,
         hold_id: str,
+        hold_version: int,
+        sweep_status: str,
         placed_at: str,
         placed_by: str,
         reason: str,
         hold_count: int,
         released_at: str | None = None,
         released_by: str | None = None,
+        marker_s3_key: str | None = None,
+        marker_confirmed_last_modified: str | None = None,
     ) -> None:
         """Write or update the authoritative LegalHold current-state record.
 
         PutItem overwrites any existing record for the same audit identity —
         analogous to CertificationMetadata's write_cert_metadata_complete in
-        audit_platform_integrity/repository.py. The first placement and every
-        subsequent place/release cycle both go through this same method; the
-        caller (RetentionService, out of scope for A1.1) is responsible for
-        computing hold_count and deciding placed_at/released_at semantics
-        across cycles.
+        audit_platform_integrity/repository.py. This remains a plain,
+        unconditional PutItem (Technical Design Section 19.1's "effective
+        ordering" reasoning does not require a condition here — the
+        TransactWriteItems ConditionCheck mechanism, Technical Design Section
+        19.4, protects *other* governed records' writes against this record's
+        hold_version, not this record's own PLACE/RELEASE transition).
+
+        hold_version / sweep_status (ADR Non-Negotiable Invariant 12; ADR
+        Decision 9; Technical Design Section 19.1) are now required, explicit
+        parameters — every call must state them, with no default, so a
+        caller cannot accidentally omit incrementing hold_version or resetting
+        sweep_status on a transition. The caller (hold_transitions.py's
+        HoldTransitions, or eventually RetentionService) is responsible for
+        computing hold_version/hold_count and deciding
+        placed_at/released_at semantics across cycles.
+
+        marker_s3_key/marker_confirmed_last_modified are additive plumbing
+        for the current transition's S3 canary marker (Technical Design
+        Section 19.5.1; Legal-Hold Correction B2, not part of B1). Callers in
+        B1's own scope never pass a non-None value.
 
         Raises:
             AssertionError: If the computed SK is not a retention SK.
@@ -204,12 +272,16 @@ class HoldRepository:
             "audit_id": audit_id,
             "status": status,
             "hold_id": hold_id,
+            "hold_version": hold_version,
+            "sweep_status": sweep_status,
             "placed_at": placed_at,
             "placed_by": placed_by,
             "reason": reason,
             "hold_count": hold_count,
             "released_at": released_at,
             "released_by": released_by,
+            "marker_s3_key": marker_s3_key,
+            "marker_confirmed_last_modified": marker_confirmed_last_modified,
         }
         self._put_item(item)
 

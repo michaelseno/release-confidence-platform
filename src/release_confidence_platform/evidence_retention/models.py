@@ -39,6 +39,9 @@ from release_confidence_platform.evidence_retention.constants import (
     HOLD_STATUSES,
     LEGAL_HOLD_EVENT_RECORD_TYPE,
     LEGAL_HOLD_RECORD_TYPE,
+    MARKER_STATUS_PENDING,
+    MARKER_STATUSES,
+    SWEEP_STATUSES,
 )
 
 
@@ -61,6 +64,23 @@ class LegalHold(BaseModel):
     Primary key: PK=CLIENT#{client_id}, SK=AUDIT#{audit_id}#LEGALHOLD.
     One record per (client_id, audit_id). Never deleted; never subject to
     ttl_disposal_at (a hold record is a governance artifact, not evidence).
+
+    hold_version / sweep_status (Legal-Hold Correction B1; Technical Design
+    Section 19.1; ADR Decision 9, Non-Negotiable Invariants 12/23): status
+    answers "is this audit currently held"; sweep_status answers
+    "has the current episode's sweep finished" -- deliberately independent,
+    never derived from one another. hold_version is the optimistic-
+    concurrency token every Category 1/2 governed-record write conditions
+    against (Technical Design Section 19.4); it is incremented by exactly 1
+    on every write to this record -- every PLACE and every RELEASE, with no
+    exception -- and is never reused, reset, or derived from status.
+
+    marker_s3_key / marker_confirmed_last_modified (Technical Design Section
+    19.5.1): additive plumbing for the current transition's S3 canary
+    marker, denormalized here the same way sweep_status already is, so a
+    future `rcp retention hold status` can report marker state without a
+    separate query. Set only by the S3 canary-marker mechanism (Legal-Hold
+    Correction B2, not part of B1) -- B1 never writes a non-None value.
     """
 
     PK: str
@@ -70,12 +90,16 @@ class LegalHold(BaseModel):
     audit_id: str
     status: str
     hold_id: str
+    hold_version: int
+    sweep_status: str
     placed_at: str
     placed_by: str
     reason: str
     hold_count: int
     released_at: str | None = None
     released_by: str | None = None
+    marker_s3_key: str | None = None
+    marker_confirmed_last_modified: str | None = None
 
     @field_validator("record_type")
     @classmethod
@@ -93,6 +117,22 @@ class LegalHold(BaseModel):
             raise ValueError(
                 f"status must be one of {sorted(HOLD_STATUSES)}, got {v!r}"
             )
+        return v
+
+    @field_validator("sweep_status")
+    @classmethod
+    def _sweep_status_in_bounded_set(cls, v: str) -> str:
+        if v not in SWEEP_STATUSES:
+            raise ValueError(
+                f"sweep_status must be one of {sorted(SWEEP_STATUSES)}, got {v!r}"
+            )
+        return v
+
+    @field_validator("hold_version")
+    @classmethod
+    def _hold_version_at_least_one(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"hold_version must be >= 1, got {v}")
         return v
 
     @field_validator("hold_count")
@@ -125,15 +165,36 @@ class LegalHold(BaseModel):
 class LegalHoldEvent(BaseModel):
     """Immutable audit log entry for a single place/release action.
 
-    Primary key: PK=CLIENT#{client_id}, SK=AUDIT#{audit_id}#LEGALHOLD#{hold_id}.
-    Write-once, append-only. Never mutated after write; never deleted; never
-    subject to ttl_disposal_at.
+    Primary key: PK=CLIENT#{client_id},
+    SK=AUDIT#{audit_id}#LEGALHOLD#{hold_id}#{hold_version}. Write-once,
+    append-only. Never mutated after write; never deleted; never subject to
+    ttl_disposal_at.
+
+    hold_version (Legal-Hold Correction B1; ADR Non-Negotiable Invariant 25;
+    Technical Design Section 19.5.1's "Required consequence", Section
+    19.5.2): required per-transition SK discriminator. hold_id identifies
+    one legal-hold episode from its PLACE through its eventual RELEASE and
+    is held constant across that pair (ADR Invariant 21) -- hold_id alone is
+    therefore no longer sufficient to key this record, since it would make
+    RELEASE's event write collide with its paired PLACE's at the identical
+    key. Non-collision is proved by hold_version's monotonicity alone
+    (ADR Invariant 12): no two transitions of the same audit identity ever
+    share a hold_version value.
+
+    marker_s3_key / marker_status / marker_confirmed_last_modified
+    (Technical Design Section 19.5.1): additive plumbing for the S3 canary
+    marker established for this specific transition. B1 never sets
+    marker_status to anything other than its initial PENDING default and
+    never sets marker_s3_key/marker_confirmed_last_modified to a non-None
+    value -- both are set only by the S3 canary-marker mechanism (Legal-Hold
+    Correction B2, not part of B1).
     """
 
     PK: str
     SK: str
     record_type: str
     hold_id: str
+    hold_version: int
     client_id: str
     audit_id: str
     action: str
@@ -142,6 +203,9 @@ class LegalHoldEvent(BaseModel):
     timestamp: str
     s3_versions_retagged_count: int
     dynamodb_items_updated_count: int
+    marker_s3_key: str | None = None
+    marker_status: str = MARKER_STATUS_PENDING
+    marker_confirmed_last_modified: str | None = None
 
     @field_validator("record_type")
     @classmethod
@@ -158,6 +222,22 @@ class LegalHoldEvent(BaseModel):
         if v not in HOLD_ACTIONS:
             raise ValueError(
                 f"action must be one of {sorted(HOLD_ACTIONS)}, got {v!r}"
+            )
+        return v
+
+    @field_validator("hold_version")
+    @classmethod
+    def _hold_version_at_least_one(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"hold_version must be >= 1, got {v}")
+        return v
+
+    @field_validator("marker_status")
+    @classmethod
+    def _marker_status_in_bounded_set(cls, v: str) -> str:
+        if v not in MARKER_STATUSES:
+            raise ValueError(
+                f"marker_status must be one of {sorted(MARKER_STATUSES)}, got {v!r}"
             )
         return v
 
