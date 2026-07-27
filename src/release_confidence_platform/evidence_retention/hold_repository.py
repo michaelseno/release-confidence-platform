@@ -213,6 +213,76 @@ class HoldRepository:
         }
         self._put_once(item)
 
+    def update_hold_event_marker_fields(
+        self,
+        client_id: str,
+        audit_id: str,
+        hold_id: str,
+        hold_version: int,
+        marker_s3_key: str | None,
+        marker_status: str,
+        marker_confirmed_last_modified: str | None,
+    ) -> None:
+        """Update only the marker_s3_key/marker_status/
+        marker_confirmed_last_modified fields on an already-written
+        LegalHoldEvent record (Legal-Hold Correction B2; Technical Design
+        Section 19.5.3 steps 2-3, Section 19.5.6; ADR Non-Negotiable
+        Invariant 24).
+
+        write_hold_event() is write-once (conditional PutItem,
+        attribute_not_exists(PK) AND attribute_not_exists(SK)) -- a given
+        transition's LegalHoldEvent is written exactly once, at the moment
+        HoldTransitions decides on a genuine new episode or a resumption
+        (hold_transitions.py). The canary marker's own establishment and
+        confirmation happens afterward, as a separate step (RetentionService,
+        Technical Design Section 19.5.3), so calling write_hold_event() again
+        to record that outcome would hit its own conditional-write guard and
+        raise ConditionalWriteError. This dedicated, narrowly-scoped
+        UpdateItem-based method is how that later step durably records the
+        marker outcome without re-writing (and thereby risking a spurious
+        failure against) the event's own write-once fields
+        (action/actor/reason/timestamp/counts) — mirroring the discipline
+        CustodySweepClient's _assert_custody_field_only_update() enforces
+        for its own single-attribute-only UpdateItem calls, applied here to
+        exactly these three marker fields and no others.
+
+        Callers pass marker_status=CONFIRMED with the verified
+        marker_confirmed_last_modified once the marker's identity and
+        LastModified have actually been confirmed (never merely "the
+        PutObject call didn't throw"), or marker_status=FAILED with
+        marker_confirmed_last_modified=None on marker-establishment failure
+        (Technical Design Section 19.5.6). Once CONFIRMED, ADR Invariant 24
+        requires this value be treated as immutable by every caller — this
+        method itself does not enforce that (RetentionService's own
+        marker_status-gated call pattern is where that invariant is
+        enforced, per Technical Design Section 19.5.3 step 2: it must never
+        call this method again for a transition already read back as
+        CONFIRMED).
+
+        Raises:
+            AssertionError: If the computed SK is not a retention SK.
+            StorageError: On DynamoDB failure.
+        """
+        key = self.legal_hold_event_key(client_id, audit_id, hold_id, hold_version)
+        _assert_retention_sk(key["SK"])
+        names = {
+            "#mk": "marker_s3_key",
+            "#ms": "marker_status",
+            "#mlm": "marker_confirmed_last_modified",
+        }
+        values = {
+            ":mk": marker_s3_key,
+            ":ms": marker_status,
+            ":mlm": marker_confirmed_last_modified,
+        }
+        self._call(
+            "update_item",
+            Key=key,
+            UpdateExpression="SET #mk = :mk, #ms = :ms, #mlm = :mlm",
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
+        )
+
     # ------------------------------------------------------------------
     # Writes — LegalHold (current-state record)
     # ------------------------------------------------------------------

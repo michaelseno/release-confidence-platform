@@ -194,3 +194,47 @@ MAX_HOLD_COORDINATION_RETRY_ATTEMPTS = 3
 
 HOLD_STATE_CONCURRENCY_EXCEEDED_CODE = "HOLD_STATE_CONCURRENCY_EXCEEDED"
 HOLD_MARKER_ESTABLISHMENT_FAILED_CODE = "HOLD_MARKER_ESTABLISHMENT_FAILED"
+
+# A third, distinguishable code for the marker integrity/collision failure
+# mode (Legal-Hold Correction B2; Technical Design Section 19.5.1/19.5.2 --
+# an existing marker found at a conditional-write conflict whose content
+# does NOT match the current transition's expected identity tuple). Not
+# itself enumerated in Technical Design Section 19.15's table (which covers
+# only retry-exhaustion classification) -- this is a distinct failure mode
+# (a deterministic identity mismatch, never retried) added here following
+# the same established StorageError-subcode pattern
+# (DuplicateRunIdError/ConditionalWriteError/HOLD_STATE_CONCURRENCY_EXCEEDED_CODE)
+# rather than inventing a new error-handling mechanism.
+HOLD_MARKER_INTEGRITY_VIOLATION_CODE = "HOLD_MARKER_INTEGRITY_VIOLATION"
+
+# ---------------------------------------------------------------------------
+# S3 canary-marker mechanism (Legal-Hold Correction B2; Technical Design
+# Section 19.5.1-19.5.10; ADR Non-Negotiable Invariants 15-24).
+# ---------------------------------------------------------------------------
+
+# Required key shape (Technical Design Section 19.5.1):
+#   retention-markers/{client_id}/{audit_id}/{hold_id}/{hold_version}-{transition}.marker
+# Explicitly NOT one of the four evidence-class prefixes
+# (S3_EVIDENCE_CLASS_PREFIXES) -- a marker is governance metadata (Category
+# 4), never evidence content, and is never subject to any evidence-class
+# Lifecycle rule or enumerated by CustodySweepClient's evidence-retagging
+# sweep.
+RETENTION_MARKER_KEY_PREFIX = "retention-markers"
+
+# Marker JSON payload schema version (Technical Design Section 19.5.1's
+# "self-describing" requirement, extended per this subphase's own scope: a
+# schema_version field makes a future format change to the marker payload
+# detectable by any reader, including an orphaned marker read back long
+# after the code that wrote it may have changed).
+MARKER_SCHEMA_VERSION = 1
+
+# The 5-second buffer (Technical Design Section 19.5.5) and the marker
+# establishment wall-clock cap (Technical Design Section 19.5.6) are the
+# SAME reasoned value, deliberately expressed as one constant reused in two
+# places rather than two independently-justified numbers -- Section 19.5.6:
+# "the same reasoned value already established for the reconciliation
+# buffer, reused rather than independently justified a second time... if
+# establishing the marker itself consumes as much time as the buffer's own
+# margin, the buffer's sizing assumption... no longer holds."
+RECONCILIATION_BUFFER_SECONDS = 5
+MARKER_ESTABLISHMENT_WALL_CLOCK_BUDGET_SECONDS = RECONCILIATION_BUFFER_SECONDS

@@ -45,11 +45,26 @@ explicitly out of scope for this class -- see companion ADR Decision 6 /
 Technical Design Section 15/17. No method here scans or migrates evidence
 outside an explicit (client_id, audit_id) legal-hold operation; there is no
 "sweep everything" entry point.
+
+Legal-Hold Correction B2 scope note (Technical Design Section 19.5.5, "S3
+Concurrency and Reconciliation Protocol"): this class gains a marker-anchored
+reconciliation pass (reconcile_versions()), reusing ONLY the three already-
+allowlisted S3 operations above (list_object_versions/get_object_tagging/
+put_object_tagging) -- no new S3 API surface is added, and _ALLOWED_S3_METHODS
+below is unchanged from before this correction. The reconciliation pass is
+directionally symmetric (PLACE: retag any in-window version not already
+tagged rcp-legal-hold=true; RELEASE: retag any in-window version still
+tagged rcp-legal-hold=true -- the inverse filter direction, Section 19.3
+step 6) and is anchored to a marker's own confirmed LastModified, which this
+class never establishes itself -- that remains marker_store.py's/
+RetentionService's responsibility (Section 19.5.9: HeadObject on the marker
+belongs on the marker-store component, never on this class).
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import timedelta
 from typing import Any
 
 from botocore.exceptions import ClientError
@@ -62,9 +77,11 @@ from release_confidence_platform.evidence_retention.constants import (
     LEGAL_HOLD_TAG_VALUE_FALSE,
     LEGAL_HOLD_TAG_VALUE_TRUE,
     LEGALHOLD_SK_MARKER,
+    RECONCILIATION_BUFFER_SECONDS,
     S3_EVIDENCE_CLASS_PREFIXES,
     TTL_DISPOSAL_AT_ATTRIBUTE,
 )
+from release_confidence_platform.evidence_retention.marker_store import parse_s3_timestamp
 from release_confidence_platform.storage.dynamodb_codec import (
     decode_dynamodb_response,
     encode_dynamodb_call_kwargs,
@@ -332,6 +349,124 @@ class CustodySweepClient:
             VersionId=version_id,
             Tagging={"TagSet": new_tag_set},
         )
+
+    # ------------------------------------------------------------------
+    # Marker-anchored S3 reconciliation pass (Technical Design Section 19.5.5)
+    # ------------------------------------------------------------------
+
+    def reconcile_versions(
+        self,
+        client_id: str,
+        audit_id: str,
+        *,
+        marker_confirmed_last_modified: str,
+        legal_hold: bool,
+        buffer_seconds: int = RECONCILIATION_BUFFER_SECONDS,
+    ) -> int:
+        """Marker-anchored reconciliation pass (Technical Design Section
+        19.5.5). Runs immediately after the primary sweep (remove_ttl_
+        disposal_at/retag_s3_versions for PLACE; restore_ttl_disposal_at/
+        retag_s3_versions for RELEASE), scoped to the confirmed marker's own
+        LastModified -- an S3-domain timestamp this class never establishes
+        itself (marker_store.py's MarkerStore does, via a dedicated
+        HeadObject read-back; RetentionService supplies the confirmed value
+        here).
+
+        Filter (Technical Design Section 19.5.5): every object VERSION whose
+        LastModified >= (marker_confirmed_last_modified - buffer_seconds)
+        AND whose current rcp-legal-hold tag is inconsistent with the
+        transition just completed:
+          - legal_hold=True  (PLACE reconciliation):  current tag != "true"
+            -> retag "true". Catches an object whose write-time tagging
+            decision read a stale pre-hold observation but whose PutObject
+            completed after the marker's confirmed instant.
+          - legal_hold=False (RELEASE reconciliation): current tag == "true"
+            -> retag "false" -- the INVERSE filter direction (Technical
+            Design Section 19.3 step 6), symmetric with, and independently
+            required alongside, the PLACE direction (ADR Invariant 16: this
+            mechanism must never protect one transition direction's S3
+            writes but not the other's).
+
+        No new S3 API surface: reuses only the three already-allowlisted
+        operations (list_object_versions/get_object_tagging/
+        put_object_tagging) via _list_object_versions_with_last_modified()
+        (a pagination variant of the existing _list_object_versions()) and
+        _retag_object_version() (unchanged, reused as-is).
+
+        Returns the number of object versions reconciled (retagged by this
+        pass specifically -- distinct from retag_s3_versions()'s own count,
+        per Technical Design Section 19.2 step 8's "kept distinct for
+        auditability of which mechanism caught what").
+
+        Raises:
+            StorageError: On any S3 API failure.
+        """
+        boundary = parse_s3_timestamp(marker_confirmed_last_modified) - timedelta(
+            seconds=buffer_seconds
+        )
+        target_value = LEGAL_HOLD_TAG_VALUE_TRUE if legal_hold else LEGAL_HOLD_TAG_VALUE_FALSE
+        reconciled = 0
+        for prefix_root in S3_EVIDENCE_CLASS_PREFIXES:
+            prefix = f"{prefix_root}/{client_id}/{audit_id}/"
+            for key, version_id, last_modified in self._list_object_versions_with_last_modified(
+                prefix
+            ):
+                if parse_s3_timestamp(last_modified) < boundary:
+                    continue
+                current_value = self._get_object_version_legal_hold_tag(key, version_id)
+                needs_reconciliation = (
+                    current_value != LEGAL_HOLD_TAG_VALUE_TRUE
+                    if legal_hold
+                    else current_value == LEGAL_HOLD_TAG_VALUE_TRUE
+                )
+                if not needs_reconciliation:
+                    continue
+                self._retag_object_version(key, version_id, target_value)
+                reconciled += 1
+        return reconciled
+
+    def _list_object_versions_with_last_modified(
+        self, prefix: str
+    ) -> Iterator[tuple[str, str, Any]]:
+        """Pagination variant of _list_object_versions() that additionally
+        yields each version's own LastModified -- already present on every
+        ListObjectVersions response entry, so this adds no new S3 API
+        surface, only captures one more already-returned field. Kept
+        separate from _list_object_versions() (unchanged, still used by
+        retag_s3_versions()) rather than changing that method's existing,
+        already-tested 2-tuple return shape.
+        """
+        kwargs: dict[str, Any] = {"Bucket": self.bucket_name, "Prefix": prefix}
+        while True:
+            response = self._call_s3("list_object_versions", **kwargs)
+            for version in response.get("Versions", []) or []:
+                key = version.get("Key")
+                version_id = version.get("VersionId")
+                last_modified = version.get("LastModified")
+                if key is not None and version_id is not None and last_modified is not None:
+                    yield key, version_id, last_modified
+            if not response.get("IsTruncated"):
+                break
+            next_key_marker = response.get("NextKeyMarker")
+            if next_key_marker is None:
+                break
+            kwargs["KeyMarker"] = next_key_marker
+            next_version_marker = response.get("NextVersionIdMarker")
+            if next_version_marker is not None:
+                kwargs["VersionIdMarker"] = next_version_marker
+
+    def _get_object_version_legal_hold_tag(self, key: str, version_id: str) -> str | None:
+        """Read a version's current rcp-legal-hold tag value (or None if
+        untagged), via the already-allowlisted get_object_tagging -- reused
+        read-only helper distinct from _retag_object_version()'s own inline
+        get_object_tagging call, so that existing method's tested behavior
+        is left completely unchanged by this addition.
+        """
+        existing = self._call_s3(
+            "get_object_tagging", Bucket=self.bucket_name, Key=key, VersionId=version_id
+        )
+        tags = {tag["Key"]: tag["Value"] for tag in existing.get("TagSet", []) or []}
+        return tags.get(LEGAL_HOLD_TAG_KEY)
 
     # ------------------------------------------------------------------
     # Internal dispatch helpers (allowlisted -- see module docstring)

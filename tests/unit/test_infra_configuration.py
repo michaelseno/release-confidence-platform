@@ -193,12 +193,21 @@ def test_s3_lifecycle_configuration_has_one_tag_filtered_rule_per_evidence_class
     rules = s3_template["Resources"]["RawResultsBucket"]["Properties"]["LifecycleConfiguration"][
         "Rules"
     ]
-    assert len(rules) == len(_EVIDENCE_CLASS_TO_S3_PREFIX)
+    # Legal-Hold Correction B2 (Technical Design Section 19.5.8) added a
+    # fifth rule, for the retention-markers/ prefix, that is deliberately
+    # NOT tag-filtered (a marker is never itself subject to legal hold) --
+    # see test_s3_lifecycle_configuration_has_untagged_retention_marker_rule
+    # below for its own dedicated coverage. Scope this test to only the
+    # tag-filtered rules, so it continues to assert exactly one rule per
+    # evidence class without being broken by that structurally distinct
+    # addition.
+    tag_filtered_rules = [rule for rule in rules if "And" in rule["Filter"]]
+    assert len(tag_filtered_rules) == len(_EVIDENCE_CLASS_TO_S3_PREFIX)
 
-    rules_by_prefix = {rule["Filter"]["And"]["Prefix"]: rule for rule in rules}
+    rules_by_prefix = {rule["Filter"]["And"]["Prefix"]: rule for rule in tag_filtered_rules}
     assert set(rules_by_prefix) == set(_EVIDENCE_CLASS_TO_S3_PREFIX.values())
 
-    for rule in rules:
+    for rule in tag_filtered_rules:
         assert rule["Status"] == "Enabled"
         tags = rule["Filter"]["And"]["Tags"]
         assert tags == [{"Key": "rcp-legal-hold", "Value": "false"}]
@@ -206,6 +215,34 @@ def test_s3_lifecycle_configuration_has_one_tag_filtered_rule_per_evidence_class
         assert "Days" in rule["Expiration"]
         assert "NoncurrentVersionExpiration" in rule
         assert "NoncurrentDays" in rule["NoncurrentVersionExpiration"]
+
+
+def test_s3_lifecycle_configuration_has_untagged_retention_marker_rule() -> None:
+    """Legal-Hold Correction B2 (Technical Design Section 19.5.8; ADR
+    Non-Negotiable Invariant 22): the canary marker's disposal rule is
+    structurally simpler than the four evidence-class rules above -- no
+    tag-filter condition, since a marker is never itself subject to legal
+    hold (it is metadata ABOUT a hold, not evidence a hold protects).
+    Confirmed here directly rather than assumed.
+    """
+    with Path("infra/resources/s3.yml").open(encoding="utf-8") as fh:
+        s3_template = yaml.safe_load(fh)
+
+    rules = s3_template["Resources"]["RawResultsBucket"]["Properties"]["LifecycleConfiguration"][
+        "Rules"
+    ]
+    marker_rules = [
+        rule for rule in rules if rule["Filter"].get("Prefix") == "retention-markers/"
+    ]
+    assert len(marker_rules) == 1
+    rule = marker_rules[0]
+    assert rule["Status"] == "Enabled"
+    assert "And" not in rule["Filter"], "the marker rule must not carry a tag-filter condition"
+    assert "Expiration" in rule
+    assert "Days" in rule["Expiration"]
+    assert rule["Expiration"]["Days"] == (
+        "${self:custom.custodyPeriodDays.retention_marker.${self:provider.stage}}"
+    )
 
 
 def test_s3_lifecycle_days_reference_custody_period_config_not_hardcoded() -> None:
@@ -341,14 +378,21 @@ def test_custody_period_days_config_defines_no_value_for_any_stage() -> None:
     stage. Each per-evidence-class block must be an empty mapping -- a
     hardcoded number, an empty string silently treated as zero, or a
     populated stage key would all violate this constraint.
+
+    Legal-Hold Correction B2 (Technical Design Section 19.5.8; ADR
+    Non-Negotiable Invariant 22) added a fifth key, retention_marker, for
+    the canary marker's own disposal period -- included here alongside the
+    four evidence classes since it is governed by the identical
+    fail-closed, no-fallback-value requirement, not a separate one.
     """
     with Path("infra/serverless.yml").open(encoding="utf-8") as fh:
         serverless_template = yaml.safe_load(fh)
 
     custody_period_days = serverless_template["custom"]["custodyPeriodDays"]
-    assert set(custody_period_days) == set(_EVIDENCE_CLASS_TO_S3_PREFIX)
-    for evidence_class, stage_values in custody_period_days.items():
+    expected_keys = set(_EVIDENCE_CLASS_TO_S3_PREFIX) | {"retention_marker"}
+    assert set(custody_period_days) == expected_keys
+    for key, stage_values in custody_period_days.items():
         assert stage_values == {}, (
-            f"custom.custodyPeriodDays.{evidence_class} must remain an empty "
+            f"custom.custodyPeriodDays.{key} must remain an empty "
             f"mapping (no stage may have a value supplied), got: {stage_values!r}"
         )
