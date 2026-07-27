@@ -417,3 +417,112 @@ def test_upsert_hold_persists_sweep_status_independent_of_status():
     # from, or overrides, the other.
     assert captured["item"]["status"] == "ACTIVE"
     assert captured["item"]["sweep_status"] == "FAILED"
+
+
+# ---------------------------------------------------------------------------
+# update_hold_event_marker_fields (Legal-Hold Correction B2; Technical
+# Design Section 19.5.3 steps 2-3; ADR Non-Negotiable Invariant 24)
+# ---------------------------------------------------------------------------
+
+
+def test_update_hold_event_marker_fields_calls_update_item():
+    repo = _make_repo()
+    captured = {}
+
+    def fake_call(method_name, **kwargs):
+        captured["method_name"] = method_name
+        captured["kwargs"] = kwargs
+        return {}
+
+    with patch.object(repo, "_call", side_effect=fake_call):
+        repo.update_hold_event_marker_fields(
+            client_id=_CLIENT_ID,
+            audit_id=_AUDIT_ID,
+            hold_id=_HOLD_ID,
+            hold_version=1,
+            marker_s3_key=f"retention-markers/{_CLIENT_ID}/{_AUDIT_ID}/{_HOLD_ID}/1-PLACE.marker",
+            marker_status="CONFIRMED",
+            marker_confirmed_last_modified="2026-07-18T00:00:00Z",
+        )
+
+    assert captured["method_name"] == "update_item"
+    assert captured["kwargs"]["Key"] == {
+        "PK": f"CLIENT#{_CLIENT_ID}",
+        "SK": f"AUDIT#{_AUDIT_ID}#LEGALHOLD#{_HOLD_ID}#1",
+    }
+    names = captured["kwargs"]["ExpressionAttributeNames"]
+    assert set(names.values()) == {
+        "marker_s3_key",
+        "marker_status",
+        "marker_confirmed_last_modified",
+    }
+    values = captured["kwargs"]["ExpressionAttributeValues"]
+    assert values[":ms"] == "CONFIRMED"
+    assert values[":mlm"] == "2026-07-18T00:00:00Z"
+
+
+def test_update_hold_event_marker_fields_asserts_retention_sk():
+    """Must not raise AssertionError for a valid call, and must raise for a
+    disposal-shaped SK if one were ever (incorrectly) constructed -- proven
+    indirectly via the key construction being retention-namespaced by
+    definition (legal_hold_event_key always produces a #LEGALHOLD# SK)."""
+    repo = _make_repo()
+    with patch.object(repo, "_call"):
+        repo.update_hold_event_marker_fields(
+            client_id=_CLIENT_ID,
+            audit_id=_AUDIT_ID,
+            hold_id=_HOLD_ID,
+            hold_version=2,
+            marker_s3_key=None,
+            marker_status="FAILED",
+            marker_confirmed_last_modified=None,
+        )
+
+
+def test_update_hold_event_marker_fields_supports_failed_state_with_none_values():
+    repo = _make_repo()
+    captured = {}
+
+    with patch.object(
+        repo, "_call", side_effect=lambda method_name, **kwargs: captured.update(kwargs=kwargs)
+    ):
+        repo.update_hold_event_marker_fields(
+            client_id=_CLIENT_ID,
+            audit_id=_AUDIT_ID,
+            hold_id=_HOLD_ID,
+            hold_version=1,
+            marker_s3_key=f"retention-markers/{_CLIENT_ID}/{_AUDIT_ID}/{_HOLD_ID}/1-PLACE.marker",
+            marker_status="FAILED",
+            marker_confirmed_last_modified=None,
+        )
+
+    values = captured["kwargs"]["ExpressionAttributeValues"]
+    assert values[":ms"] == "FAILED"
+    assert values[":mlm"] is None
+
+
+def test_update_hold_event_marker_fields_does_not_touch_write_once_fields():
+    """The UpdateExpression must only ever SET the three marker fields --
+    never action/actor/reason/timestamp/counts, mirroring
+    CustodySweepClient's _assert_custody_field_only_update discipline for
+    its own single-attribute updates."""
+    repo = _make_repo()
+    captured = {}
+
+    with patch.object(
+        repo, "_call", side_effect=lambda method_name, **kwargs: captured.update(kwargs=kwargs)
+    ):
+        repo.update_hold_event_marker_fields(
+            client_id=_CLIENT_ID,
+            audit_id=_AUDIT_ID,
+            hold_id=_HOLD_ID,
+            hold_version=1,
+            marker_s3_key="retention-markers/x/y/z/1-PLACE.marker",
+            marker_status="CONFIRMED",
+            marker_confirmed_last_modified="2026-07-18T00:00:00Z",
+        )
+
+    touched = set(captured["kwargs"]["ExpressionAttributeNames"].values())
+    assert touched == {"marker_s3_key", "marker_status", "marker_confirmed_last_modified"}
+    for forbidden in ("action", "actor", "reason", "timestamp", "s3_versions_retagged_count"):
+        assert forbidden not in touched

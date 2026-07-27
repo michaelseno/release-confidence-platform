@@ -81,6 +81,27 @@ Resources:
               Days: ${self:custom.custodyPeriodDays.certificate.${self:provider.stage}}
             NoncurrentVersionExpiration:
               NoncurrentDays: ${self:custom.custodyPeriodDays.certificate.${self:provider.stage}}
+          # Legal-Hold Correction B2 (Technical Design Section 19.5.8, "Marker
+          # Retention and Disposal -- Purpose-Limited, Not Indefinite"; ADR
+          # Non-Negotiable Invariant 22). Structurally simpler than the four
+          # rules above: a canary marker is never itself subject to legal
+          # hold (it is metadata ABOUT a hold, not evidence a hold protects),
+          # so this rule carries no tag-filter condition -- a plain,
+          # prefix-scoped age-based expiration. Days is sourced from
+          # custom.custodyPeriodDays.retention_marker.${self:provider.stage},
+          # left unresolved by this correction (no fallback supplied for any
+          # stage, identical to the four rules above) -- Serverless Framework
+          # variable resolution fails closed at package/deploy time if this
+          # value is not explicitly supplied, exactly as already governs the
+          # four evidence-class rules. This rule is INACTIVE (cannot deploy)
+          # until that value is authorized and supplied; no dummy/placeholder
+          # duration is introduced.
+          - Id: retention-marker-disposal
+            Status: Enabled
+            Filter:
+              Prefix: retention-markers/
+            Expiration:
+              Days: ${self:custom.custodyPeriodDays.retention_marker.${self:provider.stage}}
       # ADR Decision 4 -- S3 Lifecycle expiration is a daily batch process with
       # no synchronous callback; disposal recording is built as an
       # asynchronous consumer of this bucket's own event stream via

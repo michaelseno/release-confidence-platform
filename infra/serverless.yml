@@ -108,11 +108,21 @@ custom:
   # until Product Strategy supplies real values here. No custody-period
   # duration value may be added to this block by any change other than that
   # explicit Product Strategy decision.
+  #
+  # retention_marker (Legal-Hold Correction B2; Technical Design Section
+  # 19.5.8; ADR Non-Negotiable Invariant 22): the canary marker's own
+  # disposal period, added here as its own key rather than reusing any
+  # evidence-class value above -- a marker's governance purpose (and
+  # therefore its retention question) is narrower than, and independently
+  # evaluated from, any evidence-class custody period. Same no-fallback,
+  # fail-closed pattern as the four evidence classes above; left unset for
+  # every stage until Product Strategy supplies a real value.
   custodyPeriodDays:
     raw_evidence: {}
     intelligence: {}
     report: {}
     certificate: {}
+    retention_marker: {}
 
 package:
   patterns:
