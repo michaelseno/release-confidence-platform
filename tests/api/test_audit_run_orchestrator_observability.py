@@ -59,6 +59,52 @@ class FakeDynamo:
         for index, name in enumerate(names.values()):
             self.items[tuple(Key.values())][name] = values[f":v{index}"]
 
+    def transact_write_items(self, TransactItems):  # noqa: N803
+        # Evidence Governance Workstream A1.LH3: put_started_once now writes
+        # via TransactWriteItems. No LegalHold record is ever stored here
+        # (paired with _NoLegalHoldRepository below), so the ConditionCheck
+        # item always trivially passes; only the governed Put item's own
+        # condition can fail, preserving pre-existing duplicate behavior.
+        from release_confidence_platform.storage.dynamodb_codec import decode_item
+
+        reasons = []
+        any_failed = False
+        for transact_item in TransactItems:
+            if "Put" in transact_item:
+                item = decode_item(transact_item["Put"]["Item"])
+                key = tuple(item[k] for k in ("PK", "SK"))
+                if key in self.items:
+                    reasons.append({"Code": "ConditionalCheckFailed"})
+                    any_failed = True
+                else:
+                    reasons.append({"Code": "None"})
+            else:
+                reasons.append({"Code": "None"})
+        if any_failed:
+            raise ClientError(
+                {
+                    "Error": {"Code": "TransactionCanceledException", "Message": "cancelled"},
+                    "CancellationReasons": reasons,
+                },
+                "TransactWriteItems",
+            )
+        for transact_item in TransactItems:
+            if "Put" in transact_item:
+                item = decode_item(transact_item["Put"]["Item"])
+                self.items[tuple(item[k] for k in ("PK", "SK"))] = item
+        return {}
+
+
+class _NoLegalHoldRepository:
+    def get_legal_hold(self, client_id, audit_id, *, consistent_read=False):  # noqa: ARG002
+        return None
+
+    def legal_hold_key(self, client_id, audit_id):
+        return {"PK": f"CLIENT#{client_id}", "SK": f"AUDIT#{audit_id}#LEGALHOLD"}
+
+
+_NO_HOLD = _NoLegalHoldRepository()
+
 
 class FakeSecrets:
     def get_secret_value(self, SecretId):  # noqa: N803
@@ -126,9 +172,19 @@ def test_handler_logging_configuration_enables_info_and_preserves_print_fallback
             return object()
 
         def resource(self, name):
+            class TableMeta:
+                # Evidence Governance Workstream A1.LH3: orchestrator_handler
+                # now reads table.meta.client. Never actually invoked here
+                # (FakeOrchestrator.run() never touches metadata_storage/
+                # s3_storage), so any placeholder object suffices.
+                client = object()
+
+            class Table:
+                meta = TableMeta()
+
             class Resource:
                 def Table(self, table_name):
-                    return object()
+                    return Table()
 
             return Resource()
 
@@ -154,8 +210,8 @@ def test_handler_logging_configuration_enables_info_and_preserves_print_fallback
 def test_success_path_emits_required_sanitized_milestone_logs():
     logger = CapturingLogger()
     response = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", FakeS3Api(valid_config_objects())),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", FakeS3Api(valid_config_objects()), _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         runner=PassingRunner(),
         logger=logger,
@@ -202,8 +258,8 @@ def test_validation_and_config_failures_emit_error_logs_and_structured_failure(
     event = valid_event()
     event.update(event_override)
     response = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", FakeS3Api()),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", FakeS3Api(), _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         logger=logger,
     ).run(event)
@@ -223,7 +279,7 @@ def test_raw_result_and_metadata_failures_emit_error_logs_and_structured_failure
             super().put_object(Bucket, Key, Body, ContentType, Tagging)
 
     class FailingMetadata(FakeDynamo):
-        def put_item(self, TableName, Item, ConditionExpression):  # noqa: N803, ARG002
+        def transact_write_items(self, TransactItems):  # noqa: N803, ARG002
             raise RuntimeError("token=secret-token-value")
 
     for s3_api, dynamo, expected_log in (
@@ -232,8 +288,8 @@ def test_raw_result_and_metadata_failures_emit_error_logs_and_structured_failure
     ):
         logger = CapturingLogger()
         response = CoreEngineOrchestrator(
-            s3_storage=S3StorageClient("bucket", s3_api),
-            metadata_storage=DynamoDBMetadataClient("table", dynamo),
+            s3_storage=S3StorageClient("bucket", s3_api, _NO_HOLD),
+            metadata_storage=DynamoDBMetadataClient("table", dynamo, _NO_HOLD),
             secrets_client=SecretsManagerClient(FakeSecrets()),
             runner=PassingRunner(),
             logger=logger,

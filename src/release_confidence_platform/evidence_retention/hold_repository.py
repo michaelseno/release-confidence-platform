@@ -133,12 +133,34 @@ class HoldRepository:
     # Reads
     # ------------------------------------------------------------------
 
-    def get_legal_hold(self, client_id: str, audit_id: str) -> dict[str, Any] | None:
+    def get_legal_hold(
+        self, client_id: str, audit_id: str, *, consistent_read: bool = False
+    ) -> dict[str, Any] | None:
         """Read the current-state LegalHold record for an audit identity.
 
         Returns the record dict if found, or None if no hold was ever placed.
+
+        `consistent_read` (Legal-Hold Correction A1.LH3; Technical Design
+        Section 19.5.4): defaults to False (DynamoDB's own default,
+        eventually consistent) so every existing caller (HoldTransitions,
+        RetentionService, HoldCoordinatedTransactionRunner's own DynamoDB-leg
+        read) is behaviorally unchanged -- Section 19.5.4 confirms
+        eventually-consistent reads are harmless on the DynamoDB write path
+        specifically, because TransactWriteItems' own ConditionCheck
+        re-verifies the actual current hold_version at commit time regardless
+        of how stale the preceding read was. Pass `consistent_read=True`
+        only for a write path with no such transactional backstop -- today,
+        exclusively the S3 raw-evidence write path
+        (packages/storage/s3_client.py::write_raw_results_once), per Section
+        19.5.4's explicit, narrowly-scoped requirement. When False (the
+        default), `ConsistentRead` is omitted from the underlying GetItem
+        call entirely rather than explicitly passed as False, so the exact
+        kwargs sent are byte-identical to pre-A1.LH3 behavior.
         """
-        return self._get_item(self.legal_hold_key(client_id, audit_id))
+        key = self.legal_hold_key(client_id, audit_id)
+        if consistent_read:
+            return self._get_item(key, consistent_read=True)
+        return self._get_item(key)
 
     def get_legal_hold_event(
         self, client_id: str, audit_id: str, hold_id: str, hold_version: int
@@ -359,8 +381,13 @@ class HoldRepository:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _get_item(self, key: dict[str, str]) -> dict[str, Any] | None:
-        response = self._call("get_item", Key=key)
+    def _get_item(
+        self, key: dict[str, str], *, consistent_read: bool = False
+    ) -> dict[str, Any] | None:
+        if consistent_read:
+            response = self._call("get_item", Key=key, ConsistentRead=True)
+        else:
+            response = self._call("get_item", Key=key)
         return response.get("Item")
 
     def _put_once(self, item: dict[str, Any]) -> None:

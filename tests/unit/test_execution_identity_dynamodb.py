@@ -8,6 +8,7 @@ from botocore.exceptions import ClientError
 
 from packages.core.constants.engine import RUN_STATUS_COMPLETED, RUN_STATUS_STARTED
 from packages.storage.dynamodb_client import DynamoDBMetadataClient
+from release_confidence_platform.storage.dynamodb_codec import decode_item
 
 # This specific UUID is the canonical regression fixture: PHONE_PATTERN matches
 # the digit sequence "2475004829" within the UUID hex, which previously caused
@@ -46,6 +47,56 @@ class CapturingDynamoStub:
             self.items[key][field_name] = values[f":v{index}"]
         return {}
 
+    def transact_write_items(self, TransactItems):  # noqa: N803
+        # Evidence Governance Workstream A1.LH3: put_started_once now writes
+        # via TransactWriteItems (wire-format Item). No LegalHold record is
+        # ever stored by this stub (paired with _NoLegalHoldRepository
+        # below), so the ConditionCheck item always trivially passes; only
+        # the governed Put item's own condition can fail, preserving this
+        # stub's pre-existing duplicate-write behavior unchanged. The
+        # decoded (plain-Python) item is recorded into put_item_calls too,
+        # so this file's existing byte-identity assertions against
+        # stub.put_item_calls[0]["Item"] are unaffected by the encode/decode
+        # round trip.
+        reasons = []
+        any_failed = False
+        for transact_item in TransactItems:
+            if "Put" in transact_item:
+                item = decode_item(transact_item["Put"]["Item"])
+                key = (item["PK"], item["SK"])
+                if key in self.items:
+                    reasons.append({"Code": "ConditionalCheckFailed"})
+                    any_failed = True
+                else:
+                    reasons.append({"Code": "None"})
+            else:
+                reasons.append({"Code": "None"})
+        if any_failed:
+            raise ClientError(
+                {
+                    "Error": {"Code": "TransactionCanceledException", "Message": "cancelled"},
+                    "CancellationReasons": reasons,
+                },
+                "TransactWriteItems",
+            )
+        for transact_item in TransactItems:
+            if "Put" in transact_item:
+                item = decode_item(transact_item["Put"]["Item"])
+                self.put_item_calls.append({"Item": item})
+                self.items[(item["PK"], item["SK"])] = item
+        return {}
+
+
+class _NoLegalHoldRepository:
+    def get_legal_hold(self, client_id, audit_id, *, consistent_read=False):  # noqa: ARG002
+        return None
+
+    def legal_hold_key(self, client_id, audit_id):
+        return {"PK": f"CLIENT#{client_id}", "SK": f"AUDIT#{audit_id}#LEGALHOLD"}
+
+
+_NO_HOLD = _NoLegalHoldRepository()
+
 
 def _make_item(run_id: str) -> dict[str, Any]:
     client = DynamoDBMetadataClient("test_table", None)
@@ -67,7 +118,7 @@ def _make_item(run_id: str) -> dict[str, Any]:
 def test_put_started_once_phone_like_uuid_persists_unsanitized_keys():
     """A-01: put_started_once must persist PK, SK, and run_id byte-identical to the input UUID."""
     stub = CapturingDynamoStub()
-    client = DynamoDBMetadataClient("test_table", stub)
+    client = DynamoDBMetadataClient("test_table", stub, _NO_HOLD)
 
     item = _make_item(PHONE_LIKE_UUID)
     client.put_started_once(item)
@@ -89,7 +140,7 @@ def test_put_started_once_phone_like_uuid_persists_unsanitized_keys():
 def test_update_terminal_key_matches_put_started_once_key_for_phone_like_uuid():
     """A-03: update_terminal must succeed when the item key matches what put_started_once wrote."""
     stub = CapturingDynamoStub()
-    client = DynamoDBMetadataClient("test_table", stub)
+    client = DynamoDBMetadataClient("test_table", stub, _NO_HOLD)
 
     item = _make_item(PHONE_LIKE_UUID)
     client.put_started_once(item)
