@@ -32,6 +32,7 @@ from packages.storage.audit_metadata_client import (
 from packages.storage.dynamodb_client import DynamoDBMetadataClient
 from packages.storage.s3_client import S3StorageClient
 from packages.storage.secrets_client import SecretsManagerClient
+from release_confidence_platform.evidence_retention.hold_repository import HoldRepository
 
 # ---------------------------------------------------------------------------
 # Startup import validation — fail fast on missing critical modules
@@ -275,9 +276,26 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: ARG
     _emit_handler_started(event)
     table = boto3.resource("dynamodb").Table(os.environ["METADATA_TABLE"])
     repository = AuditMetadataRepository(os.environ["METADATA_TABLE"], table)
-    metadata = DynamoDBMetadataClient(os.environ["METADATA_TABLE"], table)
+    # Evidence Governance Workstream A1.LH3 (Technical Design Section 19.8,
+    # 19.10 item (c+d)): this handler is a SECOND, independent production
+    # writer of RunMetadata/raw-evidence (the SCHEDULE_TYPE_REPEATED path the
+    # companion ADR's own motivating example cites: repeated,
+    # separately-scheduled invocations across an audit's execution window),
+    # constructing its own DynamoDBMetadataClient/S3StorageClient rather than
+    # delegating to orchestrator_handler.py. It requires the identical
+    # HoldRepository wiring for the exact same reason -- see
+    # orchestrator_handler.py::handler for the full rationale (Table resource
+    # retained for existing operations; table.meta.client supplied to
+    # HoldRepository/HoldCoordinatedTransactionRunner; one HoldRepository
+    # instance shared across both the DynamoDB and S3 governed write paths).
+    hold_repository = HoldRepository(os.environ["METADATA_TABLE"], table.meta.client)
+    metadata = DynamoDBMetadataClient(
+        os.environ["METADATA_TABLE"], table, hold_repository, table.meta.client
+    )
     orchestrator = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient(os.environ["RAW_RESULTS_BUCKET"], boto3.client("s3")),
+        s3_storage=S3StorageClient(
+            os.environ["RAW_RESULTS_BUCKET"], boto3.client("s3"), hold_repository
+        ),
         metadata_storage=metadata,
         secrets_client=SecretsManagerClient(boto3.client("secretsmanager")),
     )

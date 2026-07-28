@@ -78,6 +78,59 @@ class FakeDynamo:
         for index, name in enumerate(names.values()):
             self.items[tuple(Key.values())][name] = values[f":v{index}"]
 
+    def transact_write_items(self, TransactItems):  # noqa: N803
+        # Evidence Governance Workstream A1.LH3: DynamoDBMetadataClient.
+        # put_started_once now writes via TransactWriteItems
+        # (packages/storage/dynamodb_client.py). This fake never has a
+        # LegalHold record placed (paired with _NoLegalHoldRepository below),
+        # so the ConditionCheck item always trivially passes
+        # (attribute_not_exists(PK)); only the governed Put item's own
+        # condition can fail here, preserving this fake's pre-existing
+        # duplicate-run behavior unchanged.
+        from release_confidence_platform.storage.dynamodb_codec import decode_item
+
+        reasons = []
+        any_failed = False
+        for transact_item in TransactItems:
+            if "Put" in transact_item:
+                item = decode_item(transact_item["Put"]["Item"])
+                key = (item["PK"], item["SK"])
+                if key in self.items:
+                    reasons.append({"Code": "ConditionalCheckFailed"})
+                    any_failed = True
+                else:
+                    reasons.append({"Code": "None"})
+            else:
+                reasons.append({"Code": "None"})
+        if any_failed:
+            raise ClientError(
+                {
+                    "Error": {"Code": "TransactionCanceledException", "Message": "cancelled"},
+                    "CancellationReasons": reasons,
+                },
+                "TransactWriteItems",
+            )
+        for transact_item in TransactItems:
+            if "Put" in transact_item:
+                item = decode_item(transact_item["Put"]["Item"])
+                self.items[(item["PK"], item["SK"])] = item
+
+
+class _NoLegalHoldRepository:
+    """Evidence Governance Workstream A1.LH3: a minimal HoldRepository
+    stand-in for tests unrelated to legal-hold behavior -- always reports
+    "no hold ever placed," matching every fake dynamo/S3 double in this file,
+    none of which ever store a LegalHold record."""
+
+    def get_legal_hold(self, client_id, audit_id, *, consistent_read=False):  # noqa: ARG002
+        return None
+
+    def legal_hold_key(self, client_id, audit_id):
+        return {"PK": f"CLIENT#{client_id}", "SK": f"AUDIT#{audit_id}#LEGALHOLD"}
+
+
+_NO_HOLD = _NoLegalHoldRepository()
+
 
 class FakeSecrets:
     def get_secret_value(self, SecretId):  # noqa: N803
@@ -356,7 +409,7 @@ def test_endpoint_expected_status_invalid_values_fail_validation(
 
 
 def test_storage_clients_build_keys_and_detect_duplicates() -> None:
-    s3 = S3StorageClient("bucket", FakeS3Api())
+    s3 = S3StorageClient("bucket", FakeS3Api(), _NO_HOLD)
     key = s3.build_raw_result_key("client", "audit", "run_12345")
     assert key == "raw-results/client/audit/run_12345/results.json"
     s3.write_raw_results_once(key, {"secret": "value"})
@@ -481,8 +534,8 @@ def test_orchestrator_raw_result_uses_normalized_top_level_expected_status_codes
     endpoint["expected_status_codes"] = [200]
     s3api = FakeS3Api(objects)
     orchestrator = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", s3api),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", s3api, _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         runner=ApiRunner(Session()),
     )
@@ -506,8 +559,8 @@ def test_orchestrator_raw_result_uses_normalized_top_level_expected_status_codes
 def test_orchestrator_duplicate_fails_fast_before_config_load() -> None:
     s3api = FakeS3Api({"raw-results/client/audit/safe_run_123/results.json": {}})
     orchestrator = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", s3api),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", s3api, _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
     )
     response = orchestrator.run(
@@ -536,9 +589,21 @@ def test_handler_first_line_log_contains_only_event_keys(monkeypatch, capsys) ->
             return object()
 
         def resource(self, name):
+            class TableMeta:
+                # Evidence Governance Workstream A1.LH3: orchestrator_handler
+                # now reads table.meta.client to construct HoldRepository /
+                # HoldCoordinatedTransactionRunner. Never actually invoked by
+                # this test (FakeOrchestrator.run() never touches
+                # metadata_storage/s3_storage), so any placeholder object
+                # suffices.
+                client = object()
+
+            class Table:
+                meta = TableMeta()
+
             class Resource:
                 def Table(self, table_name):
-                    return object()
+                    return Table()
 
             return Resource()
 
@@ -606,8 +671,8 @@ def test_failure_metadata_update_error_is_logged_safely() -> None:
 def test_orchestrator_success_emits_sanitized_milestone_logs_in_order() -> None:
     logger = CapturingLogger()
     orchestrator = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", FakeS3Api(valid_config_objects())),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", FakeS3Api(valid_config_objects()), _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         runner=PassingRunner(),
         logger=logger,
@@ -655,8 +720,8 @@ def test_repeated_stability_iteration_count_one_records_iteration_metadata() -> 
     }
     s3api = FakeS3Api(objects)
     orchestrator = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", s3api),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", s3api, _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         runner=PassingRunner(),
     )
@@ -686,8 +751,8 @@ def test_repeated_stability_iteration_count_five_runs_each_endpoint_five_times()
     }
     s3api = FakeS3Api(objects)
     orchestrator = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", s3api),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", s3api, _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         runner=PassingRunner(),
     )
@@ -718,8 +783,8 @@ def test_repeated_stability_static_get_no_body_includes_iteration_metadata() -> 
     # The default fixture endpoint is a static GET with no payload/body.
     s3api = FakeS3Api(objects)
     orchestrator = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", s3api),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", s3api, _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         runner=PassingRunner(),
     )
@@ -749,8 +814,8 @@ def test_repeated_stability_multiplies_schedule_and_payload_iterations() -> None
     objects["configs/client/audits/audit/endpoints.json"]["endpoints"][0]["payload_iterations"] = 3
     s3api = FakeS3Api(objects)
     orchestrator = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", s3api),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", s3api, _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         runner=PassingRunner(),
     )
@@ -782,8 +847,8 @@ def test_scheduled_repeated_event_preserves_iteration_metadata() -> None:
     }
     s3api = FakeS3Api(objects)
     response = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", s3api),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", s3api, _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         runner=PassingRunner(),
     ).run(
@@ -811,8 +876,8 @@ def test_repeated_stability_rejects_missing_and_non_integer_iteration_count() ->
             repeated_schedule
         )
         response = CoreEngineOrchestrator(
-            s3_storage=S3StorageClient("bucket", FakeS3Api(objects)),
-            metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+            s3_storage=S3StorageClient("bucket", FakeS3Api(objects), _NO_HOLD),
+            metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
             secrets_client=SecretsManagerClient(FakeSecrets()),
             runner=PassingRunner(),
         ).run(
@@ -837,8 +902,8 @@ def test_repeated_stability_accepts_max_iteration_count() -> None:
     }
     s3api = FakeS3Api(objects)
     response = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", s3api),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", s3api, _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         runner=PassingRunner(),
     ).run(
@@ -863,8 +928,8 @@ def test_repeated_stability_rejects_max_plus_one_iteration_count() -> None:
     }
 
     response = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", FakeS3Api(objects)),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", FakeS3Api(objects), _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         runner=PassingRunner(),
     ).run(
@@ -909,8 +974,8 @@ def test_baseline_health_remains_single_pass_by_default() -> None:
     }
     s3api = FakeS3Api(objects)
     response = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", s3api),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", s3api, _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         runner=PassingRunner(),
     ).run(
@@ -933,8 +998,8 @@ def test_manual_burst_without_windows_uses_fallback_defaults_and_raw_evidence() 
     s3api = FakeS3Api(objects)
 
     response = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", s3api),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", s3api, _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         runner=PassingRunner(),
     ).run(
@@ -965,8 +1030,8 @@ def test_manual_burst_caps_lower_than_defaults_clamp_effective_values() -> None:
     s3api = FakeS3Api(objects)
 
     response = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", s3api),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", s3api, _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         runner=PassingRunner(),
     ).run(
@@ -996,8 +1061,8 @@ def test_scheduled_burst_uses_window_metadata_and_ignores_manual_defaults() -> N
     s3api = FakeS3Api(objects)
 
     response = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", s3api),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", s3api, _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         runner=PassingRunner(),
     ).run(
@@ -1032,8 +1097,8 @@ def test_scheduled_burst_without_enabled_window_fails_before_outbound_requests()
             raise AssertionError("scheduled burst should fail before outbound requests")
 
     response = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", FakeS3Api(valid_config_objects())),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", FakeS3Api(valid_config_objects()), _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         runner=FailingRunner(),
     ).run(
@@ -1068,8 +1133,8 @@ def test_burst_request_count_is_total_and_endpoints_are_round_robin() -> None:
     s3api = FakeS3Api(objects)
 
     response = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", s3api),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", s3api, _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         runner=runner,
     ).run(
@@ -1097,8 +1162,8 @@ def test_burst_concurrency_is_global_cap() -> None:
     runner = TrackingRunner(sleep_seconds=0.01)
 
     response = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", FakeS3Api(objects)),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", FakeS3Api(objects), _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         runner=runner,
     ).run(
@@ -1141,8 +1206,8 @@ def test_validation_failure_emits_sanitized_error_log_without_payload_leak() -> 
 def test_config_load_failure_emits_sanitized_error_log() -> None:
     logger = CapturingLogger()
     response = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", FakeS3Api()),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", FakeS3Api(), _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         logger=logger,
     ).run(
@@ -1171,8 +1236,8 @@ def test_raw_result_write_failure_emits_sanitized_error_log() -> None:
 
     logger = CapturingLogger()
     response = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", FailingPutS3(valid_config_objects())),
-        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo()),
+        s3_storage=S3StorageClient("bucket", FailingPutS3(valid_config_objects()), _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", FakeDynamo(), _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         runner=PassingRunner(),
         logger=logger,

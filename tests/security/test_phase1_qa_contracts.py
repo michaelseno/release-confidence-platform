@@ -71,6 +71,56 @@ class FakeDynamo:
         for index, name in enumerate(kwargs["ExpressionAttributeNames"].values()):
             item[name] = ExpressionAttributeValues[f":v{index}"]
 
+    def transact_write_items(self, TransactItems):  # noqa: N803
+        # Evidence Governance Workstream A1.LH3: put_started_once now writes
+        # via TransactWriteItems. No LegalHold record is ever stored here
+        # (paired with _NoLegalHoldRepository below), so the ConditionCheck
+        # item always trivially passes; only the governed Put item's own
+        # condition can fail, preserving pre-existing behavior -- including
+        # this fake's existing `puts` bookkeeping list.
+        from botocore.exceptions import ClientError
+
+        from release_confidence_platform.storage.dynamodb_codec import decode_item
+
+        reasons = []
+        any_failed = False
+        for transact_item in TransactItems:
+            if "Put" in transact_item:
+                item = decode_item(transact_item["Put"]["Item"])
+                key = (item["PK"], item["SK"])
+                if key in self.items:
+                    reasons.append({"Code": "ConditionalCheckFailed"})
+                    any_failed = True
+                else:
+                    reasons.append({"Code": "None"})
+            else:
+                reasons.append({"Code": "None"})
+        if any_failed:
+            raise ClientError(
+                {
+                    "Error": {"Code": "TransactionCanceledException", "Message": "cancelled"},
+                    "CancellationReasons": reasons,
+                },
+                "TransactWriteItems",
+            )
+        for transact_item in TransactItems:
+            if "Put" in transact_item:
+                item = decode_item(transact_item["Put"]["Item"])
+                self.puts.append(item)
+                self.items[(item["PK"], item["SK"])] = item
+        return {}
+
+
+class _NoLegalHoldRepository:
+    def get_legal_hold(self, client_id, audit_id, *, consistent_read=False):  # noqa: ARG002
+        return None
+
+    def legal_hold_key(self, client_id, audit_id):
+        return {"PK": f"CLIENT#{client_id}", "SK": f"AUDIT#{audit_id}#LEGALHOLD"}
+
+
+_NO_HOLD = _NoLegalHoldRepository()
+
 
 class FakeSecrets:
     def __init__(self, value="Bearer top-secret-token"):
@@ -120,8 +170,8 @@ def test_invalid_run_id_rejects_without_side_effects_or_raw_value_logging():
     logger = CapturingLogger()
 
     response = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", s3_api),
-        metadata_storage=DynamoDBMetadataClient("table", ddb_api),
+        s3_storage=S3StorageClient("bucket", s3_api, _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", ddb_api, _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
         logger=logger,
     ).run(
@@ -157,8 +207,8 @@ def test_valid_supplied_run_id_used_safely_in_outputs_and_secrets_are_not_persis
     secrets = FakeSecrets()
 
     response = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", s3_api),
-        metadata_storage=DynamoDBMetadataClient("table", ddb_api),
+        s3_storage=S3StorageClient("bucket", s3_api, _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", ddb_api, _NO_HOLD),
         secrets_client=SecretsManagerClient(secrets),
         runner=ApiRunner(Session()),
         logger=logger,
@@ -204,8 +254,8 @@ def test_dynamodb_duplicate_run_id_fails_without_endpoint_failure_pollution_or_o
     s3_api = FakeS3(_config_objects())
 
     response = CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", s3_api),
-        metadata_storage=DynamoDBMetadataClient("table", ddb_api),
+        s3_storage=S3StorageClient("bucket", s3_api, _NO_HOLD),
+        metadata_storage=DynamoDBMetadataClient("table", ddb_api, _NO_HOLD),
         secrets_client=SecretsManagerClient(FakeSecrets()),
     ).run(
         {

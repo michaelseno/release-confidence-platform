@@ -41,6 +41,7 @@ from packages.storage.secrets_client import SecretsManagerClient
 from release_confidence_platform.aggregation.orchestrator import AggregationOrchestrator
 from release_confidence_platform.aggregation.repository import AggregationRepository
 from release_confidence_platform.core.logging import StructuredLogger
+from release_confidence_platform.evidence_retention.hold_repository import HoldRepository
 
 # The canonical regression fixture UUID (shared with tests/unit/test_sanitizer_uuid_boundary.py
 # and tests/unit/test_execution_identity_dynamodb.py): its digit run "2475004829" matches
@@ -128,7 +129,11 @@ class _TableResource:
 
 
 class _LowLevelClient:
-    """Mirrors boto3.client('dynamodb'): typed values in and out, accepts TableName=."""
+    """Mirrors boto3.client('dynamodb') / table.meta.client: typed values in
+    and out, accepts TableName=. Evidence Governance Workstream A1.LH3:
+    additionally backs HoldRepository (get_item) and
+    HoldCoordinatedTransactionRunner (transact_write_items), exactly as
+    apps/backend/handlers/orchestrator_handler.py wires production."""
 
     def __init__(self, storage: _SharedDynamoStorage) -> None:
         self.storage = storage
@@ -143,6 +148,49 @@ class _LowLevelClient:
         pk = ExpressionAttributeValues[":pk"]["S"]
         sk_prefix = ExpressionAttributeValues[":sk_prefix"]["S"]
         return {"Items": self.storage.query_prefix(pk, sk_prefix)}
+
+    def get_item(self, TableName: str, Key: dict[str, Any], **_: Any) -> dict[str, Any]:
+        item = self.storage.get(Key["PK"]["S"], Key["SK"]["S"])
+        return {"Item": item} if item else {}
+
+    def transact_write_items(self, TransactItems: list[dict[str, Any]]) -> dict[str, Any]:
+        from botocore.exceptions import ClientError
+
+        reasons: list[dict[str, str]] = []
+        any_failed = False
+        for transact_item in TransactItems:
+            if "Put" in transact_item:
+                put = transact_item["Put"]
+                pk, sk = put["Item"]["PK"]["S"], put["Item"]["SK"]["S"]
+                if self.storage.get(pk, sk) is not None:
+                    reasons.append({"Code": "ConditionalCheckFailed"})
+                    any_failed = True
+                else:
+                    reasons.append({"Code": "None"})
+            elif "ConditionCheck" in transact_item:
+                cc = transact_item["ConditionCheck"]
+                pk, sk = cc["Key"]["PK"]["S"], cc["Key"]["SK"]["S"]
+                existing = self.storage.get(pk, sk)
+                if "attribute_not_exists" in cc["ConditionExpression"]:
+                    passed = existing is None
+                else:
+                    expected = cc["ExpressionAttributeValues"][":expected_hold_version"]
+                    passed = existing is not None and existing.get("hold_version") == expected
+                reasons.append({"Code": "None"} if passed else {"Code": "ConditionalCheckFailed"})
+                if not passed:
+                    any_failed = True
+        if any_failed:
+            raise ClientError(
+                {
+                    "Error": {"Code": "TransactionCanceledException", "Message": "cancelled"},
+                    "CancellationReasons": reasons,
+                },
+                "TransactWriteItems",
+            )
+        for transact_item in TransactItems:
+            if "Put" in transact_item:
+                self.storage.put(transact_item["Put"]["Item"])
+        return {}
 
 
 class _FakeS3:
@@ -193,9 +241,18 @@ class _FakeReadOnlyS3Storage:
 def _run_orchestrator_with_fixed_run_id(
     objects: dict[str, Any], table_resource: _TableResource
 ) -> dict[str, Any]:
+    # Evidence Governance Workstream A1.LH3: wired exactly as
+    # apps/backend/handlers/orchestrator_handler.py wires production -- the
+    # Table-resource-style client keeps backing DynamoDBMetadataClient's
+    # pre-existing operations; a low-level client (sharing the SAME
+    # underlying storage) backs HoldRepository/HoldCoordinatedTransactionRunner.
+    low_level_client = _LowLevelClient(table_resource.storage)
+    hold_repository = HoldRepository("table", low_level_client)
     return CoreEngineOrchestrator(
-        s3_storage=S3StorageClient("bucket", _FakeS3(objects)),
-        metadata_storage=DynamoDBMetadataClient("table", table_resource),
+        s3_storage=S3StorageClient("bucket", _FakeS3(objects), hold_repository),
+        metadata_storage=DynamoDBMetadataClient(
+            "table", table_resource, hold_repository, low_level_client
+        ),
         secrets_client=SecretsManagerClient(_FakeSecrets()),
         runner=ApiRunner(_FakeSession()),
     ).run(

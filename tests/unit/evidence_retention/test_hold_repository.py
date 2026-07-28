@@ -189,6 +189,69 @@ def test_get_legal_hold_event_uses_hold_version_discriminated_key():
 
 
 # ---------------------------------------------------------------------------
+# get_legal_hold -- consistent_read (Legal-Hold Correction A1.LH3; Technical
+# Design Section 19.5.4)
+# ---------------------------------------------------------------------------
+
+
+class _CapturingDynamoClient:
+    """Minimal low-level dynamodb client double recording get_item kwargs."""
+
+    def __init__(self, item=None):
+        self.item = item
+        self.get_item_calls = []
+
+    def get_item(self, **kwargs):
+        self.get_item_calls.append(kwargs)
+        if self.item is None:
+            return {}
+        from release_confidence_platform.storage.dynamodb_codec import encode_item
+
+        return {"Item": encode_item(self.item)}
+
+
+def test_get_legal_hold_default_does_not_send_consistent_read_kwarg():
+    """Default behavior (consistent_read=False, the implicit default every
+    pre-existing caller relies on) must send the exact same kwargs as
+    pre-A1.LH3 -- ConsistentRead omitted entirely, not explicitly False."""
+    client = _CapturingDynamoClient()
+    repo = HoldRepository(_TABLE, client)
+
+    repo.get_legal_hold(_CLIENT_ID, _AUDIT_ID)
+
+    assert len(client.get_item_calls) == 1
+    assert "ConsistentRead" not in client.get_item_calls[0]
+
+
+def test_get_legal_hold_consistent_read_true_sends_consistent_read_kwarg():
+    """The S3 raw-evidence write path (Technical Design Section 19.5.4) is
+    the caller that must pass consistent_read=True -- this proves the
+    underlying primitive actually forwards it to the DynamoDB GetItem call."""
+    client = _CapturingDynamoClient()
+    repo = HoldRepository(_TABLE, client)
+
+    repo.get_legal_hold(_CLIENT_ID, _AUDIT_ID, consistent_read=True)
+
+    assert len(client.get_item_calls) == 1
+    assert client.get_item_calls[0]["ConsistentRead"] is True
+
+
+def test_get_legal_hold_consistent_read_true_still_returns_decoded_item():
+    item = {
+        "PK": f"CLIENT#{_CLIENT_ID}",
+        "SK": f"AUDIT#{_AUDIT_ID}#LEGALHOLD",
+        "status": "ACTIVE",
+        "hold_version": 3,
+    }
+    client = _CapturingDynamoClient(item=item)
+    repo = HoldRepository(_TABLE, client)
+
+    result = repo.get_legal_hold(_CLIENT_ID, _AUDIT_ID, consistent_read=True)
+
+    assert result == item
+
+
+# ---------------------------------------------------------------------------
 # write_hold_event
 # ---------------------------------------------------------------------------
 
