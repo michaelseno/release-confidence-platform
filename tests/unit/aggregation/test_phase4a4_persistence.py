@@ -5,13 +5,14 @@ and integrity-gate tests.
 """
 
 import pytest
-from botocore.exceptions import ClientError
 
 from release_confidence_platform.aggregation.orchestrator import AggregationOrchestrator
 from release_confidence_platform.aggregation.repository import (
     AggregationRepository,
     ConditionalWriteError,
 )
+from release_confidence_platform.evidence_retention.hold_repository import HoldRepository
+from tests.unit.aggregation._hold_coordination_double import RecordingHoldAwareClient
 
 # ---------------------------------------------------------------------------
 # Helpers (duplicated from test_phase4_orchestrator.py to avoid import-path
@@ -64,14 +65,14 @@ class MemoryRepo:
         prefix = f"AUDIT#{audit_id}#EXEC#{exec_id}#CFG#{cfg}#AGG#{ver}"
         return (pk, f"{prefix}#SET") in self.items
 
-    def put_records_once(self, records):
+    def put_records_once(self, records, *, client_id="", audit_id=""):
         keys = [(item["PK"], item["SK"]) for item in records]
         if any(key in self.items for key in keys):
             raise ConditionalWriteError()
         for item in records:
             self._put(item)
 
-    def put_lineage_page_once(self, item):
+    def put_lineage_page_once(self, item, *, client_id="", audit_id=""):
         self._put(item)
 
     def get_lineage_page(self, key):
@@ -233,41 +234,29 @@ def test_agg_p3_new_job_id_same_aggregate_set_produces_duplicate_completed():
 # ---------------------------------------------------------------------------
 
 
-class _FailOnSecondTransactClient:
-    """Fake DynamoDB client that raises TransactionCanceledException on the 2nd call."""
-
-    def __init__(self):
-        self.call_count = 0
-
-    def transact_write_items(self, *, TransactItems):
-        self.call_count += 1
-        if self.call_count > 1:
-            raise ClientError(
-                {
-                    "Error": {
-                        "Code": "TransactionCanceledException",
-                        "Message": "conflict",
-                    }
-                },
-                "TransactWriteItems",
-            )
-        return {}
-
-
 def test_agg_p4_conditional_write_prevents_overwrite():
-    """put_records_once must raise ConditionalWriteError on the second call."""
-    client = _FailOnSecondTransactClient()
-    repo = AggregationRepository("metadata-table", client)
+    """put_records_once must raise ConditionalWriteError on the second call.
+
+    Evidence Governance Workstream A1.3c.1: uses the real, hold-coordinated
+    write path (RecordingHoldAwareClient's genuine per-key conditional
+    semantics) rather than an artificial always-fails-after-first-call fake
+    -- the second call's governed Put items legitimately fail their own
+    attribute_not_exists condition because the first call's records already
+    exist, exactly as real DynamoDB would behave.
+    """
+    client = RecordingHoldAwareClient()
+    hold_repository = HoldRepository("metadata-table", client)
+    repo = AggregationRepository("metadata-table", client, hold_repository)
 
     records = [
         {"PK": "CLIENT#c", "SK": "AUDIT#a#AUDIT", "value": 1},
         {"PK": "CLIENT#c", "SK": "AUDIT#a#SET", "value": 2},
     ]
 
-    repo.put_records_once(records)  # first call succeeds
+    repo.put_records_once(records, client_id="c", audit_id="a")  # first call succeeds
 
     with pytest.raises(ConditionalWriteError):
-        repo.put_records_once(records)  # second call must raise
+        repo.put_records_once(records, client_id="c", audit_id="a")  # second call must raise
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +271,7 @@ class _FailFirstPutRepo(MemoryRepo):
         super().__init__(*args, **kwargs)
         self._put_records_once_count = 0
 
-    def put_records_once(self, records):
+    def put_records_once(self, records, *, client_id="", audit_id=""):
         self._put_records_once_count += 1
         if self._put_records_once_count == 1:
             raise ConditionalWriteError()
@@ -319,7 +308,7 @@ def test_agg_p5_retry_after_pre_write_failure_produces_exactly_one_aggregate_set
 class _AlwaysFailingPutRepo(MemoryRepo):
     """put_records_once always raises ConditionalWriteError; aggregate_set_exists always False."""
 
-    def put_records_once(self, records):  # noqa: ARG002
+    def put_records_once(self, records, *, client_id="", audit_id=""):  # noqa: ARG002
         raise ConditionalWriteError()
 
 

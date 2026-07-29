@@ -127,11 +127,11 @@ class MemoryJobRepo:
             }
         ]
 
-    def put_records_once(self, records):
+    def put_records_once(self, records, *, client_id="", audit_id=""):
         for item in records:
             self._put(item)
 
-    def put_lineage_page_once(self, item):
+    def put_lineage_page_once(self, item, *, client_id="", audit_id=""):
         self._put(item)
 
     def get_lineage_page(self, key):

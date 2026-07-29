@@ -138,7 +138,9 @@ class HoldCoordinatedTransactionRunner:
         record's own Put/Update(s), with whatever condition that write
         already carries today, unchanged (e.g. `attribute_not_exists(PK)
         AND attribute_not_exists(SK)` for a CREATE; for Phase 4's
-        `put_records_once`, its existing 5-item set).
+        `put_records_once`, its variable-length `4 + 3N` governed-action
+        set, N = distinct endpoint count, per Technical Design Section
+        19.16).
       - `hold_condition_item`: built via `build_hold_version_condition_check_item`
         against the same `hold_state` this call received.
 

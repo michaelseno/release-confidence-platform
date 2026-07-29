@@ -310,7 +310,15 @@ def test_aggregation_accepts_runner_produced_envelope_with_phone_like_run_id(env
     write_response = _run_orchestrator_with_fixed_run_id(envelope_objects, _TableResource(storage))
     assert write_response["status"] == "COMPLETED"
 
-    agg_repo = AggregationRepository("table", _LowLevelClient(storage))
+    # Evidence Governance Workstream A1.3c.1: wired exactly as
+    # apps/backend/handlers/aggregation_handler.py wires production -- a
+    # HoldRepository backed by the SAME low-level client. This test only
+    # exercises AggregationRepository's read paths (list_completed_runs)
+    # today, but is wired with the full production dependency set for
+    # fidelity with the real handler wiring this file's docstring already
+    # commits to mirroring.
+    agg_hold_repository = HoldRepository("table", _LowLevelClient(storage))
+    agg_repo = AggregationRepository("table", _LowLevelClient(storage), agg_hold_repository)
     runs = agg_repo.list_completed_runs(CLIENT_ID, AUDIT_ID)
     assert len(runs) == 1
     assert runs[0]["run_id"] == PHONE_LIKE_RUN_ID

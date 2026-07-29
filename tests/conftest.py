@@ -21,6 +21,18 @@ configuration input (ADR Decision 5). Tests that specifically need to
 exercise the fail-closed path should
 ``monkeypatch.delenv("CUSTODY_PERIOD_DAYS_RAW_EVIDENCE", raising=False)`` to
 override this default.
+
+Evidence Governance Workstream A1.3c.1 (Technical Design Section 19.16.5;
+ADR Decision 5 amendment / Non-Negotiable Invariant 26) adds the identical
+pattern for Phase 4's evidence class:
+``release_confidence_platform.aggregation.repository.AggregationRepository
+.put_records_once``/``.put_lineage_page_once`` fail closed (``StorageError``
+/ ``CUSTODY_PERIOD_CONFIG_MISSING``) when
+``CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA`` is unresolvable at runtime. Same
+placeholder-value rationale, same override mechanism
+(``monkeypatch.delenv("CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA", raising=False)``
+or ``monkeypatch.setenv(..., "")``/``"0"``/``"-1"``/``"not-a-number"`` for
+tests that specifically exercise the fail-closed path).
 """
 
 from __future__ import annotations
@@ -28,6 +40,7 @@ from __future__ import annotations
 import pytest
 
 _TEST_ONLY_CUSTODY_PERIOD_DAYS_RAW_EVIDENCE = "90"
+_TEST_ONLY_CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA = "90"
 
 
 @pytest.fixture(autouse=True)
@@ -35,4 +48,12 @@ def _default_custody_period_days_raw_evidence(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv(
         "CUSTODY_PERIOD_DAYS_RAW_EVIDENCE",
         _TEST_ONLY_CUSTODY_PERIOD_DAYS_RAW_EVIDENCE,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _default_custody_period_days_aggregate_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA",
+        _TEST_ONLY_CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA,
     )
