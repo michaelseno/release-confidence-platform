@@ -1138,3 +1138,44 @@ In addition to §19.11's existing categories, extended to Phase 4's variable-len
 - **Governed-condition vs. hold-condition precedence**: both fail in the same attempt — the governed failure must win, per §19.4 step 4's existing, unmodified precedence rule, never masked as a hold-version retry.
 
 This test suite proves RCP's own preflight-guard behavior deterministically. It does not, and is not represented as, proof of AWS's internal `TransactWriteItems` byte-accounting implementation (§19.16.3).
+
+#### 19.16.5 Custody-Period Configuration Source for `aggregate_metadata`
+
+**Correction (Product Strategy — A1.3c.1 pre-implementation verification found no custody-period configuration channel existed for Phase 4's evidence class):** §18.1 and this section both require every governed Phase 4 DynamoDB row to carry `evidence_class = aggregate_metadata` and, per Category 1's custody-field requirement, `custody_expires_at`/`ttl_disposal_at`. Neither this document nor the companion ADR's Decision 5 (prior to its own A1.3c.1 amendment) ever named a configuration source `custody_expires_at` could be computed from for this specific evidence class — the only custody-period environment variable in the codebase, `CUSTODY_PERIOD_DAYS_RAW_EVIDENCE`, is scoped exclusively to RunMetadata (A1.3b/A1.LH3). This is now corrected:
+
+- **Runtime environment variable**: `CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA`, read by `AggregationRepository`'s governed write paths (`put_records_once`, `put_lineage_page_once`) at write time.
+- **Stack configuration source**: `custom.custodyPeriodDays.aggregate_metadata.${stage}`, per the companion ADR's amended Decision 5.
+- `custody_expires_at` is computed **independently, at each write's own time**, from this value — the same "never copied, never chained, computed fresh from the shared policy" discipline already established for every other custody-bearing write path in this document (§18.1's Category 2 clarification, §19.4 step 2). It is never derived from, defaulted to, or borrowed from `raw_evidence`'s or any other evidence class's configured value, per ADR Non-Negotiable Invariant 26.
+- **Fail-closed, mirroring the established `raw_evidence` pattern** (`packages/storage/dynamodb_client.py::_resolve_custody_period_days_env`): if `CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA` is unset, empty, non-numeric, zero, negative, or otherwise not a positive integer, the governed write must raise `CUSTODY_PERIOD_CONFIG_MISSING` — this exact code, not an equivalent or substitute — **before** any hold-state read, any transact-item construction, or any AWS request — never silently omitting `custody_expires_at`, never substituting a default, and never proceeding with a partially-governed record.
+- No Phase 4 governed record (any of the `4 + 3N` items from `put_records_once`, or a `put_lineage_page_once` item) may ever be persisted missing `custody_expires_at` or `evidence_class` — both must be present on every write that succeeds, with no partial-success path.
+- **No duration value is selected by this correction.** `CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA` and `custom.custodyPeriodDays.aggregate_metadata.${stage}` are named and specified here as the authoritative channel; the numeric value itself remains a separate, lower-priority Product Strategy decision, per AC-A1-5 and the companion ADR's Decision 5 — unchanged by this correction.
+
+#### 19.16.6 Implementation Consequences — Required in A1.3c.1
+
+**Correction (Product Strategy — the prior revision of this subsection incorrectly deferred Lambda-environment wiring; corrected below):** the code-level fail-closed read (§19.16.5) is necessary but not sufficient on its own — without the Lambda `environment:` binding below, `AggregationRepository` can read `os.environ.get("CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA")` in code, but no deployed Phase 4 Lambda process would ever actually receive that variable, and every invocation would fail closed permanently regardless of whether a stage value is later supplied — an unintended, permanent outage rather than an intentional, correctable gate. The environment binding is therefore **required, in-scope A1.3c.1 implementation work**, not deferred:
+
+- Add `aggregate_metadata: {}` to `infra/serverless.yml`'s existing `custom.custodyPeriodDays` block, alongside the existing `raw_evidence`/`intelligence`/`report`/`certificate`/`retention_marker` keys, using the identical empty-mapping, no-fallback pattern already established for every other key in that block. **This key addition alone does not, by itself, cause `sls print`, packaging, or deployment to fail** — an empty mapping with no downstream reference is simply an unused configuration value, not a fail-closed gate.
+- Bind the variable on the `auditAggregation` function only:
+
+  ```yaml
+  functions:
+    auditAggregation:
+      environment:
+        CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA: ${self:custom.custodyPeriodDays.aggregate_metadata.${self:provider.stage}}
+  ```
+
+  **This binding is what creates the fail-closed gate**, not the bare configuration key above: referencing `custom.custodyPeriodDays.aggregate_metadata.${self:provider.stage}` from a function's `environment:` block, while no stage-specific value has been supplied under that key, is what causes Serverless Framework's variable resolution to fail at package/deploy time — the same mechanism already proven for the four S3-backed evidence classes' `Days`/`NoncurrentDays` references.
+- **Explicitly prohibited by this correction**: a provider-wide (`provider.environment`) binding; binding this variable to `coreEngineOrchestrator`, `scheduledExecution`, `auditFinalization`, or any function other than `auditAggregation`; any fallback or default value (e.g. `${self:custom.custodyPeriodDays.aggregate_metadata.${self:provider.stage}, 90}` or similar) that would silently resolve instead of failing; and any numeric duration value — this correction names the channel and requires the binding to exist, but selects no value.
+- The referenced stage value (`custom.custodyPeriodDays.aggregate_metadata.${stage}`) remains absent for every stage (dev/staging/prod) until a separate, explicit Product Strategy decision supplies it — identical to every other custody-period value in this design.
+- `sls print --stage <any>` must fail at variable-resolution time **specifically because `custom.custodyPeriodDays.aggregate_metadata.${self:provider.stage}` is referenced and unresolved** (via the `auditAggregation` environment binding above) — this failed render must not be represented as successful template validation, and must not be conflated with the bare configuration key's own (non-failing) presence.
+- No deployment or activation is authorized by this correction.
+
+Required test coverage:
+
+- **Static**: the `aggregate_metadata` configuration key exists in `custom.custodyPeriodDays`.
+- **Static**: the `CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA` environment binding exists on `auditAggregation` and on no other function; no `provider.environment` binding exists for this variable.
+- **Static**: no fallback or default value is present anywhere in the binding's variable reference.
+- **Render**: `sls print --stage <any>` fails, and fails specifically because `custom.custodyPeriodDays.aggregate_metadata.${self:provider.stage}` is unresolved (not some unrelated failure) — the failure is asserted as intentional and fail-closed, never reported as successful rendering.
+- **Runtime, missing/invalid configuration**: unset, empty, non-numeric, zero, negative — each raises `CUSTODY_PERIOD_CONFIG_MISSING` before any hold-state read, transaction construction, or AWS request, per §19.16.5.
+
+Preserved, unchanged by this correction: no duration value is selected; no default is authorized anywhere in the binding; no fifth S3 `LifecycleConfiguration` rule is created (`aggregate_metadata` remains DynamoDB-only, §19.16.5); no provider-wide environment variable is added; no deployment or activation occurs; no A1.3d, migration, or issue #112 work enters scope.
