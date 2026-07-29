@@ -5,6 +5,8 @@ from release_confidence_platform.aggregation.repository import (
     AggregationRepository,
     ConditionalWriteError,
 )
+from release_confidence_platform.evidence_retention.hold_repository import HoldRepository
+from tests.unit.aggregation._hold_coordination_double import RecordingHoldAwareClient
 
 
 class MemoryRepo:
@@ -51,14 +53,14 @@ class MemoryRepo:
         prefix = f"AUDIT#{audit_id}#EXEC#{exec_id}#CFG#{cfg}#AGG#{ver}"
         return (pk, f"{prefix}#SET") in self.items
 
-    def put_records_once(self, records):
+    def put_records_once(self, records, *, client_id="", audit_id=""):
         keys = [(item["PK"], item["SK"]) for item in records]
         if any(key in self.items for key in keys):
             raise ConditionalWriteError()
         for item in records:
             self._put(item)
 
-    def put_lineage_page_once(self, item):
+    def put_lineage_page_once(self, item, *, client_id="", audit_id=""):
         self._put(item)
 
     def get_lineage_page(self, key):
@@ -271,7 +273,7 @@ def test_repeated_aggregation_is_duplicate_completed_no_double_count():
 
 
 class FailingTransactionalRepo(MemoryRepo):
-    def put_records_once(self, records):  # noqa: ARG002
+    def put_records_once(self, records, *, client_id="", audit_id=""):  # noqa: ARG002
         raise ConditionalWriteError()
 
 
@@ -290,7 +292,7 @@ def test_transaction_write_failure_leaves_no_partial_manifest_or_aggregates():
 
 
 class CompleteOnConflictRepo(MemoryRepo):
-    def put_records_once(self, records):
+    def put_records_once(self, records, *, client_id="", audit_id=""):
         for item in records:
             self.items[(item["PK"], item["SK"])] = item
         raise ConditionalWriteError()
@@ -384,31 +386,37 @@ def test_sensitive_canaries_are_absent_from_persisted_outputs_and_response():
         assert canary not in persisted.lower()
 
 
-class DynamoTransactClient:
-    def __init__(self):
-        self.transact_items = None
-
-    def transact_write_items(self, *, TransactItems):
-        self.transact_items = TransactItems
-        return {}
-
-
 def test_repository_writes_complete_aggregate_set_as_single_transaction():
-    client = DynamoTransactClient()
-    repository = AggregationRepository("metadata-table", client)
+    # Evidence Governance Workstream A1.3c.1 (Technical Design Section 19.4):
+    # put_records_once now requires a configured HoldRepository and appends
+    # the LegalHold.hold_version ConditionCheck as the transaction's final
+    # item -- the transaction item count is len(records) + 1, not
+    # len(records).
+    client = RecordingHoldAwareClient()
+    hold_repository = HoldRepository("metadata-table", client)
+    repository = AggregationRepository("metadata-table", client, hold_repository)
 
     repository.put_records_once(
         [
             {"PK": "CLIENT#client", "SK": "AUDIT#audit#LINEAGE#audit", "value": 1},
             {"PK": "CLIENT#client", "SK": "AUDIT#audit#AUDIT", "value": 2},
-        ]
+        ],
+        client_id="client",
+        audit_id="audit",
     )
 
-    assert client.transact_items is not None
-    assert len(client.transact_items) == 2
-    assert all("Put" in item for item in client.transact_items)
+    assert len(client.transact_calls) == 1
+    transact_items = client.transact_calls[0]
+    assert len(transact_items) == 3
+    put_items, condition_items = transact_items[:2], transact_items[2:]
+    assert all("Put" in item for item in put_items)
     assert all(
         item["Put"]["ConditionExpression"]
         == "attribute_not_exists(PK) AND attribute_not_exists(SK)"
-        for item in client.transact_items
+        for item in put_items
+    )
+    assert len(condition_items) == 1
+    assert "ConditionCheck" in condition_items[0]
+    assert condition_items[0]["ConditionCheck"]["ConditionExpression"] == (
+        "attribute_not_exists(PK)"
     )

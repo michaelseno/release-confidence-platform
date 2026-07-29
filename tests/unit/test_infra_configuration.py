@@ -389,10 +389,119 @@ def test_custody_period_days_config_defines_no_value_for_any_stage() -> None:
         serverless_template = yaml.safe_load(fh)
 
     custody_period_days = serverless_template["custom"]["custodyPeriodDays"]
-    expected_keys = set(_EVIDENCE_CLASS_TO_S3_PREFIX) | {"retention_marker"}
+    # Evidence Governance Workstream A1.3c.1 (Technical Design Section
+    # 19.16.6; ADR Decision 5 amendment / Non-Negotiable Invariant 26):
+    # aggregate_metadata is a fifth key, DynamoDB-only (no S3 rule), governed
+    # by the identical no-fallback-value requirement.
+    expected_keys = set(_EVIDENCE_CLASS_TO_S3_PREFIX) | {"retention_marker", "aggregate_metadata"}
     assert set(custody_period_days) == expected_keys
     for key, stage_values in custody_period_days.items():
         assert stage_values == {}, (
             f"custom.custodyPeriodDays.{key} must remain an empty "
             f"mapping (no stage may have a value supplied), got: {stage_values!r}"
         )
+
+
+def test_aggregate_metadata_custody_period_env_binding_exists_on_aggregation_only() -> None:
+    """Technical Design Section 19.16.6 required test coverage: the
+    CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA environment binding exists on
+    auditAggregation and on no other function; no provider-wide
+    (provider.environment) binding exists for this variable.
+    """
+    with Path("infra/serverless.yml").open(encoding="utf-8") as fh:
+        serverless_template = yaml.safe_load(fh)
+
+    provider_environment = serverless_template["provider"].get("environment", {})
+    assert "CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA" not in provider_environment, (
+        "CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA must not be bound provider-wide"
+    )
+
+    functions = serverless_template["functions"]
+    bound_functions = [
+        name
+        for name, spec in functions.items()
+        if "CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA" in spec.get("environment", {})
+    ]
+    assert bound_functions == ["auditAggregation"], (
+        f"expected CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA bound on exactly "
+        f"['auditAggregation'], got: {bound_functions!r}"
+    )
+
+
+def test_aggregate_metadata_custody_period_env_binding_has_no_fallback_or_literal() -> None:
+    """Technical Design Section 19.16.6: no fallback/default value, and no
+    numeric duration literal, may appear in the binding's variable
+    reference."""
+    with Path("infra/serverless.yml").open(encoding="utf-8") as fh:
+        serverless_template = yaml.safe_load(fh)
+
+    binding = serverless_template["functions"]["auditAggregation"]["environment"][
+        "CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA"
+    ]
+    assert binding == (
+        "${self:custom.custodyPeriodDays.aggregate_metadata.${self:provider.stage}}"
+    ), f"unexpected binding shape (fallback/default or literal present?): {binding!r}"
+    assert "," not in binding, "a comma indicates a Serverless Framework fallback value"
+
+
+def test_aggregate_metadata_custody_period_not_bound_on_other_functions() -> None:
+    """Technical Design Section 19.16.6's explicit prohibition: this
+    variable must never be bound to coreEngineOrchestrator, scheduledExecution,
+    auditFinalization, or any function other than auditAggregation."""
+    with Path("infra/serverless.yml").open(encoding="utf-8") as fh:
+        serverless_template = yaml.safe_load(fh)
+
+    for name, spec in serverless_template["functions"].items():
+        if name == "auditAggregation":
+            continue
+        assert "CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA" not in spec.get("environment", {}), (
+            f"CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA must not be bound on {name!r}"
+        )
+
+
+def test_serverless_print_fails_on_unresolved_aggregate_metadata_custody_period() -> None:
+    """Technical Design Section 19.16.6's render-test requirement: `sls print
+    --stage <any>` must fail at variable-resolution time specifically because
+    `custom.custodyPeriodDays.aggregate_metadata.${self:provider.stage}` is
+    unresolved (via the auditAggregation environment binding) -- not merely
+    exit non-zero for an unrelated reason. This is the same fail-closed proof
+    already required of the four S3-backed evidence classes
+    (test_serverless_variable_resolution_requires_serverless_cli documents
+    why that check is not run by this Python suite by default); this test
+    additionally attempts the real invocation when the Serverless
+    CLI/Node toolchain is available, and skips (not passes silently) when it
+    is not, so this specific fail-closed proof is not lost entirely to the
+    "manual/CI step" boundary.
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("npx") is None:
+        pytest.skip("npx/Node toolchain not available in this environment")
+
+    infra_dir = Path("infra")
+    try:
+        result = subprocess.run(
+            ["npx", "sls", "print", "--stage", "dev"],
+            cwd=infra_dir,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        pytest.skip(f"Serverless CLI invocation unavailable/timed out: {exc}")
+
+    assert result.returncode != 0, (
+        "sls print must fail (unpopulated custody-period configuration) -- "
+        "a successful render here would mean the fail-closed gate is broken "
+        "or a duration value was accidentally introduced"
+    )
+    combined_output = result.stdout + result.stderr
+    assert (
+        'functions.auditAggregation.environment.CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA'
+        in combined_output
+    ), (
+        "sls print's failure must specifically name the unresolved "
+        "auditAggregation.environment.CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA "
+        f"reference; got output:\n{combined_output}"
+    )

@@ -57,14 +57,14 @@ class MemoryRepo:
         prefix = f"AUDIT#{audit_id}#EXEC#{exec_id}#CFG#{cfg}#AGG#{ver}"
         return (pk, f"{prefix}#SET") in self.items
 
-    def put_records_once(self, records):
+    def put_records_once(self, records, *, client_id="", audit_id=""):
         keys = [(item["PK"], item["SK"]) for item in records]
         if any(key in self.items for key in keys):
             raise ConditionalWriteError()
         for item in records:
             self._put(item)
 
-    def put_lineage_page_once(self, item):
+    def put_lineage_page_once(self, item, *, client_id="", audit_id=""):
         self._put(item)
 
     def get_lineage_page(self, key):

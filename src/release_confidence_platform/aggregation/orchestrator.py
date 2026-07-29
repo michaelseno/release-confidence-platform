@@ -230,9 +230,9 @@ class AggregationOrchestrator:
                 manifest_scope="audit",
                 source_ref_count=len(records),
             )
-            self._write_lineage_pages(lineage_pages)
+            self._write_lineage_pages(lineage_pages, client_id=client_id, audit_id=audit_id)
             try:
-                self.repository.put_records_once(all_items)
+                self.repository.put_records_once(all_items, client_id=client_id, audit_id=audit_id)
             except ConditionalWriteError:
                 if self.repository.aggregate_set_exists(
                     client_id, audit_id, audit_execution_id, config_version, aggregation_version
@@ -521,10 +521,14 @@ class AggregationOrchestrator:
         ref = manifest_ref(header, pk=pk, sk=manifest_sk)
         return header, ref, pages
 
-    def _write_lineage_pages(self, pages: list[dict[str, Any]]) -> None:
+    def _write_lineage_pages(
+        self, pages: list[dict[str, Any]], *, client_id: str, audit_id: str
+    ) -> None:
         for page in pages:
             try:
-                self.repository.put_lineage_page_once(page)
+                self.repository.put_lineage_page_once(
+                    page, client_id=client_id, audit_id=audit_id
+                )
             except ConditionalWriteError as exc:
                 existing = self.repository.get_lineage_page({"PK": page["PK"], "SK": page["SK"]})
                 if not existing or existing.get("page_hash") != page.get("page_hash"):

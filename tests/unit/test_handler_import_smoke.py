@@ -111,8 +111,13 @@ def test_aggregation_handler_repository_receives_metadata_table(monkeypatch):
 
     captured_args: list = []
 
-    def capturing_repo(table, client):
-        captured_args.extend([table, client])
+    def capturing_repo(table, client, hold_repository=None):
+        # Evidence Governance Workstream A1.3c.1: handler now constructs
+        # AggregationRepository with a third positional argument
+        # (hold_repository) -- accept it (and record it) without breaking
+        # this smoke test's own focus (METADATA_TABLE reaches the
+        # constructor).
+        captured_args.extend([table, client, hold_repository])
         return MagicMock()
 
     mock_orchestrator = MagicMock()

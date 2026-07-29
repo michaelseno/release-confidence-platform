@@ -117,12 +117,22 @@ custom:
   # evaluated from, any evidence-class custody period. Same no-fallback,
   # fail-closed pattern as the four evidence classes above; left unset for
   # every stage until Product Strategy supplies a real value.
+  #
+  # aggregate_metadata (Evidence Governance Workstream A1.3c.1; ADR Decision 5
+  # amendment / Non-Negotiable Invariant 26; Technical Design Section 19.16.5
+  # / 19.16.6): Phase 4's evidence class. Consumed exclusively as the
+  # CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA Lambda environment variable on
+  # auditAggregation below -- there is no S3-backed lifecycle rule for this
+  # class (AggregationRepository has no S3 client dependency; DynamoDB-only).
+  # Same no-fallback, fail-closed, unset-until-a-separate-Product-Strategy-
+  # decision pattern as every other key in this block.
   custodyPeriodDays:
     raw_evidence: {}
     intelligence: {}
     report: {}
     certificate: {}
     retention_marker: {}
+    aggregate_metadata: {}
 
 package:
   patterns:
@@ -177,6 +187,18 @@ functions:
       Fn::GetAtt:
         - AuditAggregationLambdaRole
         - Arn
+    # Evidence Governance Workstream A1.3c.1 (Technical Design Section
+    # 19.16.5/19.16.6; ADR Decision 5 amendment / Non-Negotiable Invariant
+    # 26): bound on this function ONLY -- no provider-wide binding, no
+    # fallback/default value, no numeric duration. Referencing an unset
+    # stage key (custom.custodyPeriodDays.aggregate_metadata.${stage}) is
+    # what makes this binding -- not the bare custom.custodyPeriodDays key
+    # above -- the fail-closed gate: it fails Serverless Framework variable
+    # resolution at package/deploy time until Product Strategy supplies a
+    # real value, mirroring the four S3-backed evidence classes' existing
+    # Days/NoncurrentDays references above.
+    environment:
+      CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA: ${self:custom.custodyPeriodDays.aggregate_metadata.${self:provider.stage}}
 
 resources:
   - ${file(resources/s3.yml)}

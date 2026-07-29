@@ -71,7 +71,7 @@ class MemoryRepo:
     def list_completed_runs(self, client_id, audit_id):
         return self.runs
 
-    def put_records_once(self, records):
+    def put_records_once(self, records, *, client_id="", audit_id=""):
         from release_confidence_platform.aggregation.repository import (
             ConditionalWriteError,  # noqa: PLC0415
         )
@@ -82,7 +82,7 @@ class MemoryRepo:
         for item in records:
             self._put(item)
 
-    def put_lineage_page_once(self, item):
+    def put_lineage_page_once(self, item, *, client_id="", audit_id=""):
         self._put(item)
 
     def get_lineage_page(self, key):

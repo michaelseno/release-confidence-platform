@@ -60,10 +60,34 @@ NO_STATUS = "NO_STATUS"
 UNKNOWN_ENDPOINT = "unknown"
 
 MAX_MANIFEST_BYTES = 300_000
-MAX_AGGREGATE_RECORDS = 100
+
+# Evidence Governance Workstream A1.3c.1 (Technical Design Section 19.16.1):
+# DynamoDB's TransactWriteItems hard cap is 100 items total, counting every
+# item type in the request (Put, ConditionCheck, or otherwise). Transaction
+# splitting across multiple TransactWriteItems calls is not authorized
+# (Product Strategy decision) -- instead, one slot is permanently reserved
+# for the appended LegalHold.hold_version ConditionCheck (Technical Design
+# Section 19.4 step 3 Item A), so the governed-record ceiling is the hard
+# cap minus that one reserved slot.
+_DYNAMODB_TRANSACT_WRITE_ITEMS_HARD_CAP = 100
+HOLD_CHECK_RESERVED_TRANSACTION_ITEMS = 1
+MAX_AGGREGATE_RECORDS = (
+    _DYNAMODB_TRANSACT_WRITE_ITEMS_HARD_CAP - HOLD_CHECK_RESERVED_TRANSACTION_ITEMS
+)
 MAX_AGGREGATE_ITEM_BYTES = 300_000
 MAX_AGGREGATE_TRANSACTION_BYTES = 3_800_000
 MAX_ENDPOINT_ID_LENGTH = 128
+
+# Evidence Governance Workstream A1.3c.1 (Technical Design Section 19.16.5;
+# ADR Decision 5 amendment / Non-Negotiable Invariant 26): the runtime
+# environment variable AggregationRepository's governed write paths
+# (put_records_once, put_lineage_page_once) read to resolve the
+# aggregate_metadata evidence class's custody-period duration. Mirrors
+# packages/storage/dynamodb_client.py's CUSTODY_PERIOD_DAYS_RAW_EVIDENCE_ENV_VAR
+# naming convention. No default value is defined here -- see
+# repository.py::_resolve_aggregate_metadata_custody_period_days for the
+# fail-closed resolution logic.
+CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA_ENV_VAR = "CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA"
 
 # Validated worst-case ceiling (every identifier field — client_id, audit_id,
 # run_id, endpoint_id, audit_execution_id, config_version, aggregation_job_id —
