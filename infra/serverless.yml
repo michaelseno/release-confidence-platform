@@ -93,46 +93,52 @@ custom:
   # Design Section 5/14/17
   # (evidence_governance_workstream_a1_retention_enforcement_technical_design.md).
   #
-  # Per-evidence-class, per-stage custody-period duration, sourced here as
-  # the single external configuration input consumed by
-  # resources/s3.yml's LifecycleConfiguration.Days/NoncurrentDays. The
+  # Per-evidence-class, per-stage custody-period duration, consumed by
+  # resources/s3.yml's LifecycleConfiguration.Days/NoncurrentDays and by
+  # this function's own Lambda environment binding below. The
   # custody-period duration value itself is a separate, lower-priority
-  # Product Strategy decision (AC-A1-5) and is deliberately left unset for
-  # every evidence class and every stage below -- mirroring the
-  # no-fallback-value pattern already used by logRetentionInDays directly
-  # above. Referencing an unset stage key (e.g.
-  # ${self:custom.custodyPeriodDays.raw_evidence.dev}) fails Serverless
-  # Framework variable resolution at package/deploy time with an
-  # unresolved-variable error; this is an intentional fail-closed gate, not
-  # a silent default -- the S3 lifecycle rules cannot deploy to any stage
-  # until Product Strategy supplies real values here. No custody-period
-  # duration value may be added to this block by any change other than that
-  # explicit Product Strategy decision.
+  # Product Strategy decision (AC-A1-5) and is deliberately left
+  # unconfigured for every evidence class and every stage.
+  #
+  # Evidence Governance Workstream A1.3d.0/A1.3d.1 -- ADR Decision 5
+  # (A1.3d.0 consolidation amendment) / Non-Negotiable Invariant 29;
+  # Technical Design Section 20.3: this block's six keys --
+  # raw_evidence, aggregate_metadata, intelligence, report, certificate,
+  # retention_marker -- are consolidated onto ONE authoritative, checked-in,
+  # stage-indexed configuration source, config/custody_periods.json, via
+  # Serverless Framework's native ${file(...)} external-file reference
+  # syntax, rather than the inline empty-mapping literals this block
+  # previously carried (A1.2/A1.3c.1). This is a source-only migration:
+  # every key's fail-closed, no-fallback-value semantics are unchanged --
+  # the referenced evidentiary-class and operational-duration objects
+  # contain no stage properties, so every stage remains unconfigured until
+  # an authorized duration is supplied, and referencing an unconfigured
+  # stage still fails Serverless Framework variable resolution at
+  # package/deploy time with an unresolved-variable error, exactly as the
+  # prior inline {} mapping did.
+  # No custody-period duration value may be added to config/custody_periods.json
+  # by any change other than a separate, explicit Product Strategy decision.
+  #
+  # aggregate_metadata's existing Lambda-environment-variable consumption
+  # (CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA, bound on auditAggregation
+  # below only) is unchanged by this migration -- only the source that
+  # custom.custodyPeriodDays.aggregate_metadata itself resolves from
+  # changes (inline literal -> external file reference); the binding
+  # itself, and every other function's lack of a binding, is untouched.
   #
   # retention_marker (Legal-Hold Correction B2; Technical Design Section
   # 19.5.8; ADR Non-Negotiable Invariant 22): the canary marker's own
-  # disposal period, added here as its own key rather than reusing any
-  # evidence-class value above -- a marker's governance purpose (and
-  # therefore its retention question) is narrower than, and independently
-  # evaluated from, any evidence-class custody period. Same no-fallback,
-  # fail-closed pattern as the four evidence classes above; left unset for
-  # every stage until Product Strategy supplies a real value.
-  #
-  # aggregate_metadata (Evidence Governance Workstream A1.3c.1; ADR Decision 5
-  # amendment / Non-Negotiable Invariant 26; Technical Design Section 19.16.5
-  # / 19.16.6): Phase 4's evidence class. Consumed exclusively as the
-  # CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA Lambda environment variable on
-  # auditAggregation below -- there is no S3-backed lifecycle rule for this
-  # class (AggregationRepository has no S3 client dependency; DynamoDB-only).
-  # Same no-fallback, fail-closed, unset-until-a-separate-Product-Strategy-
-  # decision pattern as every other key in this block.
+  # disposal period, resolved from operational_durations.retention_marker
+  # in the same file -- a schema-distinct, non-evidentiary namespace
+  # (Technical Design Section 20.3) never conflated with the five
+  # evidentiary classes above.
   custodyPeriodDays:
-    raw_evidence: {}
-    intelligence: {}
-    report: {}
-    certificate: {}
-    retention_marker: {}
-    aggregate_metadata: {}
+    raw_evidence: ${file(../config/custody_periods.json):evidentiary_classes.raw_evidence.${self:provider.stage}}
+    aggregate_metadata: ${file(../config/custody_periods.json):evidentiary_classes.aggregate_metadata.${self:provider.stage}}
+    intelligence: ${file(../config/custody_periods.json):evidentiary_classes.intelligence.${self:provider.stage}}
+    report: ${file(../config/custody_periods.json):evidentiary_classes.report.${self:provider.stage}}
+    certificate: ${file(../config/custody_periods.json):evidentiary_classes.certificate.${self:provider.stage}}
+    retention_marker: ${file(../config/custody_periods.json):operational_durations.retention_marker.${self:provider.stage}}
 
 package:
   patterns:
