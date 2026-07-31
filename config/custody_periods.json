@@ -1,0 +1,12 @@
+{
+  "evidentiary_classes": {
+    "raw_evidence": {},
+    "aggregate_metadata": {},
+    "intelligence": {},
+    "report": {},
+    "certificate": {}
+  },
+  "operational_durations": {
+    "retention_marker": {}
+  }
+}

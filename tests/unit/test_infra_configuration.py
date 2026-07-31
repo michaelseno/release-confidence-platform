@@ -231,9 +231,7 @@ def test_s3_lifecycle_configuration_has_untagged_retention_marker_rule() -> None
     rules = s3_template["Resources"]["RawResultsBucket"]["Properties"]["LifecycleConfiguration"][
         "Rules"
     ]
-    marker_rules = [
-        rule for rule in rules if rule["Filter"].get("Prefix") == "retention-markers/"
-    ]
+    marker_rules = [rule for rule in rules if rule["Filter"].get("Prefix") == "retention-markers/"]
     assert len(marker_rules) == 1
     rule = marker_rules[0]
     assert rule["Status"] == "Enabled"
@@ -255,12 +253,9 @@ def test_s3_lifecycle_days_reference_custody_period_config_not_hardcoded() -> No
     s3_yml_text = Path("infra/resources/s3.yml").read_text(encoding="utf-8")
 
     for evidence_class in _EVIDENCE_CLASS_TO_S3_PREFIX:
-        reference = (
-            f"${{self:custom.custodyPeriodDays.{evidence_class}.${{self:provider.stage}}}}"
-        )
+        reference = f"${{self:custom.custodyPeriodDays.{evidence_class}.${{self:provider.stage}}}}"
         assert s3_yml_text.count(reference) == 2, (
-            f"expected exactly two references (Days + NoncurrentDays) to "
-            f"{reference!r}"
+            f"expected exactly two references (Days + NoncurrentDays) to {reference!r}"
         )
 
     for line in s3_yml_text.splitlines():
@@ -329,9 +324,7 @@ def test_evidence_retention_dlq_template_defines_no_lambda_function() -> None:
     with Path("infra/resources/evidence-retention-dlq.yml").open(encoding="utf-8") as fh:
         dlq_template = yaml.safe_load(fh)
 
-    resource_types = {
-        resource.get("Type") for resource in dlq_template["Resources"].values()
-    }
+    resource_types = {resource.get("Type") for resource in dlq_template["Resources"].values()}
     assert "AWS::Lambda::Function" not in resource_types
     assert "AWS::Lambda::EventSourceMapping" not in resource_types
 
@@ -372,34 +365,116 @@ def test_serverless_package_patterns_include_evidence_retention_module() -> None
     assert "../src/release_confidence_platform/evidence_retention/**" in patterns
 
 
-def test_custody_period_days_config_defines_no_value_for_any_stage() -> None:
-    """AC-A1-5 / ADR Non-Negotiable Invariant 3: no custody-period duration
-    value may exist anywhere in serverless.yml for any evidence class or any
-    stage. Each per-evidence-class block must be an empty mapping -- a
-    hardcoded number, an empty string silently treated as zero, or a
-    populated stage key would all violate this constraint.
+_CUSTODY_PERIODS_JSON_REFERENCE_PREFIX = "${file(../config/custody_periods.json):"
 
-    Legal-Hold Correction B2 (Technical Design Section 19.5.8; ADR
-    Non-Negotiable Invariant 22) added a fifth key, retention_marker, for
-    the canary marker's own disposal period -- included here alongside the
-    four evidence classes since it is governed by the identical
-    fail-closed, no-fallback-value requirement, not a separate one.
+_EVIDENCE_CLASS_CUSTODY_REFERENCES = {
+    evidence_class: (
+        f"${{file(../config/custody_periods.json):evidentiary_classes."
+        f"{evidence_class}.${{self:provider.stage}}}}"
+    )
+    for evidence_class in (
+        "raw_evidence",
+        "aggregate_metadata",
+        "intelligence",
+        "report",
+        "certificate",
+    )
+}
+_RETENTION_MARKER_CUSTODY_REFERENCE = (
+    "${file(../config/custody_periods.json):operational_durations."
+    "retention_marker.${self:provider.stage}}"
+)
+
+
+def test_custody_period_days_config_references_authoritative_json_file() -> None:
+    """Evidence Governance Workstream A1.3d.1 (ADR Decision 5's A1.3d.0
+    consolidation amendment / Non-Negotiable Invariant 29; Technical Design
+    Section 20.3/20.12): all six custom.custodyPeriodDays.<class> keys --
+    raw_evidence, aggregate_metadata, intelligence, report, certificate,
+    retention_marker -- must resolve via the exact
+    ${file(../config/custody_periods.json):...} external-file reference for
+    that key, migrated off the prior inline empty-mapping literal
+    (A1.2/A1.3c.1). No duration value, default, or fallback exists anywhere
+    in any of the six references.
     """
     with Path("infra/serverless.yml").open(encoding="utf-8") as fh:
         serverless_template = yaml.safe_load(fh)
 
     custody_period_days = serverless_template["custom"]["custodyPeriodDays"]
-    # Evidence Governance Workstream A1.3c.1 (Technical Design Section
-    # 19.16.6; ADR Decision 5 amendment / Non-Negotiable Invariant 26):
-    # aggregate_metadata is a fifth key, DynamoDB-only (no S3 rule), governed
-    # by the identical no-fallback-value requirement.
-    expected_keys = set(_EVIDENCE_CLASS_TO_S3_PREFIX) | {"retention_marker", "aggregate_metadata"}
+    expected_keys = set(_EVIDENCE_CLASS_CUSTODY_REFERENCES) | {"retention_marker"}
     assert set(custody_period_days) == expected_keys
-    for key, stage_values in custody_period_days.items():
-        assert stage_values == {}, (
-            f"custom.custodyPeriodDays.{key} must remain an empty "
-            f"mapping (no stage may have a value supplied), got: {stage_values!r}"
+
+    for evidence_class, expected_reference in _EVIDENCE_CLASS_CUSTODY_REFERENCES.items():
+        actual = custody_period_days[evidence_class]
+        assert actual == expected_reference, (
+            f"custom.custodyPeriodDays.{evidence_class} must reference "
+            f"{expected_reference!r}, got {actual!r}"
         )
+    assert custody_period_days["retention_marker"] == _RETENTION_MARKER_CUSTODY_REFERENCE
+
+    all_references = {
+        **_EVIDENCE_CLASS_CUSTODY_REFERENCES,
+        "retention_marker": _RETENTION_MARKER_CUSTODY_REFERENCE,
+    }
+    for key, reference in all_references.items():
+        assert reference.startswith(_CUSTODY_PERIODS_JSON_REFERENCE_PREFIX)
+        # A comma inside a Serverless Framework variable reference denotes a
+        # fallback value; a bare digit sequence would indicate a hardcoded
+        # duration literal accidentally introduced into the reference.
+        assert "," not in reference, f"{key} reference must not carry a fallback value"
+        assert not any(char.isdigit() for char in reference), (
+            f"{key} reference must not contain a hardcoded duration literal: {reference!r}"
+        )
+
+
+def test_custody_period_days_config_respects_evidentiary_versus_operational_schema_boundary() -> (
+    None
+):
+    """Technical Design Section 20.3: evidentiary_classes and
+    operational_durations are the schema's own structural separation -- no
+    evidentiary class's reference may resolve through operational_durations,
+    and retention_marker must never resolve through evidentiary_classes.
+    """
+    with Path("infra/serverless.yml").open(encoding="utf-8") as fh:
+        serverless_template = yaml.safe_load(fh)
+
+    custody_period_days = serverless_template["custom"]["custodyPeriodDays"]
+
+    for evidence_class in _EVIDENCE_CLASS_CUSTODY_REFERENCES:
+        reference = custody_period_days[evidence_class]
+        assert f"evidentiary_classes.{evidence_class}." in reference
+        assert "operational_durations" not in reference
+
+    retention_marker_reference = custody_period_days["retention_marker"]
+    assert "operational_durations.retention_marker." in retention_marker_reference
+    assert "evidentiary_classes" not in retention_marker_reference
+
+
+def test_custody_periods_json_file_ships_with_no_configured_stage_values() -> None:
+    """The production config/custody_periods.json file A1.3d.1 introduces
+    must contain exactly the fixed schema (Technical Design Section 20.3)
+    with every evidentiary class and the retention_marker operational
+    duration left completely unconfigured -- no stage, for any class,
+    anywhere in the file.
+    """
+    import json
+
+    with Path("config/custody_periods.json").open(encoding="utf-8") as fh:
+        custody_periods = json.load(fh)
+
+    assert set(custody_periods) == {"evidentiary_classes", "operational_durations"}
+
+    evidentiary_classes = custody_periods["evidentiary_classes"]
+    assert set(evidentiary_classes) == set(_EVIDENCE_CLASS_CUSTODY_REFERENCES)
+    for evidence_class, stage_values in evidentiary_classes.items():
+        assert stage_values == {}, (
+            f"evidentiary_classes.{evidence_class} must remain an empty "
+            f"object (no stage may have a value supplied), got: {stage_values!r}"
+        )
+
+    operational_durations = custody_periods["operational_durations"]
+    assert set(operational_durations) == {"retention_marker"}
+    assert operational_durations["retention_marker"] == {}
 
 
 def test_aggregate_metadata_custody_period_env_binding_exists_on_aggregation_only() -> None:
@@ -459,19 +534,37 @@ def test_aggregate_metadata_custody_period_not_bound_on_other_functions() -> Non
         )
 
 
-def test_serverless_print_fails_on_unresolved_aggregate_metadata_custody_period() -> None:
-    """Technical Design Section 19.16.6's render-test requirement: `sls print
-    --stage <any>` must fail at variable-resolution time specifically because
-    `custom.custodyPeriodDays.aggregate_metadata.${self:provider.stage}` is
-    unresolved (via the auditAggregation environment binding) -- not merely
-    exit non-zero for an unrelated reason. This is the same fail-closed proof
-    already required of the four S3-backed evidence classes
+def test_serverless_print_fails_on_unresolved_custody_period_config_file_references() -> None:
+    """Evidence Governance Workstream A1.3d.1 (Technical Design Section
+    20.12's render-test requirement, superseding A1.3c.1's narrower single-
+    key version): `sls print --stage <any>` must fail at variable-resolution
+    time specifically because every one of the six
+    ${file(../config/custody_periods.json):...} references in
+    custom.custodyPeriodDays is unresolved (the referenced stage property is
+    absent from every class/operational-duration object in the production
+    config/custody_periods.json file) -- not merely exit non-zero for an
+    unrelated reason. This is EXPECTED, correct fail-closed behavior, not a
+    defect: every class/stage combination in the production file is
+    intentionally left unconfigured until a separate Product Strategy
+    decision supplies real duration values (see
+    test_custody_periods_json_file_ships_with_no_configured_stage_values
+    above). This is the same fail-closed proof already required of the
+    four S3-backed evidence classes
     (test_serverless_variable_resolution_requires_serverless_cli documents
     why that check is not run by this Python suite by default); this test
-    additionally attempts the real invocation when the Serverless
-    CLI/Node toolchain is available, and skips (not passes silently) when it
-    is not, so this specific fail-closed proof is not lost entirely to the
+    additionally attempts the real invocation when the Serverless CLI/Node
+    toolchain is available, and skips (not passes silently) when it is not,
+    so this specific fail-closed proof is not lost entirely to the
     "manual/CI step" boundary.
+
+    Note: because the six custom.custodyPeriodDays.<class> references now
+    fail to resolve at the ${file(...)} lookup itself (before any
+    downstream consumer -- resources/s3.yml's Days/NoncurrentDays
+    references, or the auditAggregation environment binding -- is ever
+    reached), the failure surfaces at "custom.custodyPeriodDays.<class>",
+    not at the downstream reference paths A1.2/A1.3c.1's version of this
+    test asserted against. This is a strictly earlier, equally fail-closed
+    resolution failure, not a weaker one.
     """
     import shutil
     import subprocess
@@ -497,11 +590,14 @@ def test_serverless_print_fails_on_unresolved_aggregate_metadata_custody_period(
         "or a duration value was accidentally introduced"
     )
     combined_output = result.stdout + result.stderr
-    assert (
-        'functions.auditAggregation.environment.CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA'
-        in combined_output
-    ), (
-        "sls print's failure must specifically name the unresolved "
-        "auditAggregation.environment.CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA "
-        f"reference; got output:\n{combined_output}"
+    for evidence_class in _EVIDENCE_CLASS_CUSTODY_REFERENCES:
+        assert f"custom.custodyPeriodDays.{evidence_class}" in combined_output, (
+            f"sls print's failure must name the unresolved "
+            f"custom.custodyPeriodDays.{evidence_class} reference; "
+            f"got output:\n{combined_output}"
+        )
+    assert "custom.custodyPeriodDays.retention_marker" in combined_output, (
+        f"sls print's failure must name the unresolved "
+        f"custom.custodyPeriodDays.retention_marker reference; "
+        f"got output:\n{combined_output}"
     )
