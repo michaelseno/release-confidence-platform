@@ -1179,3 +1179,272 @@ Required test coverage:
 - **Runtime, missing/invalid configuration**: unset, empty, non-numeric, zero, negative — each raises `CUSTODY_PERIOD_CONFIG_MISSING` before any hold-state read, transaction construction, or AWS request, per §19.16.5.
 
 Preserved, unchanged by this correction: no duration value is selected; no default is authorized anywhere in the binding; no fifth S3 `LifecycleConfiguration` rule is created (`aggregate_metadata` remains DynamoDB-only, §19.16.5); no provider-wide environment variable is added; no deployment or activation occurs; no A1.3d, migration, or issue #112 work enters scope.
+
+## 20. Phase 5–7 Custody and Legal-Hold Coordination Architecture (A1.3d)
+
+This section defines the architecture for wiring Phase 5 (Intelligence), Phase 6 (Report), and Phase 7 (Certificate) to A1.LH1 legal-hold coordination and custody-field computation, per companion ADR Decision 10 and Non-Negotiable Invariants 27–30. It is written from a read-only investigation verified directly against current repository code (`reliability_intelligence/`, `deterministic_reporting/`, `audit_platform_integrity/`, `operator_cli/main.py`) — every claim below traces to a specific file, not to inference from Phase 1–4's already-solved architecture. This section authorizes A1.3d.0 (this documentation) only. Implementation proceeds as four separately authorized subphases: **A1.3d.1** (shared authoritative custody-configuration foundation), **A1.3d.2** (Phase 5/Intelligence), **A1.3d.3** (Phase 6/Report), **A1.3d.4** (Phase 7/Certificate) — none of the four is authorized by this document.
+
+### 20.1 CLI-Only Invocation Boundary
+
+Confirmed structurally: `IntelligenceRepository`, `ReportRepository`, and `CertificationRepository` (and their engines and publishers) are constructed exclusively in `operator_cli/main.py`. Zero references exist under `apps/`; no `functions:` entry exists in `infra/serverless.yml` for any of the three phases. Per ADR Decision 10 / Invariant 28, A1.3d does not change this. Every mechanism defined in this section — hold-version `ConditionCheck` coordination, write-time S3 tagging, custody-period resolution — operates entirely within the existing `operator_cli/main.py` → engine → repository/publisher call chain; none of it requires or implies a Lambda entry point.
+
+### 20.2 Category 3 Exclusion — `IntelligenceJob`, `ReportJob`, `CertificationJob`
+
+Per ADR Decision 8 (already naming these three record types as Category 3 examples) and new Invariant 27: these three record types must never receive `custody_expires_at`, `ttl_disposal_at`, `evidence_class`, an evidence-class S3 tag, or A1.LH1 hold-version transactional coordination of any kind. Their existing write methods (`put_intelligence_job_once`/`update_intelligence_job`, `put_report_job_once`/`update_report_job`, `write_certjob_pending`/`update_certjob_in_progress`/`update_certjob_complete`/`update_certjob_failed`) are unaffected by A1.3d and remain plain conditional/unconditional writes exactly as they exist today. Each of A1.3d.2/.3/.4 must extend that phase's existing `test_engine_no_phaseN_mutation.py` file (already proven, by name and existing purpose, to be the right home for this kind of boundary assertion) with a negative regression test proving the corresponding Job record never carries any of the five governance elements above, even after that phase's Metadata record and S3 artifact are correctly wired.
+
+### 20.3 Authoritative Custody Configuration Source
+
+Per ADR Decision 5 (A1.3d.0 amendment) and Invariant 29: one authoritative, checked-in, stage-indexed configuration source — `config/custody_periods.json` — covers all five evidentiary custody classes (`raw_evidence`, `aggregate_metadata`, `intelligence`, `report`, `certificate`) plus `retention_marker`'s separately governed operational-disposal duration. Fixed schema, no duration values present until a separate, later Product Strategy decision:
+
+```json
+{
+  "evidentiary_classes": {
+    "raw_evidence": {},
+    "aggregate_metadata": {},
+    "intelligence": {},
+    "report": {},
+    "certificate": {}
+  },
+  "operational_durations": {
+    "retention_marker": {}
+  }
+}
+```
+
+An empty object under a class means no stage has an authorized value — the identical, already-proven "no default, no fallback" semantics `infra/serverless.yml`'s existing `custom.custodyPeriodDays.<class>: {}` empty-mapping pattern established for every prior evidence class (A1.2, A1.3c.1). A duration is introduced later, one stage at a time, by adding an explicitly authorized positive-integer property — for example (explanatory only; this exact value is never introduced by this document or by A1.3d.1's implementation):
+
+```json
+{
+  "evidentiary_classes": {
+    "intelligence": {
+      "dev": 30
+    }
+  }
+}
+```
+
+The `evidentiary_classes`/`operational_durations` nesting is the schema's own structural separation — `retention_marker` is never reachable through `evidentiary_classes`, and no evidentiary class is ever reachable through `operational_durations`; no consumer may read across this boundary. The production `config/custody_periods.json` file introduced by A1.3d.1 contains no duration values.
+
+**Fixed lookup paths**, used identically by every consumer:
+
+```text
+evidentiary_classes.<evidence_class>.<stage>
+```
+```text
+operational_durations.retention_marker.<stage>
+```
+
+**Two consumers, deriving from one file, never from each other:**
+
+- **Serverless/infrastructure**: **all six** of `infra/serverless.yml`'s existing `custom.custodyPeriodDays.<class>` mappings — `raw_evidence`, `aggregate_metadata`, `intelligence`, `report`, `certificate`, `retention_marker` — migrate from empty inline mappings (`{}`) to external-file references, resolved via Serverless Framework's native `${file(...)}` syntax. This is a source-only migration, in-scope, shared foundational work owned entirely by A1.3d.1 (§20.12), not a permanent second authority for any class:
+
+  ```yaml
+  custodyPeriodDays:
+    raw_evidence: ${file(../config/custody_periods.json):evidentiary_classes.raw_evidence.${self:provider.stage}}
+    aggregate_metadata: ${file(../config/custody_periods.json):evidentiary_classes.aggregate_metadata.${self:provider.stage}}
+    intelligence: ${file(../config/custody_periods.json):evidentiary_classes.intelligence.${self:provider.stage}}
+    report: ${file(../config/custody_periods.json):evidentiary_classes.report.${self:provider.stage}}
+    certificate: ${file(../config/custody_periods.json):evidentiary_classes.certificate.${self:provider.stage}}
+    retention_marker: ${file(../config/custody_periods.json):operational_durations.retention_marker.${self:provider.stage}}
+  ```
+
+  The four already-provisioned (A1.2) S3-backed `LifecycleConfiguration` rules (`raw_evidence`, `intelligence`, `report`, `certificate` — see §20.9) and the separately governed `retention-marker-disposal` rule continue consuming `custom.custodyPeriodDays.*` exactly as today — `infra/resources/s3.yml` itself is structurally unchanged, since only the value each `custom.custodyPeriodDays.<class>` key resolves to changes, not what consumes it. `infra/serverless.yml`'s `auditAggregation` Lambda `environment:` binding for `aggregate_metadata` remains the **only** Lambda function binding this migration touches or requires — no new `environment:` block is added to any function, and no other function gains a custody-period binding. Missing or invalid stage properties in the external file continue to block Serverless variable resolution at package/deploy time, exactly as the prior inline-empty-mapping pattern did — this migration changes the value's source, not the fail-closed rendering gate itself.
+- **CLI/runtime**: Phase 5/6/7's three write-capable commands resolve their class's value via `CustodyPeriodConfigLoader.resolve(evidence_class, stage)` (§20.4) reading `evidentiary_classes.<evidence_class>.<stage>` from the same file — never through a standalone environment variable.
+
+Serverless and runtime consumers use different mechanisms (native `${file(...)}` variable resolution versus a Python JSON read) but must derive the same scalar from the same authoritative file and fixed schema, apply equivalent positive-integer validation, and provide no fallback or cross-class reuse. Missing or invalid stage/class values preserve fail-closed behavior on both sides: Serverless-side rendering/packaging/deployment fails at variable-resolution time (mechanism unchanged from A1.2/A1.3c.1, now sourced externally instead of inline); CLI-side resolution raises `CUSTODY_PERIOD_CONFIG_MISSING` before any AWS-client construction (§20.4).
+
+### 20.4 Command-Scoped CLI Resolution
+
+Per Invariant 30. Custody-period configuration is resolved **only** by the three write-capable commands — `rcp generate intelligence`, `rcp generate report`, `rcp certify audit` — never added to `StageConfigLoader.REQUIRED_FIELDS` (which would incorrectly gate every other CLI command — retrieval, client/audit management, scheduling, config download/init — on a value none of them need).
+
+**Locked contracts** (A1.3d.1 introduces exactly these, no alternative naming):
+
+- Authoritative file: `config/custody_periods.json`.
+- Loader module: `src/release_confidence_platform/config/custody_period_config.py`.
+- Loader class: `CustodyPeriodConfigLoader`.
+- Resolver method: `resolve(evidence_class: str, stage: str) -> int`.
+
+`CustodyPeriodConfigLoader` is composed alongside `StageConfigLoader`, not merged into it — `StageConfigLoader.load()` and its `REQUIRED_FIELDS` are unchanged. `CustodyPeriodConfigLoader.resolve(evidence_class, stage)` reads `config/custody_periods.json` at `evidentiary_classes.<evidence_class>.<stage>` and validates the resolved value.
+
+**Exception contract**: `CustodyPeriodConfigLoader` operates in the configuration layer, before any storage or AWS-client construction — it must raise `ConfigError("<sanitized message>", "CUSTODY_PERIOD_CONFIG_MISSING")`, never `StorageError` (a storage-layer exception this loader never reaches). The identical reason code applies to every one of the following conditions, with no distinguishing sub-code:
+
+- `config/custody_periods.json` is missing.
+- The file's contents are malformed JSON.
+- The parsed root is not a JSON object.
+- `evidentiary_classes` (or the requested class's nested object) is missing.
+- The requested `evidence_class` is not a recognized key.
+- The requested `stage` property is absent under that class.
+- The resolved value is JSON `null`.
+- The resolved value is a Boolean — **rejected explicitly**, even though Python's `bool` is a subclass of `int` and would otherwise pass a naive `isinstance(value, int)` check.
+- The resolved value is a string.
+- The resolved value is a float (including a float with an integral value, e.g. `30.0`).
+- The resolved value is zero.
+- The resolved value is negative.
+
+Every condition above fails closed, before `AwsClientFactory` construction, with no fallback.
+
+**Locked dependency-construction flow** — resolution happens exactly once, entirely within `operator_cli/main.py`'s dispatch branch, strictly before any AWS-client construction; the resolved value is then injected as a typed dependency, never re-resolved:
+
+```text
+CLI argument/stage validation
+→ resolve custody_period_days exactly once
+→ construct AWS clients
+→ construct one HoldRepository
+→ inject typed dependencies into repository/publisher
+→ construct engine
+→ execute
+```
+
+**Exact resolution sequence**, each write-capable command:
+
+1. Argument and stage validation (existing, unchanged).
+2. **Custody-period resolution, exactly once**:
+   ```python
+   custody_period_days = CustodyPeriodConfigLoader().resolve(
+       "<evidence_class>",
+       args.stage,
+   )
+   ```
+   Fails closed here (`CUSTODY_PERIOD_CONFIG_MISSING`), before anything below — including before `AwsClientFactory` construction.
+3. `AwsClientFactory` construction, and the underlying `boto3` client(s) it produces.
+4. One `HoldRepository` construction (backed by the low-level DynamoDB client).
+5. Repository and publisher construction: the same `HoldRepository` instance is injected into both; the resolved `custody_period_days` integer is injected into the repository constructor only, as a keyword-only parameter (§20.6–§20.8).
+6. Engine construction, receiving only the already-constructed repository and publisher — the engine itself never sees `CustodyPeriodConfigLoader`, a stage string, a configuration path, or a raw/unvalidated duration.
+7. Engine execution: Job-record creation, then any Category 1 or Category 2 write, each hold-coordinated per §20.6–§20.8.
+
+No environment-variable fallback exists at any step. No `CUSTODY_PERIOD_DAYS_INTELLIGENCE`/`_REPORT`/`_CERTIFICATE` environment-variable-name constant is introduced anywhere — Invariant 30 forecloses this mechanism entirely for these three CLI-only paths, so no placeholder constant for it may exist even unused.
+
+**Repository/publisher constructor boundary** (applies to all three phases, §20.6–§20.8):
+
+```python
+Repository(
+    ...existing_dependencies,
+    hold_repository,
+    *,
+    custody_period_days: int,
+)
+
+Publisher(
+    ...existing_dependencies,
+    hold_repository,
+)
+```
+
+`custody_period_days` is keyword-only on the repository; the final parameter ordering/naming may otherwise follow each class's existing positional conventions. The publisher receives `hold_repository` only — never the duration — because S3 Lifecycle expiration is owned by the infrastructure rule itself (§20.9), not by the publisher; the publisher's only custody-related responsibility is reading current hold state and computing `rcp-legal-hold`/`rcp-evidence-class` tags per call.
+
+**Repository boundary — must never**: import `CustodyPeriodConfigLoader`; call `CustodyPeriodConfigLoader.resolve` (or any equivalent); read stage configuration; read an environment variable for these three CLI-only classes; or accept a custody duration through a caller-supplied item/update dictionary. A repository may apply defensive constructor validation on the injected `custody_period_days` (rejecting a Boolean, non-integer, zero, or negative value) — this validates an already-resolved dependency, it never re-resolves configuration or creates an alternative source.
+
+### 20.5 Intelligence Dry-Run Exemption
+
+`rcp generate intelligence --dry-run` (`IntelligenceEngine.generate(..., dry_run=True)`, confirmed at `engine.py:252-262` to return via `_dry_run_pipeline` before any of steps 4 onward — no `IntelligenceJob`, `IntelligenceMetadata`, or S3 write occurs) is exempt from custody-period resolution: there is no governed write to compute custody fields for. **This exemption is conditional, not permanent**: it holds only while `--dry-run` remains provably write-free. If a future change causes `--dry-run` to persist any governed record or artifact, custody-period resolution (§20.4) becomes required for that path immediately, and the exemption ceases to apply without requiring a further architecture amendment — the underlying rule (§20.4's sequence) already covers it; only the current code's write-free dry-run path is what creates the exemption.
+
+### 20.6 Phase 5 (Intelligence) — CREATE and Regeneration Contract
+
+`IntelligenceMetadata` is Category 2 (evidence-derived artifact, pointing at the Category 1 `intelligence/` S3 artifact) per existing Decision 8/TD §18.1 classification — unchanged. `IntelligenceJob` is Category 3 (§20.2) — excluded.
+
+- **CREATE** (`existing is None`, `engine.py:297-312`): `put_intelligence_metadata_once` becomes a hold-coordinated `TransactWriteItems` call — the existing conditional `Put` (`attribute_not_exists(PK) AND attribute_not_exists(SK)`, unchanged) plus the appended `LegalHold.hold_version` `ConditionCheck`, following A1.LH1's already-proven, unmodified `HoldCoordinatedTransactionRunner` pattern.
+- **Regeneration** (`existing is not None`, `engine.py:313-329`): `update_intelligence_metadata`'s existing unconditioned full-item `put_item` becomes a hold-coordinated `TransactWriteItems` call — the `Put` itself remains unconditioned (preserving the existing "entire item is replaced" force-regeneration semantics; no `attribute_not_exists`/expected-state condition is added), with the appended `ConditionCheck` as the only condition in the transaction. Directly analogous to Phase 4's `put_lineage_page_once`-style "governed `Put` + appended `ConditionCheck`" shape, adapted here to an unconditioned `Put`.
+- **Custody fields**, both cases: `custody_period_days` is resolved once by the command-scoped CLI boundary before AWS-client construction (§20.4) and injected as a validated positive integer into `IntelligenceRepository`'s constructor. The repository never invokes `CustodyPeriodConfigLoader` and has no stage or configuration dependency. Within each `HoldCoordinatedTransactionRunner` attempt, it computes fresh `custody_expires_at`/`ttl_disposal_at`/`evidence_class = "intelligence"` from the injected duration, that attempt's clock, and that attempt's fresh hold state — never copied or chained from a prior generation, matching every other Category 2 regeneration rule already established (§18.4/§19.9).
+- **S3 leg**: `IntelligencePublisher.write_artifact` (`publisher.py:27-53`) gains a `HoldRepository`-backed, `ConsistentRead: true` hold-state read immediately before `put_object` (mirroring A1.LH3's raw-evidence pattern exactly), computing fresh `rcp-legal-hold`/`rcp-evidence-class=intelligence` tags per call — the object write itself, and its existing "write S3 before updating COMPLETE" ordering (`engine.py:487-489`), are otherwise unchanged.
+- `IntelligenceJob` remains entirely outside this contract (§20.2).
+
+### 20.7 Phase 6 (Report) — Explicit, Repository-Owned Regeneration Contract
+
+Regeneration must not be inferred from arbitrary `update_report_metadata_fields` dictionary contents (the current code's mechanism, `engine.py:287-297`, where the same method is reused for regen-PENDING and every later ordinary status transition). A1.3d.3 introduces a **dedicated, explicitly-typed regeneration operation**, `ReportRepository.regenerate_report_metadata(key, updates, *, client_id, audit_id)`, used only at the regen-detection branch point, distinct from `update_report_metadata_fields`, which remains used for ordinary status transitions (PENDING→IN_PROGRESS, →COMPLETE, →FAILED) exactly as today.
+
+`custody_expires_at`, `ttl_disposal_at`, and `evidence_class` are **repository-owned governance fields** on this operation. `regenerate_report_metadata` must **reject** — never silently override — any attempt by the caller-supplied `updates` dict to set these three keys, mirroring the existing internal-programming-contract guard `AggregationRepository.update_job` already establishes for `AggregationJob`'s own Category 3 boundary (`aggregation/repository.py`'s `_RETENTION_GOVERNED_FIELD_NAMES` set, checked via `forbidden = _RETENTION_GOVERNED_FIELD_NAMES & updates.keys()`, raising `AssertionError` before any further work if non-empty):
+
+```python
+_REPORT_REGENERATION_GOVERNED_FIELD_NAMES = frozenset(
+    {"custody_expires_at", "ttl_disposal_at", "evidence_class"}
+)
+
+def regenerate_report_metadata(self, key, updates, *, client_id, audit_id):
+    forbidden = _REPORT_REGENERATION_GOVERNED_FIELD_NAMES & updates.keys()
+    if forbidden:
+        raise AssertionError(
+            f"regenerate_report_metadata must never accept caller-supplied "
+            f"governance fields {sorted(forbidden)!r}; custody_expires_at, "
+            f"ttl_disposal_at, and evidence_class are computed internally, "
+            f"never caller-controlled."
+        )
+    # ... hold-coordinated TransactWriteItems construction follows
+```
+
+This check is the **first** action `regenerate_report_metadata` performs — before any hold-state read, before any transaction construction, and before any AWS request of any kind. `custody_period_days` is resolved once by the command-scoped CLI boundary before AWS-client construction (§20.4) and injected as a validated positive integer into `ReportRepository`'s constructor. The repository never invokes `CustodyPeriodConfigLoader` and has no stage or configuration dependency. Within each `HoldCoordinatedTransactionRunner` attempt, it computes fresh `custody_expires_at`/`ttl_disposal_at`/`evidence_class` from the injected duration, that attempt's clock, and that attempt's fresh hold state — never accepted as, or merged from, caller input.
+
+The dedicated regeneration operation's hold-coordinated `TransactWriteItems` call must, explicitly:
+
+- `SET` a freshly-computed, repository-owned `custody_expires_at`.
+- `SET` a fixed, repository-owned `evidence_class = "report"`.
+- `SET ttl_disposal_at` to the newly-computed custody timestamp **when the fresh hold-state read observes no active hold**.
+- **`REMOVE ttl_disposal_at`** (an explicit `UpdateExpression REMOVE`, not merely omitting it from the `SET` clause) **when the fresh hold-state read observes an active hold** — omission alone is insufficient and incorrect, since it would silently preserve whatever stale `ttl_disposal_at` value the prior generation left in place, exactly the failure mode Decision 3/Invariant 9 exist to prevent.
+- Append the `LegalHold.hold_version` `ConditionCheck` as the transaction's final item.
+- Preserve the existing partial-update semantics for every other, non-governance field in the caller-supplied `updates` dict (`report_job_id`, `status`, `generation_count`, `updated_at`) — unaffected by this contract.
+
+`ReportJob` remains entirely outside this contract (§20.2). `ReportPublisher.write_artifact` gains the identical write-time tagging pattern described for Phase 5 in §20.6, with `evidence_class=report`.
+
+### 20.8 Phase 7 (Certificate) — Unconditional Replacement Contract
+
+`write_cert_metadata_complete` (`repository.py:290-352`) must remain an unconditional replacement — confirmed today to use `self._put_item(item)` with no `ConditionExpression` of any kind, and its own docstring states this is intentional ("PutItem overwrites any existing record for the same identity tuple. Force re-runs update terminal_state..."). **The `CertificationMetadata` item carries no item-level condition, before or after this contract** — no `attribute_not_exists`, no expected-state condition, no first-certification-only branch; any of these would silently break authorized `--force` recertification, which this contract must not do.
+
+The hold-coordinated transaction adds exactly one required element beyond the unconditional `Put` already described: the appended `LegalHold.hold_version` `ConditionCheck`. This is additive, not a reduction to "two elements" in any sense that would exclude the `TransactWriteItems` request's own necessary supporting structure — the transaction's `ExpressionAttributeNames`/`ExpressionAttributeValues` for the `ConditionCheck`, and `HoldCoordinatedTransactionRunner`'s own bounded-retry metadata, are part of the same mechanism already proven, unmodified, since A1.LH1, and are present exactly as they are for every other phase's hold-coordinated write.
+
+`custody_period_days` is resolved once by the command-scoped CLI boundary before AWS-client construction (§20.4) and injected as a validated positive integer into `CertificationRepository`'s constructor. The repository never invokes `CustodyPeriodConfigLoader` and has no stage or configuration dependency. Within each `HoldCoordinatedTransactionRunner` attempt, it computes fresh `custody_expires_at`/`ttl_disposal_at`/`evidence_class = "certificate"` from the injected duration, that attempt's clock, and that attempt's fresh hold state, on **every** call to `write_cert_metadata_complete` — first-certification, forced recertification, and the TN-12 BLOCKED path alike (§20.9 traces exactly when this method is reached in each of the three outcomes; the write contract itself does not distinguish between them, consistent with the method's existing single-path design). `CertificationPublisher.write_artifact` gains the identical write-time tagging pattern, `evidence_class=certificate`, applied on every certificate write including the BLOCKED-path certificate. `CertificationJob` remains entirely outside this contract (§20.2) — its own write methods are unaffected.
+
+### 20.9 S3 Lifecycle and Reconciliation Boundary — Correction, Already Sufficient
+
+**Correction to the prior revision's imprecise wording**: exactly **four** evidentiary S3 Lifecycle rules exist today, already provisioned by A1.2 (`infra/resources/s3.yml`) — `raw_evidence`, `intelligence`, `report`, `certificate`. `aggregate_metadata` has no S3 presence and receives no rule (DynamoDB-only, A1.3c.1). A fifth, separately governed rule exists for `retention-markers/` disposal (Invariant 22) — operational, not evidentiary. This document does not describe, and must not be read as describing, only three evidence rules, or as implying `intelligence`/`report`/`certificate` currently lack rules — all three already have one each.
+
+Confirmed directly: `S3_EVIDENCE_CLASS_PREFIXES = ("raw-results", "intelligence", "reports", "integrity")` (`evidence_retention/constants.py:119-124`) already includes all three Phase 5–7 S3 key prefixes, and both `CustodySweepClient`'s sweep method and `reconcile_versions()` (A1.LH2's PLACE/RELEASE reconciliation pass) already iterate over all four prefixes generically (`custody_sweep_client.py:310-312`, `:409-412`). **No reconciliation-prefix change is anticipated for A1.3d.2/.3/.4.** Each phase's publisher performs the fresh hold-state read and write-time tagging (§20.6–§20.8); PLACE/RELEASE reconciliation remains, unmodified, the defense-in-depth mechanism for the transition-boundary race window — exactly the same division of responsibility already proven for `raw-results/` (A1.LH2/A1.LH3).
+
+### 20.10 Partial-Success Boundary
+
+A1.3d makes each DynamoDB leg (via A1.LH1's `HoldCoordinatedTransactionRunner`) and each S3 leg (via write-time tagging) independently hold-correct. **It does not, and must not claim to, make a DynamoDB write and an S3 write one atomic cross-store operation** — the same boundary already established for Phase 1–4 (A1.LH1/A1.LH2/A1.LH3/A1.3c.1).
+
+The following partial-success and stale-state risks, verified during the A1.3d investigation, are explicitly **out of A1.3d's scope** and are tracked separately under **issue #118** ("Phase 5–7 persistence partial-success and stale Job-state hardening"):
+
+- An S3 artifact durably written without a completed Metadata pointer (Phase 5/6, when the first of two terminal DynamoDB updates fails).
+- `Job`/`Metadata` status divergence (Phase 5/6, when one of two non-atomic terminal updates succeeds and the other fails).
+- A `Job` record stuck at `PENDING` or `IN_PROGRESS` because the failure path itself (only wrapping pipeline computation and the S3 write, not the surrounding PENDING/IN_PROGRESS/COMPLETE transitions) was never reached.
+- A `FAILED`-state persistence attempt that itself only partially succeeds (the existing `except: pass` swallow pattern in all three engines).
+- Phase 7's terminal `CertificationJob` update failing after the certificate and `CertificationMetadata` have already been correctly persisted (`engine.py:513-530`'s best-effort, silently-swallowed final update).
+
+A1.3d must preserve current failure precedence for all of the above — the order in which exceptions are caught, swallowed, or re-raised in each engine's `try`/`except` structure is unchanged by this work — unless a separately approved decision (scoped under issue #118, not this workstream) changes it.
+
+**Test-scope boundary, stated explicitly**: A1.3d.2/.3/.4 test suites must not become acceptance tests for the known persistence defects above. No A1.3d test may assert that a stale `PENDING`/`IN_PROGRESS` Job, an orphaned S3 artifact, `Job`/`Metadata` status divergence, or a partially-failed terminal update is expected, correct, or passing behavior — those defects belong to issue #118, and codifying them as A1.3d-covered behavior would misrepresent A1.3d as having addressed them. A1.3d tests may, and must, verify that the *newly introduced* custody/hold-coordination failure modes (`CUSTODY_PERIOD_CONFIG_MISSING`, `HOLD_COORDINATION_NOT_CONFIGURED`, `HOLD_STATE_CONCURRENCY_EXCEEDED`) fail closed, never falsely report success, and preserve the same governed-condition-vs-hold-condition exception precedence already established and tested in A1.LH1/A1.3c.1.
+
+### 20.11 Sanitization Boundary — Confirmed Effective, Correction to the Prior Investigation
+
+**Correction**: the A1.3d investigation's earlier statement that Phase 5–7 CLI output is unsanitized was incomplete. Confirmed directly (`operator_cli/result.py:22-31`, `:332-335`): while the phase modules and `operator_cli/main.py`'s dispatch branches do not call `sanitize()` themselves, the central CLI rendering boundary does — `render(result: CommandResult, ...)` sanitizes the full payload (`command`, `stage`, `status`, `summary`, and every key in `result.data`) before any text or JSON output is produced, and `render_error(...)` sanitizes `{command, stage, code, message}` identically. Every `CommandResult`/error path from the three write-capable commands passes through one of these two functions before reaching the operator's terminal. A1.3d.2/.3/.4 must add regression tests proving this central boundary remains effective for the new `CUSTODY_PERIOD_CONFIG_MISSING`/`HOLD_COORDINATION_NOT_CONFIGURED`/`HOLD_STATE_CONCURRENCY_EXCEEDED` reason codes and any hold-related failure message specifically — not re-implement sanitization at the phase-module level, which would duplicate an already-correct, already-tested boundary.
+
+### 20.12 Per-Subphase Implementation Inventory
+
+Exact full paths, no approximate counts, no placeholder ownership. Files listed only where that subphase's own responsibility genuinely changes them.
+
+**A1.3d.1 — shared authoritative custody-configuration foundation (no phase-specific behavior):**
+- New production: `config/custody_periods.json` (schema per §20.3, no values); `src/release_confidence_platform/config/custody_period_config.py` (`CustodyPeriodConfigLoader`, `resolve(evidence_class: str, stage: str) -> int`).
+- Modified production: `infra/serverless.yml` (migrate **all six** existing `custom.custodyPeriodDays.<class>` mappings — `raw_evidence`, `aggregate_metadata`, `intelligence`, `report`, `certificate`, `retention_marker` — from inline empty mappings (`{}`) to `${file(../config/custody_periods.json):...}` external-file references, per §20.3's exact mapping block; `infra/resources/s3.yml` unchanged, since its four rules continue consuming `custom.custodyPeriodDays.*` and only the value's source changes; `auditAggregation` remains the only function `environment:` binding touched — no new binding added to any function).
+- New tests: `tests/unit/config/test_custody_period_config.py` (every condition in §20.4's exception contract: missing file, malformed JSON, non-object root, missing nested object, unknown class, absent stage property, `null`, Boolean, string, float, zero, negative — each asserted to raise `ConfigError` with `error_type == "CUSTODY_PERIOD_CONFIG_MISSING"`; positive-integer success case).
+- Modified tests: `tests/unit/test_infra_configuration.py` — must verify: all six `custom.custodyPeriodDays.<class>` keys resolve via the exact `${file(../config/custody_periods.json):...}` reference path for that class (`raw_evidence`, `aggregate_metadata`, `intelligence`, `report`, `certificate` under `evidentiary_classes.*`; `retention_marker` under `operational_durations.*`); the five-evidentiary-classes-versus-one-marker schema boundary is respected by each reference (no evidentiary class resolves through `operational_durations`, and `retention_marker` never resolves through `evidentiary_classes`); `auditAggregation` remains the only function with a custody-period `environment:` binding (no other function gained one); no duration, default, or fallback value exists anywhere in any of the six references; `sls print --stage dev` (or equivalent) continues to fail at variable-resolution time for every one of the six keys when the referenced stage property is absent, preserving the existing fail-closed rendering/packaging/deployment gate.
+- Docs: `docs/backend/a1_3d1_shared_custody_configuration_foundation_implementation_plan.md`, `docs/backend/a1_3d1_shared_custody_configuration_foundation_implementation_report.md`, `docs/qa/a1_3d1_shared_custody_configuration_foundation_test_plan.md`, `docs/qa/a1_3d1_shared_custody_configuration_foundation_test_report.md`.
+
+**A1.3d.2 — Phase 5 (Intelligence), depends on A1.3d.1:**
+- Modified production: `src/release_confidence_platform/reliability_intelligence/engine.py` (remains configuration-unaware — receives only the constructed repository and publisher), `src/release_confidence_platform/reliability_intelligence/repository.py` (constructor gains `hold_repository: HoldRepository` and keyword-only `custody_period_days: int`; never imports or calls `CustodyPeriodConfigLoader`), `src/release_confidence_platform/reliability_intelligence/publisher.py` (constructor gains `hold_repository: HoldRepository` only — no duration), `src/release_confidence_platform/operator_cli/main.py` (`generate intelligence` dispatch block: owns the one-time `CustodyPeriodConfigLoader().resolve("intelligence", args.stage)` call before `AwsClientFactory` construction per §20.4's locked flow; constructs one `HoldRepository` and injects the same instance into both `IntelligenceRepository` and `IntelligencePublisher`; injects the resolved `custody_period_days` into `IntelligenceRepository` only).
+- Modified tests: `tests/unit/reliability_intelligence/test_engine_idempotency.py`, `tests/unit/reliability_intelligence/test_engine_no_phase4_mutation.py` (Category 3 exclusion negative test per §20.2), `tests/unit/reliability_intelligence/test_engine_gate.py`.
+- New tests: `tests/unit/reliability_intelligence/test_hold_coordination.py` (fail-closed, override/immutability, race, precedence, byte/item boundary — mirroring A1.3c.1's own test file shape; must include a defensive-constructor-validation test proving `IntelligenceRepository` never calls `CustodyPeriodConfigLoader` regardless of the injected value's validity); `tests/unit/test_operator_cli_generate_intelligence.py` — must prove: `CustodyPeriodConfigLoader.resolve` is called exactly once per invocation; it is called before `AwsClientFactory` construction; the resolved integer is passed into `IntelligenceRepository`'s constructor; the same `HoldRepository` object (identity-checked) is passed to both `IntelligenceRepository` and `IntelligencePublisher`; `IntelligencePublisher` receives no duration argument; when resolution raises `CUSTODY_PERIOD_CONFIG_MISSING`, no `AwsClientFactory`, `boto3` client, or AWS call of any kind exists (no equivalent dedicated CLI-dispatch test file exists today, confirmed by grep).
+- Docs: `docs/backend/a1_3d2_phase5_intelligence_hold_coordination_implementation_plan.md`, `docs/backend/a1_3d2_phase5_intelligence_hold_coordination_implementation_report.md`, `docs/qa/a1_3d2_phase5_intelligence_hold_coordination_test_plan.md`, `docs/qa/a1_3d2_phase5_intelligence_hold_coordination_test_report.md`.
+
+**A1.3d.3 — Phase 6 (Report), depends on A1.3d.1 (not A1.3d.2):**
+- Modified production: `src/release_confidence_platform/deterministic_reporting/engine.py` (configuration-unaware; the only engine-level change is invoking `regenerate_report_metadata` at the existing regen-detection branch point), `src/release_confidence_platform/deterministic_reporting/repository.py` (new `regenerate_report_metadata` method, §20.7; constructor gains `hold_repository: HoldRepository` and keyword-only `custody_period_days: int`; never imports or calls `CustodyPeriodConfigLoader`), `src/release_confidence_platform/deterministic_reporting/publisher.py` (constructor gains `hold_repository: HoldRepository` only), `src/release_confidence_platform/operator_cli/main.py` (`generate report` dispatch block: one-time `CustodyPeriodConfigLoader().resolve("report", args.stage)` before `AwsClientFactory` construction; one `HoldRepository` shared between `ReportRepository` and `ReportPublisher`; `custody_period_days` injected into `ReportRepository` only).
+- Modified tests: `tests/unit/deterministic_reporting/test_repository.py`, `tests/unit/deterministic_reporting/test_engine.py`, `tests/unit/deterministic_reporting/test_engine_no_phase5_mutation.py` (Category 3 exclusion), `tests/unit/deterministic_reporting/test_publisher.py`.
+- New tests: `tests/unit/deterministic_reporting/test_hold_coordination.py` — must include, per §20.7's locked `AssertionError` contract: each of `custody_expires_at`, `ttl_disposal_at`, `evidence_class` individually present in the caller-supplied `updates` dict is rejected with `AssertionError`; every combination of two or three of these fields present together is rejected with `AssertionError` naming all offending fields; the rejection occurs with zero hold-state reads (`HoldRepository.get_legal_hold` never called); zero `TransactWriteItems` construction; zero AWS calls of any kind; the caller's original `updates` dict object is unchanged after a rejected call (no in-place mutation before the check raises); a defensive-constructor-validation test proving `ReportRepository` never calls `CustodyPeriodConfigLoader`. Also covers: explicit `SET`/`REMOVE ttl_disposal_at` per the held/unheld branches, fail-closed, race, precedence, byte/item boundary. `tests/unit/test_operator_cli_generate_report.py` — must prove the identical resolver-called-exactly-once/before-`AwsClientFactory`/injected-integer/shared-`HoldRepository`-identity/publisher-receives-no-duration/no-AWS-client-on-failure set of assertions required for A1.3d.2 above, adapted to `generate report` (no equivalent dedicated CLI-dispatch test file exists today, confirmed by grep).
+- Docs: `docs/backend/a1_3d3_phase6_report_hold_coordination_implementation_plan.md`, `docs/backend/a1_3d3_phase6_report_hold_coordination_implementation_report.md`, `docs/qa/a1_3d3_phase6_report_hold_coordination_test_plan.md`, `docs/qa/a1_3d3_phase6_report_hold_coordination_test_report.md`.
+
+**A1.3d.4 — Phase 7 (Certificate), depends on A1.3d.1 (not A1.3d.2/.3):**
+- Modified production: `src/release_confidence_platform/audit_platform_integrity/engine.py` (configuration-unaware), `src/release_confidence_platform/audit_platform_integrity/repository.py` (`write_cert_metadata_complete`'s hold-coordinated transaction, §20.8 — unconditional `Put` preserved; constructor gains `hold_repository: HoldRepository` and keyword-only `custody_period_days: int`; never imports or calls `CustodyPeriodConfigLoader`), `src/release_confidence_platform/audit_platform_integrity/publisher.py` (constructor gains `hold_repository: HoldRepository` only), `src/release_confidence_platform/operator_cli/main.py` (`certify audit` dispatch block: one-time `CustodyPeriodConfigLoader().resolve("certificate", args.stage)` before `AwsClientFactory` construction; one `HoldRepository` shared between `CertificationRepository` and `CertificationPublisher`; `custody_period_days` injected into `CertificationRepository` only).
+- Modified tests: `tests/unit/audit_platform_integrity/test_repository.py`, `tests/unit/audit_platform_integrity/test_engine.py`, `tests/unit/audit_platform_integrity/test_engine_no_phase6_mutation.py` (Category 3 exclusion), `tests/unit/audit_platform_integrity/test_publisher.py`, `tests/unit/test_operator_cli_certify.py` — must add the same resolver-called-exactly-once/before-`AwsClientFactory`/injected-integer/shared-`HoldRepository`-identity/publisher-receives-no-duration/no-AWS-client-on-failure assertions required for A1.3d.2/.3, adapted to `certify audit`, to this already-existing CLI-dispatch test file; `tests/unit/test_operator_cli_result.py` (`_error_next_step` guidance-rendering coverage for `CUSTODY_PERIOD_CONFIG_MISSING`/`HOLD_COORDINATION_NOT_CONFIGURED`/`HOLD_STATE_CONCURRENCY_EXCEEDED`, mirroring this file's existing per-code guidance tests).
+- New tests: `tests/unit/audit_platform_integrity/test_hold_coordination.py` (unconditional-replacement-preserved: forced recertification still succeeds against an existing record; TN-12 BLOCKED-path custody/tag correctness; fail-closed, race, precedence, boundary; a defensive-constructor-validation test proving `CertificationRepository` never calls `CustodyPeriodConfigLoader`).
+- Docs: `docs/backend/a1_3d4_phase7_certificate_hold_coordination_implementation_plan.md`, `docs/backend/a1_3d4_phase7_certificate_hold_coordination_implementation_report.md`, `docs/qa/a1_3d4_phase7_certificate_hold_coordination_test_plan.md`, `docs/qa/a1_3d4_phase7_certificate_hold_coordination_test_report.md`.
+
+No numeric duration value, environment binding, infrastructure deployment, or activation is introduced by any of the above — this inventory describes future implementation scope only and is not itself an implementation authorization.
