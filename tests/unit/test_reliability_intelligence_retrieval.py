@@ -2,12 +2,30 @@
 
 Covers all test IDs:
   IRET-U01–06, IRET-F01–04, IRET-PROV01–03, IRET-REPR01, IRET-S01–05, IRET-RO01–02
+
+Also covers Evidence Governance Workstream A1.3d.2 (Technical Design Section
+20.4/20.12): `retrieve intelligence-*` must succeed, with zero
+`CustodyPeriodConfigLoader.resolve` calls, zero `HoldRepository(` construction,
+and zero governed-write calls, under three `config/custody_periods.json`
+`intelligence`-class shapes -- because the read-only retrieval construction
+path never resolves custody configuration or constructs hold coordination at
+all (Invariant 31; the `retrieve intelligence-*` dispatch block in
+operator_cli/main.py has no reference to either).
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 
+import pytest
+
+import release_confidence_platform.config.custody_period_config as custody_period_config_module
+import release_confidence_platform.config.stage_config as stage_config_module
+import release_confidence_platform.storage.aws_client_factory as aws_client_factory_module
+from release_confidence_platform.config.stage_config import StageConfig
+from release_confidence_platform.evidence_retention.hold_repository import HoldRepository
+from release_confidence_platform.operator_cli.main import main
 from release_confidence_platform.reliability_intelligence.commands import (
     dispatch_intelligence_retrieve,
 )
@@ -538,8 +556,12 @@ class TestProvenanceEnvelope:
         svc = _make_svc(metadata=_COMPLETE_METADATA)
         dto = svc.retrieve_status(_FILTERS)
         envelope = self._build_envelope(
-            {"intelligence_job_id": "intjob_abc123", "intelligence_version": "intel_v1",
-             "aggregation_version": "agg_v1", "aggregate_set_hash": None}
+            {
+                "intelligence_job_id": "intjob_abc123",
+                "intelligence_version": "intel_v1",
+                "aggregation_version": "agg_v1",
+                "aggregate_set_hash": None,
+            }
         )
         output = IntelligenceFormatter.format_json(dto, envelope)
         parsed = json.loads(output)
@@ -651,9 +673,7 @@ class TestReadOnlyInvariant:
         svc.retrieve_detail(_FILTERS)
         svc.retrieve_methodology(_FILTERS)
 
-        assert repo.write_calls == [], (
-            f"Repository write methods were called: {repo.write_calls}"
-        )
+        assert repo.write_calls == [], f"Repository write methods were called: {repo.write_calls}"
 
     def test_iret_ro02_all_retrieve_calls_leave_publisher_write_calls_empty(self):
         """IRET-RO02: all retrieve_* calls → publisher.write_calls is empty."""
@@ -752,3 +772,228 @@ class TestDispatchIntegration:
         output = dispatch_intelligence_retrieve(args, svc, IntelligenceFormatter)
         parsed = json.loads(output)
         assert parsed["data"]["reason"] == "UNKNOWN_COMMAND"
+
+
+# ---------------------------------------------------------------------------
+# Evidence Governance Workstream A1.3d.2 -- retrieve intelligence-* succeeds
+# under three config/custody_periods.json `intelligence`-class shapes, with
+# zero CustodyPeriodConfigLoader.resolve calls, zero HoldRepository(
+# construction, and zero governed-write calls (Technical Design Section
+# 20.4/20.12; ADR Invariant 31).
+# ---------------------------------------------------------------------------
+
+_CUSTODY_FIXTURE_VARIANTS = [
+    pytest.param(
+        {"evidentiary_classes": {"intelligence": {}}},
+        id="intelligence_present_empty",
+    ),
+    pytest.param(
+        {"evidentiary_classes": {"intelligence": {"staging": 30}}},
+        id="intelligence_present_unrelated_stage_only",
+    ),
+    pytest.param(
+        {"evidentiary_classes": {}},
+        id="intelligence_key_absent",
+    ),
+]
+
+_RETRIEVAL_STAGE_CONFIG = StageConfig(
+    stage="dev",
+    region="us-east-1",
+    aws_profile="test",
+    config_bucket="bucket",
+    audit_metadata_table="table",
+    orchestrator_function_name="orchestrator",
+    scheduler_group_name="group",
+    schedule_name_prefix="rcp-dev",
+    scheduler_execution_target_arn="arn:aws:lambda:us-east-1:123:function:execution",
+    scheduler_finalization_target_arn="arn:aws:lambda:us-east-1:123:function:finalization",
+    scheduler_role_arn="arn:aws:iam::123:role/scheduler",
+)
+
+
+class _RetrievalFakeStageConfigLoader:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def load(self, stage, env=None):
+        return _RETRIEVAL_STAGE_CONFIG
+
+
+class _RetrievalFakeDynamoDBClient:
+    """Read-only-shaped fake: defines get_item only -- any put_item/
+    update_item/transact_write_items call (a governed write) raises
+    AttributeError, which surfaces as a non-zero CLI exit code and fails
+    the test's exit_code==0 assertion."""
+
+    def __init__(self, item: dict):
+        from release_confidence_platform.storage.dynamodb_codec import encode_item
+
+        self._encoded_item = encode_item(item)
+        self.get_item_calls: list = []
+
+    def get_item(self, **kwargs):
+        self.get_item_calls.append(kwargs)
+        return {"Item": self._encoded_item}
+
+
+class _RetrievalFakeSession:
+    def __init__(self, dynamodb_client):
+        self._dynamodb_client = dynamodb_client
+
+    def client(self, name):
+        if name == "dynamodb":
+            return self._dynamodb_client
+        if name == "s3":
+            return object()
+        raise AssertionError(name)  # pragma: no cover - defensive
+
+
+class _RetrievalFakeAwsClientFactory:
+    instances: list = []
+
+    def __init__(self, stage_config):
+        self.stage_config = stage_config
+        self._session = _RetrievalFakeSession(_RETRIEVAL_DYNAMODB_CLIENT_HOLDER["client"])
+        _RetrievalFakeAwsClientFactory.instances.append(self)
+
+
+_RETRIEVAL_DYNAMODB_CLIENT_HOLDER: dict = {}
+
+
+class TestRetrieveIntelligenceCustodyConfigIndependence:
+    """A1.3d.2: `retrieve intelligence-*` must succeed regardless of the
+    `intelligence` evidence class's configuration state in
+    config/custody_periods.json, and must never resolve custody
+    configuration or construct hold coordination -- the retrieve dispatch
+    block in operator_cli/main.py has no reference to either."""
+
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        _RetrievalFakeAwsClientFactory.instances = []
+        _RETRIEVAL_DYNAMODB_CLIENT_HOLDER.clear()
+        yield
+
+    def _apply_patches(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path, custody_config
+    ) -> tuple[list, list]:
+        monkeypatch.setattr(
+            stage_config_module, "StageConfigLoader", _RetrievalFakeStageConfigLoader
+        )
+        monkeypatch.setattr(
+            aws_client_factory_module, "AwsClientFactory", _RetrievalFakeAwsClientFactory
+        )
+
+        # Write this parametrization case's fixture variant to a real,
+        # temporary config/custody_periods.json. The REAL
+        # CustodyPeriodConfigLoader class is used (not a replacement fake)
+        # so that, should a future regression ever cause the retrieve
+        # dispatch path to call CustodyPeriodConfigLoader.resolve(), it
+        # would run the real loader against this genuinely-distinct on-disk
+        # shape -- including raising ConfigError for the absent-key/
+        # absent-stage variants -- rather than silently passing against an
+        # artificial stub that intercepts before any real behavior runs.
+        config_dir = tmp_path / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "custody_periods.json").write_text(
+            json.dumps(custody_config), encoding="utf-8"
+        )
+        loader_cls = custody_period_config_module.CustodyPeriodConfigLoader
+        monkeypatch.setattr(loader_cls, "_default_root", staticmethod(lambda: tmp_path))
+
+        original_resolve = loader_cls.resolve
+        resolve_calls: list = []
+
+        def _spy_resolve(self_, evidence_class, stage):
+            resolve_calls.append((evidence_class, stage))
+            return original_resolve(self_, evidence_class, stage)
+
+        monkeypatch.setattr(loader_cls, "resolve", _spy_resolve)
+
+        original_hold_repository_init = HoldRepository.__init__
+        hold_repository_calls: list = []
+
+        def _spy_init(self_, *args, **kwargs):
+            hold_repository_calls.append((args, kwargs))
+            original_hold_repository_init(self_, *args, **kwargs)
+
+        monkeypatch.setattr(HoldRepository, "__init__", _spy_init)
+        return resolve_calls, hold_repository_calls
+
+    @pytest.mark.parametrize("custody_config", _CUSTODY_FIXTURE_VARIANTS)
+    def test_retrieve_intelligence_status_succeeds_regardless_of_custody_config(
+        self, monkeypatch, tmp_path, custody_config
+    ):
+        resolve_calls, hold_repository_calls = self._apply_patches(
+            monkeypatch, tmp_path, custody_config
+        )
+        item = {
+            **_COMPLETE_METADATA,
+            "PK": "CLIENT#client1",
+            "SK": ("AUDIT#audit1#EXEC#exec1#CFG#cfg_v1#AGG#agg_v1#INTEL#intel_v1#META"),
+        }
+        _RETRIEVAL_DYNAMODB_CLIENT_HOLDER["client"] = _RetrievalFakeDynamoDBClient(item)
+
+        exit_code = main(
+            [
+                "retrieve",
+                "intelligence-status",
+                "--client",
+                "client1",
+                "--audit",
+                "audit1",
+                "--execution",
+                "exec1",
+                "--stage",
+                "dev",
+                "--output",
+                "json",
+            ]
+        )
+
+        assert exit_code == 0
+        assert resolve_calls == [], (
+            "retrieve intelligence-status must never call CustodyPeriodConfigLoader.resolve"
+        )
+        assert hold_repository_calls == [], (
+            "retrieve intelligence-status must never construct HoldRepository"
+        )
+
+    @pytest.mark.parametrize("custody_config", _CUSTODY_FIXTURE_VARIANTS)
+    def test_retrieve_intelligence_summary_succeeds_regardless_of_custody_config(
+        self, monkeypatch, tmp_path, custody_config
+    ):
+        resolve_calls, hold_repository_calls = self._apply_patches(
+            monkeypatch, tmp_path, custody_config
+        )
+        item = {
+            **_COMPLETE_METADATA,
+            "PK": "CLIENT#client1",
+            "SK": ("AUDIT#audit1#EXEC#exec1#CFG#cfg_v1#AGG#agg_v1#INTEL#intel_v1#META"),
+        }
+        _RETRIEVAL_DYNAMODB_CLIENT_HOLDER["client"] = _RetrievalFakeDynamoDBClient(item)
+
+        exit_code = main(
+            [
+                "retrieve",
+                "intelligence-summary",
+                "--client",
+                "client1",
+                "--audit",
+                "audit1",
+                "--execution",
+                "exec1",
+                "--stage",
+                "dev",
+                "--output",
+                "json",
+            ]
+        )
+
+        assert exit_code == 0
+        assert resolve_calls == [], (
+            "retrieve intelligence-summary must never call CustodyPeriodConfigLoader.resolve"
+        )
+        assert hold_repository_calls == [], (
+            "retrieve intelligence-summary must never construct HoldRepository"
+        )

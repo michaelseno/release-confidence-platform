@@ -199,6 +199,36 @@ def _run_engine(*, has_existing: bool = False) -> tuple[_TrackingRepository, _Tr
     return repo, publisher
 
 
+_GOVERNANCE_ELEMENTS = (
+    "custody_expires_at",
+    "ttl_disposal_at",
+    "evidence_class",
+    "rcp-legal-hold",
+    "rcp-evidence-class",
+    "hold_version",
+)
+
+
+def _assert_no_intelligence_job_governance_elements(repo: _TrackingRepository) -> None:
+    """Evidence Governance Workstream A1.3d.2 (ADR Invariant 27; Technical
+    Design Section 20.2): IntelligenceJob is Category 3 (operational
+    coordination metadata) and must never carry any of the five governance
+    elements, even after IntelligenceMetadata and the S3 artifact are
+    correctly wired to hold coordination."""
+    job_writes = [
+        item
+        for method, item in repo.write_calls
+        if method in ("put_intelligence_job_once", "update_intelligence_job")
+    ]
+    assert job_writes, "Expected at least one IntelligenceJob write to check"
+    for item in job_writes:
+        for element in _GOVERNANCE_ELEMENTS:
+            assert element not in item, (
+                f"IntelligenceJob item/update unexpectedly carries governance "
+                f"element {element!r}: {item!r}"
+            )
+
+
 def test_no_phase4_writes_on_first_generation():
     """First-time generation must only write to Phase 5 SK namespaces."""
     repo, publisher = _run_engine(has_existing=False)
@@ -209,6 +239,7 @@ def test_no_phase4_writes_on_first_generation():
         assert "#INTJOB#" in sk or "#INTEL#" in sk, (
             f"Write targeted non-Phase-5 SK: {sk!r}"
         )
+    _assert_no_intelligence_job_governance_elements(repo)
 
 
 def test_no_phase4_writes_on_force_regeneration():
@@ -230,6 +261,7 @@ def test_no_phase4_writes_on_force_regeneration():
         assert "#INTJOB#" in sk or "#INTEL#" in sk, (
             f"Force re-gen write targeted non-Phase-5 SK: {sk!r}"
         )
+    _assert_no_intelligence_job_governance_elements(repo)
 
 
 def test_no_phase4_writes_on_failed_retry():
@@ -239,6 +271,7 @@ def test_no_phase4_writes_on_failed_retry():
     for _method, item in repo.write_calls:
         sk = item.get("SK", "")
         assert "#INTJOB#" in sk or "#INTEL#" in sk
+    _assert_no_intelligence_job_governance_elements(repo)
 
 
 def test_write_call_count_first_generation():
