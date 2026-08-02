@@ -328,14 +328,50 @@ def dispatch(args: argparse.Namespace) -> CommandResult:
         generate_command = getattr(args, "generate_command", "") or ""
         if generate_command == "intelligence":
             stage_config = StageConfigLoader().load(args.stage)
+            is_dry_run = getattr(args, "dry_run", False)
+
+            custody_period_days: int | None = None
+            if not is_dry_run:
+                from release_confidence_platform.config.custody_period_config import (  # noqa: PLC0415
+                    CustodyPeriodConfigLoader,
+                )
+
+                # Evidence Governance Workstream A1.3d.2 (ADR Invariant 30;
+                # Technical Design Section 20.4): resolved exactly once,
+                # before any AWS-client construction, fail-closed on any
+                # missing/invalid configuration.
+                custody_period_days = CustodyPeriodConfigLoader().resolve(
+                    "intelligence", args.stage
+                )
+
             factory = AwsClientFactory(stage_config)
             dynamodb_client = factory._session.client("dynamodb")
             s3_client = factory._session.client("s3")
 
-            intel_repo = IntelligenceRepository(
-                stage_config.audit_metadata_table, dynamodb_client
-            )
-            intel_publisher = IntelligencePublisher(stage_config.config_bucket, s3_client)
+            if is_dry_run:
+                # Dry-run construction mode (Technical Design Section 20.5):
+                # no HoldRepository, no custody duration -- both governance
+                # dependencies left at their None default, identical to the
+                # read-only retrieval construction path.
+                intel_repo = IntelligenceRepository(
+                    stage_config.audit_metadata_table, dynamodb_client
+                )
+                intel_publisher = IntelligencePublisher(stage_config.config_bucket, s3_client)
+            else:
+                from release_confidence_platform.evidence_retention.hold_repository import (  # noqa: PLC0415
+                    HoldRepository,
+                )
+
+                hold_repository = HoldRepository(stage_config.audit_metadata_table, dynamodb_client)
+                intel_repo = IntelligenceRepository(
+                    stage_config.audit_metadata_table,
+                    dynamodb_client,
+                    hold_repository,
+                    custody_period_days=custody_period_days,
+                )
+                intel_publisher = IntelligencePublisher(
+                    stage_config.config_bucket, s3_client, hold_repository
+                )
             engine = IntelligenceEngine(
                 intel_repo, intel_publisher, logger=StructuredLogger()
             )

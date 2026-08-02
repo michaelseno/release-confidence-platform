@@ -343,6 +343,76 @@ def test_failed_retry_increments_generation_count():
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Evidence Governance Workstream A1.3d.2 (Technical Design Section 20.5) --
+# dry-run must perform zero writes to the repository or publisher,
+# regardless of aggregate/hold state, since --dry-run is exempt from
+# custody-period resolution and never reaches a governed write method.
+# ---------------------------------------------------------------------------
+
+
+def test_dry_run_performs_zero_repository_writes():
+    """--dry-run must never call any repository write method."""
+    engine, repo, publisher = _make_engine(existing_metadata=None)
+    result = engine.generate(
+        client_id="client1",
+        audit_id="audit1",
+        audit_execution_id="exec1",
+        config_version="cfg_v1",
+        aggregation_version="agg_v1",
+        dry_run=True,
+    )
+    assert result["status"] == "DRY_RUN"
+    assert repo.write_calls == [], (
+        f"Expected zero repository write calls on dry-run, got: {repo.write_calls}"
+    )
+
+
+def test_dry_run_performs_zero_publisher_writes():
+    """--dry-run must never call the publisher's write_artifact."""
+    engine, repo, publisher = _make_engine(existing_metadata=None)
+    engine.generate(
+        client_id="client1",
+        audit_id="audit1",
+        audit_execution_id="exec1",
+        config_version="cfg_v1",
+        aggregation_version="agg_v1",
+        dry_run=True,
+    )
+    assert publisher.write_calls == [], (
+        f"Expected zero publisher write calls on dry-run, got: {publisher.write_calls}"
+    )
+
+
+def test_dry_run_with_existing_complete_metadata_performs_zero_writes():
+    """--dry-run must remain write-free even when COMPLETE metadata already
+    exists for this combination (the idempotency-check branch runs before
+    the dry_run branch, but neither performs a write in this mode)."""
+    existing = {
+        "status": "COMPLETE",
+        "intelligence_job_id": "intjob_existing",
+        "composite_score": "0.900",
+        "score_label": "HIGH_CONFIDENCE",
+        "endpoint_count": 1,
+        "s3_artifact_ref": (
+            "intelligence/client1/audit1/exec1/agg_v1/intel_v1/intjob_existing/artifact.json"
+        ),
+        "generation_count": 1,
+        "created_at": "2026-01-01T00:00:00Z",
+    }
+    engine, repo, publisher = _make_engine(existing_metadata=existing)
+    engine.generate(
+        client_id="client1",
+        audit_id="audit1",
+        audit_execution_id="exec1",
+        config_version="cfg_v1",
+        aggregation_version="agg_v1",
+        dry_run=True,
+    )
+    assert repo.write_calls == []
+    assert publisher.write_calls == []
+
+
 def test_pending_status_proceeds():
     """PENDING IntelligenceMetadata must not block a new generation attempt."""
     existing = {

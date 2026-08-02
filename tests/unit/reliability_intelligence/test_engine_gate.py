@@ -111,12 +111,30 @@ def test_gate_fails_when_aggregate_set_failed():
 def test_no_phase5_records_written_when_gate_fails_missing():
     """When AggregateSetCompletion is absent, no Phase 5 DynamoDB records may be written."""
     repo = _GateTestRepository(aggregate_set=None)
+    publisher = _NullPublisher()
+    engine = IntelligenceEngine(repo, publisher)
     with pytest.raises(IntelligenceGateError):
-        _call_generate(repo)
+        engine.generate(
+            client_id="client1",
+            audit_id="audit1",
+            audit_execution_id="exec1",
+            config_version="cfg_v1",
+            aggregation_version="agg_v1",
+        )
     assert len(repo.write_calls) == 0, (
         f"Expected 0 Phase 5 writes when gate fails (missing), got {len(repo.write_calls)}: "
         f"{repo.write_calls}"
     )
+    # Evidence Governance Workstream A1.3d.2 (Technical Design Section 20.10):
+    # gate denial must produce zero IntelligenceMetadata writes and zero
+    # artifact writes -- the engine's gate-denial code path is unmodified
+    # and contains no hold-coordination-related behavior.
+    meta_writes = [
+        c
+        for c in repo.write_calls
+        if c[0] in ("put_intelligence_metadata_once", "update_intelligence_metadata")
+    ]
+    assert meta_writes == [], "Expected 0 IntelligenceMetadata writes when gate fails (missing)"
 
 
 def test_no_phase5_records_written_when_gate_fails_incomplete():
@@ -128,6 +146,69 @@ def test_no_phase5_records_written_when_gate_fails_incomplete():
         f"Expected 0 Phase 5 writes when gate fails (incomplete), got {len(repo.write_calls)}: "
         f"{repo.write_calls}"
     )
+    meta_writes = [
+        c
+        for c in repo.write_calls
+        if c[0] in ("put_intelligence_metadata_once", "update_intelligence_metadata")
+    ]
+    assert meta_writes == [], "Expected 0 IntelligenceMetadata writes when gate fails (incomplete)"
+
+
+def test_zero_artifact_writes_when_gate_fails():
+    """Gate denial must never reach the publisher -- zero artifact writes,
+    whether AggregateSetCompletion is missing or present-but-incomplete."""
+
+    class _TrackingPublisher:
+        def __init__(self):
+            self.write_calls: list = []
+
+        def write_artifact(self, key, artifact):
+            self.write_calls.append((key, artifact))
+
+    for aggregate_set in (None, {"completion_status": "PENDING"}, {"completion_status": "FAILED"}):
+        repo = _GateTestRepository(aggregate_set=aggregate_set)
+        publisher = _TrackingPublisher()
+        engine = IntelligenceEngine(repo, publisher)
+        with pytest.raises(IntelligenceGateError):
+            engine.generate(
+                client_id="client1",
+                audit_id="audit1",
+                audit_execution_id="exec1",
+                config_version="cfg_v1",
+                aggregation_version="agg_v1",
+            )
+        assert publisher.write_calls == [], (
+            f"Expected 0 artifact writes when gate fails (aggregate_set={aggregate_set!r}), "
+            f"got: {publisher.write_calls}"
+        )
+
+
+def test_gate_denial_code_path_has_no_hold_coordination_reference():
+    """Structural proof: the engine's gate-denial code path (the block
+    raising IntelligenceGateError) contains no hold-coordination-related
+    identifier. This should already be true since engine.py is unmodified
+    by Evidence Governance Workstream A1.3d.2 -- this test proves it rather
+    than assuming it."""
+    import inspect
+
+    from release_confidence_platform.reliability_intelligence import engine as engine_module
+
+    source = inspect.getsource(engine_module)
+    gate_block_start = source.index("Step 2: Prerequisite gate")
+    gate_block_end = source.index("Step 3: Generate new intelligence_job_id")
+    gate_block = source[gate_block_start:gate_block_end]
+    for forbidden in (
+        "HoldRepository",
+        "hold_repository",
+        "hold_version",
+        "CustodyPeriodConfigLoader",
+        "custody_period_days",
+        "HoldCoordinatedTransactionRunner",
+    ):
+        assert forbidden not in gate_block, (
+            f"Gate-denial code path unexpectedly references {forbidden!r} -- "
+            "engine.py must remain hold-coordination-unaware."
+        )
 
 
 def test_gate_passes_when_aggregate_set_complete():

@@ -16,14 +16,22 @@ tests/unit/reliability_intelligence/test_engine_no_phase4_mutation.py.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from botocore.exceptions import ClientError
 
 from release_confidence_platform.core.exceptions import StorageError
+from release_confidence_platform.evidence_retention.hold_coordination import (
+    HoldCoordinatedTransactionRunner,
+    build_hold_version_condition_check_item,
+    compute_ttl_disposal_at,
+)
+from release_confidence_platform.evidence_retention.hold_repository import HoldRepository
 from release_confidence_platform.storage.dynamodb_codec import (
     decode_dynamodb_response,
     encode_dynamodb_call_kwargs,
+    encode_item,
     storage_error_from_dynamodb_client_error,
     storage_error_from_dynamodb_request_error,
 )
@@ -65,12 +73,100 @@ class ConditionalWriteError(StorageError):
         super().__init__(message, "CONDITIONAL_WRITE_FAILED")
 
 
+def _parse_phase5_metadata_identity(item: dict[str, Any]) -> tuple[str, str]:
+    """Parse (client_id, audit_id) from a trusted, internally-constructed
+    IntelligenceMetadata item's PK/SK (Technical Design Section 20.6).
+
+    This is not caller-input validation -- the item has already passed
+    _assert_phase5_sk() by the time this is called. It exists solely to
+    resolve the audit identity HoldCoordinatedTransactionRunner and
+    HoldRepository.legal_hold_key() require.
+    """
+    pk, sk = item.get("PK", ""), item.get("SK", "")
+    if not pk.startswith("CLIENT#") or not sk.startswith("AUDIT#"):
+        raise StorageError(
+            "IntelligenceMetadata item PK/SK does not match the expected "
+            "CLIENT#{client_id}/AUDIT#{audit_id}#... shape; cannot resolve "
+            "audit identity for legal-hold state resolution.",
+            "STORAGE_ERROR",
+        )
+    client_id = pk[len("CLIENT#") :]
+    audit_id = sk[len("AUDIT#") :].split("#", 1)[0]
+    if not client_id or not audit_id:
+        raise StorageError(
+            "IntelligenceMetadata item PK/SK does not match the expected "
+            "CLIENT#{client_id}/AUDIT#{audit_id}#... shape; cannot resolve "
+            "audit identity for legal-hold state resolution.",
+            "STORAGE_ERROR",
+        )
+    return client_id, audit_id
+
+
+def _intelligence_governance_fields(
+    hold_state: dict[str, Any] | None, custody_period_days: int
+) -> dict[str, int | str]:
+    """Compute custody_expires_at/ttl_disposal_at/evidence_class for a Phase 5
+    governed IntelligenceMetadata write (Technical Design Section 20.6).
+
+    Mirrors aggregation/repository.py::_aggregate_governance_fields exactly,
+    with evidence_class fixed to "intelligence". custody_expires_at is
+    always freshly computed; ttl_disposal_at is omitted if and only if this
+    attempt's own hold_state read observed an ACTIVE hold.
+    """
+    now_epoch_seconds = int(datetime.now(UTC).timestamp())
+    custody_expires_at = now_epoch_seconds + custody_period_days * 86400
+    fields: dict[str, int | str] = {
+        "custody_expires_at": custody_expires_at,
+        "evidence_class": "intelligence",
+    }
+    ttl_disposal_at = compute_ttl_disposal_at(hold_state, custody_expires_at)
+    if ttl_disposal_at is not None:
+        fields["ttl_disposal_at"] = ttl_disposal_at
+    return fields
+
+
 class IntelligenceRepository:
     """Phase 4 consumer reads and Phase 5 artifact writes for Reliability Intelligence."""
 
-    def __init__(self, table_name: str, dynamodb_client: Any) -> None:
+    def __init__(
+        self,
+        table_name: str,
+        dynamodb_client: Any,
+        hold_repository: HoldRepository | None = None,
+        *,
+        custody_period_days: int | None = None,
+    ) -> None:
         self.table_name = table_name
         self.dynamodb_client = dynamodb_client
+        self._hold_repository = hold_repository
+        self._custody_period_days = custody_period_days
+
+    def _governance_preflight(self) -> None:
+        """Write-entry governance preflight (ADR Invariant 31; Technical
+        Design Section 20.4). Mandatory first action of every governed
+        write method, before any hold-state read, transaction-item
+        construction, or AWS mutation. Order is load-bearing: hold
+        coordination presence, then custody-duration presence, then
+        custody-duration validity (Boolean rejected before the int check,
+        since bool is an int subclass).
+        """
+        if self._hold_repository is None:
+            raise StorageError(
+                "Hold coordination is not configured", "HOLD_COORDINATION_NOT_CONFIGURED"
+            )
+        if self._custody_period_days is None:
+            raise StorageError(
+                "Custody period configuration was not provided to this repository instance",
+                "CUSTODY_PERIOD_CONFIG_MISSING",
+            )
+        if (
+            isinstance(self._custody_period_days, bool)
+            or not isinstance(self._custody_period_days, int)
+            or self._custody_period_days <= 0
+        ):
+            raise StorageError(
+                "Custody period configuration is invalid", "CUSTODY_PERIOD_CONFIG_MISSING"
+            )
 
     # ------------------------------------------------------------------
     # Key construction helpers
@@ -242,21 +338,73 @@ class IntelligenceRepository:
     # ------------------------------------------------------------------
 
     def put_intelligence_metadata_once(self, item: dict[str, Any]) -> None:
-        """Write an IntelligenceMetadata record with conditional put (first generation).
+        """Write an IntelligenceMetadata record as a hold-coordinated
+        TransactWriteItems call (first generation) -- the existing
+        conditional Put (attribute_not_exists(PK) AND attribute_not_exists(SK))
+        plus the appended LegalHold.hold_version ConditionCheck (Technical
+        Design Section 20.6).
 
         Used only when no existing IntelligenceMetadata exists for the combination.
         A ConditionalWriteError indicates a concurrent generation attempt or race
         between a check and a put; the engine handles this by reading the existing record.
 
         Raises:
-            ConditionalWriteError: If the record already exists.
-            StorageError: On DynamoDB client or request failure.
+            StorageError: ``HOLD_COORDINATION_NOT_CONFIGURED`` if this
+                instance has no HoldRepository; ``CUSTODY_PERIOD_CONFIG_MISSING``
+                if no valid custody-period duration was injected -- both fail
+                closed before any hold-state read, transact-item
+                construction, or AWS request; ``HOLD_STATE_CONCURRENCY_EXCEEDED``
+                on bounded hold-version retry exhaustion.
+            ConditionalWriteError: If the record's own condition failed (an
+                existing item at this key) -- never masked behind a
+                hold-version retry.
         """
+        self._governance_preflight()
         _assert_phase5_sk(item.get("SK", ""))
-        self._put_once(item)
+        client_id, audit_id = _parse_phase5_metadata_identity(item)
+        base_item = dict(item)  # shallow copy -- NEVER sanitize() a persistence-bound item
+        hold_key = self._hold_repository.legal_hold_key(client_id, audit_id)
+
+        def build_transact_items(
+            hold_state: dict[str, Any] | None,
+        ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+            item_with_governance = {
+                **base_item,
+                **_intelligence_governance_fields(hold_state, self._custody_period_days),
+            }
+            put_transact_item = {
+                "Put": {
+                    "TableName": self.table_name,
+                    "Item": encode_item(item_with_governance),
+                    "ConditionExpression": (
+                        "attribute_not_exists(PK) AND attribute_not_exists(SK)"
+                    ),
+                }
+            }
+            hold_condition_item = build_hold_version_condition_check_item(
+                self.table_name, hold_key, hold_state
+            )
+            return [put_transact_item], hold_condition_item
+
+        def _raise_conditional_write_error(reasons: list[dict[str, Any]]) -> None:
+            del reasons
+            raise ConditionalWriteError()
+
+        runner = HoldCoordinatedTransactionRunner(self.dynamodb_client, self._hold_repository)
+        runner.run(
+            client_id,
+            audit_id,
+            build_transact_items,
+            on_governed_condition_failed=_raise_conditional_write_error,
+        )
 
     def update_intelligence_metadata(self, item: dict[str, Any]) -> None:
-        """Overwrite an existing IntelligenceMetadata record (force re-generation / retry).
+        """Overwrite an existing IntelligenceMetadata record (force
+        re-generation / retry) as a hold-coordinated TransactWriteItems call
+        -- the Put itself remains unconditioned (preserving the existing
+        "entire item is replaced" force-regeneration semantics), with the
+        appended LegalHold.hold_version ConditionCheck as the only condition
+        in the transaction (Technical Design Section 20.6).
 
         Used when an IntelligenceMetadata record already exists (from a prior generation
         attempt, regardless of status). Writes the full item without condition, preserving
@@ -267,18 +415,39 @@ class IntelligenceRepository:
             item: Full IntelligenceMetadata item dict (must include PK/SK).
 
         Raises:
-            StorageError: On DynamoDB failure.
+            StorageError: ``HOLD_COORDINATION_NOT_CONFIGURED`` if this
+                instance has no HoldRepository; ``CUSTODY_PERIOD_CONFIG_MISSING``
+                if no valid custody-period duration was injected --
+                both fail closed before any hold-state read, transact-item
+                construction, or AWS request; ``HOLD_STATE_CONCURRENCY_EXCEEDED``
+                on bounded hold-version retry exhaustion.
         """
+        self._governance_preflight()
         _assert_phase5_sk(item.get("SK", ""))
-        try:
-            self._call(
-                "put_item",
-                Item=item,
+        client_id, audit_id = _parse_phase5_metadata_identity(item)
+        base_item = dict(item)  # shallow copy -- NEVER sanitize() a persistence-bound item
+        hold_key = self._hold_repository.legal_hold_key(client_id, audit_id)
+
+        def build_transact_items(
+            hold_state: dict[str, Any] | None,
+        ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+            item_with_governance = {
+                **base_item,
+                **_intelligence_governance_fields(hold_state, self._custody_period_days),
+            }
+            put_transact_item = {
+                "Put": {
+                    "TableName": self.table_name,
+                    "Item": encode_item(item_with_governance),
+                }
+            }
+            hold_condition_item = build_hold_version_condition_check_item(
+                self.table_name, hold_key, hold_state
             )
-        except ClientError as exc:
-            raise storage_error_from_dynamodb_client_error(exc, operation="put_item") from exc
-        except Exception as exc:
-            raise storage_error_from_dynamodb_request_error(exc, operation="put_item") from exc
+            return [put_transact_item], hold_condition_item
+
+        runner = HoldCoordinatedTransactionRunner(self.dynamodb_client, self._hold_repository)
+        runner.run(client_id, audit_id, build_transact_items)
 
     def update_intelligence_metadata_fields(
         self, key: dict[str, str], updates: dict[str, Any]
