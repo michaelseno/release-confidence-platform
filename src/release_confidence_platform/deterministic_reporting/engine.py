@@ -286,7 +286,7 @@ class ReportingEngine:
             self.repository.put_report_metadata_once(meta_item)
         else:
             generation_count = (existing.get("generation_count") or 1) + 1
-            self.repository.update_report_metadata_fields(
+            self.repository.regenerate_report_metadata(
                 meta_key,
                 {
                     "report_job_id": report_job_id,
@@ -294,6 +294,8 @@ class ReportingEngine:
                     "generation_count": generation_count,
                     "updated_at": invoked_at,
                 },
+                client_id=client_id,
+                audit_id=audit_id,
             )
 
         # ------------------------------------------------------------------

@@ -150,6 +150,7 @@ class _EngineTestRepository:
         self._intel_metadata = intel_metadata
         self._existing_report_metadata = existing_report_metadata
         self.write_calls: list[tuple[str, Any]] = []
+        self.regenerate_calls: list[tuple] = []
 
     def get_intelligence_metadata(
         self, client_id, audit_id, audit_execution_id, config_version,
@@ -188,6 +189,12 @@ class _EngineTestRepository:
     def put_report_metadata_once(self, item: dict[str, Any]) -> None:
         self.write_calls.append(("put_report_metadata_once", item))
 
+    def regenerate_report_metadata(
+        self, key: dict[str, str], updates: dict[str, Any], *, client_id: str, audit_id: str
+    ) -> None:
+        self.regenerate_calls.append((key, updates, client_id, audit_id))
+        self.write_calls.append(("regenerate_report_metadata", {**key, **updates}))
+
     def update_report_job(self, key: dict[str, str], updates: dict[str, Any]) -> None:
         self.write_calls.append(("update_report_job", {**key, **updates}))
 
@@ -222,7 +229,7 @@ class _NullPublisher:
 # ---------------------------------------------------------------------------
 
 
-def _call_generate(repo, publisher=None):
+def _call_generate(repo, publisher=None, *, force=False):
     publisher = publisher or _NullPublisher()
     engine = ReportingEngine(repo, publisher)
     return engine.generate(
@@ -232,6 +239,7 @@ def _call_generate(repo, publisher=None):
         config_version="cfg_v1",
         aggregation_version="agg_v1",
         intelligence_version="intel_v1",
+        force=force,
     )
 
 
@@ -378,3 +386,113 @@ def test_report_metadata_complete_includes_aggregate_set_hash():
         "Phase 6→7 consumer contract requires this field"
     )
     assert complete_call["aggregate_set_hash"] == "hashTEST"
+
+
+# ---------------------------------------------------------------------------
+# Regeneration call-site relocation (Technical Design Section 20.7.2, 20.7.4)
+# ---------------------------------------------------------------------------
+
+
+def test_regeneration_calls_regenerate_report_metadata_not_update_fields():
+    """The regen-PENDING call site (engine.py, existing-record branch) must
+    call regenerate_report_metadata, never update_report_metadata_fields,
+    for the initial PENDING transition of a force-regeneration."""
+    existing = {
+        "status": "COMPLETE",
+        "report_job_id": "rptjob_existing",
+        "generation_count": 1,
+    }
+    repo = _EngineTestRepository(existing_report_metadata=existing)
+    _call_generate(repo, force=True)
+
+    assert len(repo.regenerate_calls) == 1
+    key, updates, client_id, audit_id = repo.regenerate_calls[0]
+    assert client_id == "client_test"
+    assert audit_id == "audit_test"
+    assert updates["status"] == "PENDING"
+    assert updates["generation_count"] == 2
+
+    regen_pending_calls = [
+        item
+        for name, item in repo.write_calls
+        if name == "regenerate_report_metadata" and item.get("status") == "PENDING"
+    ]
+    assert len(regen_pending_calls) == 1
+
+    fields_pending_calls = [
+        item
+        for name, item in repo.write_calls
+        if name == "update_report_metadata_fields" and item.get("status") == "PENDING"
+        and item.get("generation_count") is not None
+    ]
+    assert fields_pending_calls == [], (
+        "regen-PENDING must never be routed through update_report_metadata_fields"
+    )
+
+
+def test_regenerate_report_metadata_never_carries_forbidden_governance_fields():
+    """The engine constructs the updates dict passed to
+    regenerate_report_metadata -- it must never include the three
+    repository-owned governance fields, since regenerate_report_metadata
+    rejects them."""
+    existing = {
+        "status": "COMPLETE",
+        "report_job_id": "rptjob_existing",
+        "generation_count": 1,
+    }
+    repo = _EngineTestRepository(existing_report_metadata=existing)
+    _call_generate(repo, force=True)
+
+    _key, updates, _client_id, _audit_id = repo.regenerate_calls[0]
+    for forbidden in ("custody_expires_at", "ttl_disposal_at", "evidence_class"):
+        assert forbidden not in updates
+
+
+# ---------------------------------------------------------------------------
+# Category 3 exclusion — ReportJob never receives governance elements
+# (ADR Invariant 27 / Decision 8; Technical Design Section 20.2). Integration-
+# level coverage: a full generate() run's captured ReportJob writes must
+# carry none of the five governance elements, for both first-generation and
+# force-regeneration.
+# ---------------------------------------------------------------------------
+
+_GOVERNANCE_ELEMENTS = (
+    "custody_expires_at",
+    "ttl_disposal_at",
+    "evidence_class",
+    "rcp-legal-hold",
+    "rcp-evidence-class",
+    "hold_version",
+)
+
+
+def _assert_no_report_job_governance_elements(repo) -> None:
+    job_writes = [
+        item
+        for method, item in repo.write_calls
+        if method in ("put_report_job_once", "update_report_job")
+    ]
+    assert job_writes, "Expected at least one ReportJob write to check"
+    for item in job_writes:
+        for element in _GOVERNANCE_ELEMENTS:
+            assert element not in item, (
+                f"ReportJob item/update unexpectedly carries governance "
+                f"element {element!r}: {item!r}"
+            )
+
+
+def test_report_job_never_carries_governance_elements_first_generation():
+    repo = _EngineTestRepository()
+    _call_generate(repo)
+    _assert_no_report_job_governance_elements(repo)
+
+
+def test_report_job_never_carries_governance_elements_force_regeneration():
+    existing = {
+        "status": "COMPLETE",
+        "report_job_id": "rptjob_existing",
+        "generation_count": 1,
+    }
+    repo = _EngineTestRepository(existing_report_metadata=existing)
+    _call_generate(repo, force=True)
+    _assert_no_report_job_governance_elements(repo)

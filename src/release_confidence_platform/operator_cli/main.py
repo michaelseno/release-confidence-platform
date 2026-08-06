@@ -398,6 +398,9 @@ def dispatch(args: argparse.Namespace) -> CommandResult:
                 exit_code=0,
             )
         if generate_command == "report":
+            from release_confidence_platform.config.custody_period_config import (  # noqa: PLC0415
+                CustodyPeriodConfigLoader,
+            )
             from release_confidence_platform.config.stage_config import (  # noqa: PLC0415
                 StageConfigLoader,
             )
@@ -411,17 +414,34 @@ def dispatch(args: argparse.Namespace) -> CommandResult:
             from release_confidence_platform.deterministic_reporting.repository import (  # noqa: PLC0415
                 ReportRepository,
             )
+            from release_confidence_platform.evidence_retention.hold_repository import (  # noqa: PLC0415
+                HoldRepository,
+            )
             from release_confidence_platform.storage.aws_client_factory import (  # noqa: PLC0415
                 AwsClientFactory,
             )
 
             stage_config = StageConfigLoader().load(args.stage)
+
+            # Evidence Governance Workstream A1.3d.3 (ADR Invariant 30;
+            # Technical Design Section 20.4, 20.7.1-20.7.2): resolved exactly
+            # once, before any AWS-client construction, fail-closed on any
+            # missing/invalid configuration. Phase 6 has no dry-run mode, so
+            # this is always resolved on the write-capable generate path.
+            custody_period_days = CustodyPeriodConfigLoader().resolve("report", args.stage)
+
             factory = AwsClientFactory(stage_config)
             dynamodb_client = factory._session.client("dynamodb")
             s3_client = factory._session.client("s3")
 
-            repo = ReportRepository(stage_config.audit_metadata_table, dynamodb_client)
-            publisher = ReportPublisher(stage_config.config_bucket, s3_client)
+            hold_repository = HoldRepository(stage_config.audit_metadata_table, dynamodb_client)
+            repo = ReportRepository(
+                stage_config.audit_metadata_table,
+                dynamodb_client,
+                hold_repository,
+                custody_period_days=custody_period_days,
+            )
+            publisher = ReportPublisher(stage_config.config_bucket, s3_client, hold_repository)
             engine = ReportingEngine(repo, publisher, logger=StructuredLogger())
             result = dispatch_report_generate(args, engine)
             status_val = result.get("status", "COMPLETE")

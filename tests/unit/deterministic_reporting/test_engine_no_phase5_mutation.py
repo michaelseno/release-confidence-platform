@@ -220,6 +220,20 @@ class _TrackingRepository:
         self._assert_phase6_sk("put_report_metadata_once", sk)
         self.write_calls.append(("put_report_metadata_once", item))
 
+    def regenerate_report_metadata(
+        self, key: dict[str, str], updates: dict[str, Any], *, client_id: str, audit_id: str
+    ) -> None:
+        # Minimal double support so the regeneration path (engine.py now
+        # calls regenerate_report_metadata, not update_report_metadata_fields,
+        # at the regen-PENDING call site) still exercises correctly through
+        # this file's existing double. This file's own scope stays narrow —
+        # only the Phase 5 SK non-mutation assertion, unchanged below; no
+        # Category 3 governance-element assertions are added here (those
+        # belong in test_engine.py).
+        sk = key.get("SK", "")
+        self._assert_phase6_sk("regenerate_report_metadata", sk)
+        self.write_calls.append(("regenerate_report_metadata", {**key, **updates}))
+
     def update_report_job(self, key: dict[str, str], updates: dict[str, Any]) -> None:
         sk = key.get("SK", "")
         self._assert_phase6_sk("update_report_job", sk)
