@@ -459,6 +459,9 @@ def dispatch(args: argparse.Namespace) -> CommandResult:
             )
         raise AssertionError(f"generate {generate_command}")
     if args.group == "certify":
+        from release_confidence_platform.config.custody_period_config import (  # noqa: PLC0415
+            CustodyPeriodConfigLoader,
+        )
         from release_confidence_platform.config.stage_config import (  # noqa: PLC0415
             StageConfigLoader,
         )
@@ -475,22 +478,38 @@ def dispatch(args: argparse.Namespace) -> CommandResult:
         from release_confidence_platform.audit_platform_integrity.commands import (  # noqa: PLC0415
             dispatch_certify_audit,
         )
+        from release_confidence_platform.evidence_retention.hold_repository import (  # noqa: PLC0415
+            HoldRepository,
+        )
         from release_confidence_platform.storage.aws_client_factory import (  # noqa: PLC0415
             AwsClientFactory,
         )
 
         stage_config = StageConfigLoader().load(args.stage)
+
+        # Evidence Governance Workstream A1.3d.4 (ADR Invariant 30; Technical
+        # Design Section 20.4, 20.8): resolved exactly once, before any
+        # AWS-client construction, fail-closed on any missing/invalid
+        # configuration. Phase 7 has no dry-run mode, so this is always
+        # resolved on the write-capable certify path.
+        custody_period_days = CustodyPeriodConfigLoader().resolve("certificate", args.stage)
+
         factory = AwsClientFactory(stage_config)
         dynamodb_client = factory._session.client("dynamodb")
         s3_client = factory._session.client("s3")
 
+        hold_repository = HoldRepository(stage_config.audit_metadata_table, dynamodb_client)
         cert_repo = CertificationRepository(
             stage_config.audit_metadata_table,
             dynamodb_client,
             s3_client,
             stage_config.config_bucket,
+            hold_repository,
+            custody_period_days=custody_period_days,
         )
-        cert_publisher = CertificationPublisher(stage_config.config_bucket, s3_client)
+        cert_publisher = CertificationPublisher(
+            stage_config.config_bucket, s3_client, hold_repository
+        )
         engine = CertificationEngine(
             cert_repo, cert_publisher, logger=StructuredLogger()
         )
