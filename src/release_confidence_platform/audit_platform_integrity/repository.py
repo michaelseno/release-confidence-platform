@@ -19,20 +19,39 @@ SK write guard design note:
     #INTJOB# — exclusively Phase 5 IntelligenceJob records
   The primary protection is the requirement that every write SK must contain
   #CERTJOB# (CertificationJob) or #CERT# (CertificationMetadata).
+
+Evidence Governance Workstream A1.3d.4 (Technical Design Section 20.8;
+ADR Decision 11, Non-Negotiable Invariant 31): write_cert_metadata_complete
+becomes a hold-coordinated TransactWriteItems call that preserves the
+existing unconditional-replacement (Put with no ConditionExpression)
+semantics -- structurally identical in shape to the already-merged Phase
+5/6 governed writes (reliability_intelligence/repository.py,
+deterministic_reporting/repository.py), but with no item-level condition
+of its own, since forced recertification must always be able to replace an
+existing CertificationMetadata record. CertificationJob remains Category 3
+-- never receives custody fields, hold coordination, or evidence-class tags.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 from botocore.exceptions import ClientError
 
 from release_confidence_platform.core.exceptions import StorageError
 from release_confidence_platform.core.time import utc_now_iso
+from release_confidence_platform.evidence_retention.hold_coordination import (
+    HoldCoordinatedTransactionRunner,
+    build_hold_version_condition_check_item,
+    compute_ttl_disposal_at,
+)
+from release_confidence_platform.evidence_retention.hold_repository import HoldRepository
 from release_confidence_platform.storage.dynamodb_codec import (
     decode_dynamodb_response,
     encode_dynamodb_call_kwargs,
+    encode_item,
     storage_error_from_dynamodb_client_error,
     storage_error_from_dynamodb_request_error,
 )
@@ -67,6 +86,30 @@ class ConditionalWriteError(StorageError):
         super().__init__(message, "CONDITIONAL_WRITE_FAILED")
 
 
+def _cert_governance_fields(
+    hold_state: dict[str, Any] | None, custody_period_days: int
+) -> dict[str, int | str]:
+    """Compute custody_expires_at/ttl_disposal_at/evidence_class for a Phase 7
+    governed CertificationMetadata write (Technical Design Section 20.8.1).
+
+    Mirrors reliability_intelligence/repository.py::_intelligence_governance_fields
+    and deterministic_reporting/repository.py::_report_governance_fields exactly,
+    with evidence_class fixed to "certificate". custody_expires_at is always
+    freshly computed; ttl_disposal_at is omitted if and only if this attempt's
+    own hold_state read observed an ACTIVE hold.
+    """
+    now_epoch_seconds = int(datetime.now(UTC).timestamp())
+    custody_expires_at = now_epoch_seconds + custody_period_days * 86400
+    fields: dict[str, int | str] = {
+        "custody_expires_at": custody_expires_at,
+        "evidence_class": "certificate",
+    }
+    ttl_disposal_at = compute_ttl_disposal_at(hold_state, custody_expires_at)
+    if ttl_disposal_at is not None:
+        fields["ttl_disposal_at"] = ttl_disposal_at
+    return fields
+
+
 class CertificationRepository:
     """Phase 6 consumer reads and Phase 7 certification writes for Audit Platform Integrity."""
 
@@ -76,11 +119,43 @@ class CertificationRepository:
         dynamodb_client: Any,
         s3_client: Any,
         bucket_name: str,
+        hold_repository: HoldRepository | None = None,
+        *,
+        custody_period_days: int | None = None,
     ) -> None:
         self.table_name = table_name
         self.dynamodb_client = dynamodb_client
         self.s3_client = s3_client
         self.bucket_name = bucket_name
+        self._hold_repository = hold_repository
+        self._custody_period_days = custody_period_days
+
+    def _governance_preflight(self) -> None:
+        """Write-entry governance preflight (ADR Invariant 31; Technical
+        Design Section 20.4). Mandatory first action of every governed
+        write method, before any hold-state read, transaction-item
+        construction, or AWS mutation. Order is load-bearing: hold
+        coordination presence, then custody-duration presence, then
+        custody-duration validity (Boolean rejected before the int check,
+        since bool is an int subclass).
+        """
+        if self._hold_repository is None:
+            raise StorageError(
+                "Hold coordination is not configured", "HOLD_COORDINATION_NOT_CONFIGURED"
+            )
+        if self._custody_period_days is None:
+            raise StorageError(
+                "Custody period configuration was not provided to this repository instance",
+                "CUSTODY_PERIOD_CONFIG_MISSING",
+            )
+        if (
+            isinstance(self._custody_period_days, bool)
+            or not isinstance(self._custody_period_days, int)
+            or self._custody_period_days <= 0
+        ):
+            raise StorageError(
+                "Custody period configuration is invalid", "CUSTODY_PERIOD_CONFIG_MISSING"
+            )
 
     # ------------------------------------------------------------------
     # Phase 6 read-only gate (never writes to Phase 6 records)
@@ -307,17 +382,35 @@ class CertificationRepository:
         certification_summary: str,
         disclosed_failures: list[str],
     ) -> None:
-        """Write or update the authoritative CertificationMetadata record.
+        """Write or update the authoritative CertificationMetadata record, as
+        a hold-coordinated TransactWriteItems call (Technical Design Section
+        20.8): the existing unconditional Put (no ConditionExpression of any
+        kind -- forced recertification must always be able to replace an
+        existing record) plus the appended LegalHold.hold_version
+        ConditionCheck.
 
         PutItem overwrites any existing record for the same identity tuple.
         Force re-runs update terminal_state, certificate_id, certjob_id, and
         completed_at. created_at is always set to the current write timestamp
         in this implementation (MVP scope: see assumption in implementation plan).
 
+        Every attempt (including a hold-version retry) computes fresh
+        custody_expires_at/ttl_disposal_at/evidence_class from the injected
+        duration, that attempt's own clock, and that attempt's own
+        hold-state read -- on every call, first-certification, forced
+        recertification, and the TN-12 BLOCKED path alike; this write
+        contract does not distinguish between them.
+
         Raises:
             AssertionError: If computed SK is not a Phase 7 SK.
-            StorageError: On DynamoDB failure.
+            StorageError: ``HOLD_COORDINATION_NOT_CONFIGURED`` if this
+                instance has no HoldRepository; ``CUSTODY_PERIOD_CONFIG_MISSING``
+                if no valid custody-period duration was injected -- both fail
+                closed before any hold-state read, transact-item
+                construction, or AWS request; ``HOLD_STATE_CONCURRENCY_EXCEEDED``
+                on bounded hold-version retry exhaustion.
         """
+        self._governance_preflight()
         sk = (
             f"AUDIT#{audit_id}#EXEC#{audit_execution_id}#CFG#{config_version}"
             f"#AGG#{aggregation_version}#INTEL#{intelligence_version}"
@@ -325,7 +418,8 @@ class CertificationRepository:
         )
         _assert_phase7_sk(sk)
         now = utc_now_iso()
-        item = {
+        # Literal construction -- NEVER sanitize() a persistence-bound item.
+        base_item: dict[str, Any] = {
             "PK": f"CLIENT#{client_id}",
             "SK": sk,
             "certificate_version": cert_version,
@@ -349,7 +443,31 @@ class CertificationRepository:
             "created_at": now,
             "completed_at": now,
         }
-        self._put_item(item)
+        hold_key = self._hold_repository.legal_hold_key(client_id, audit_id)
+
+        def build_transact_items(
+            hold_state: dict[str, Any] | None,
+        ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+            item_with_governance = {
+                **base_item,
+                **_cert_governance_fields(hold_state, self._custody_period_days),
+            }
+            # No ConditionExpression -- the unconditional-replacement contract
+            # (Technical Design Section 20.8) is preserved exactly; forced
+            # recertification must always be able to replace an existing record.
+            put_transact_item = {
+                "Put": {
+                    "TableName": self.table_name,
+                    "Item": encode_item(item_with_governance),
+                }
+            }
+            hold_condition_item = build_hold_version_condition_check_item(
+                self.table_name, hold_key, hold_state
+            )
+            return [put_transact_item], hold_condition_item
+
+        runner = HoldCoordinatedTransactionRunner(self.dynamodb_client, self._hold_repository)
+        runner.run(client_id, audit_id, build_transact_items)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -371,9 +489,6 @@ class CertificationRepository:
             if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
                 raise ConditionalWriteError() from exc
             raise
-
-    def _put_item(self, item: dict[str, Any]) -> None:
-        self._call("put_item", Item=item)
 
     def _update_item(self, key: dict[str, str], updates: dict[str, Any]) -> None:
         names = {f"#f{i}": field_name for i, field_name in enumerate(updates)}

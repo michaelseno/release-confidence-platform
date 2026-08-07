@@ -463,4 +463,24 @@ def _error_next_step(code: str, message: str, stage: str | None) -> str:
             "confirming metadata is absent, or use --force only when metadata "
             "exists in DRAFT/FAILED"
         )
+    if code == "CUSTODY_PERIOD_CONFIG_MISSING":
+        return (
+            "a bare retry will fail identically until an authorized positive-integer "
+            "duration is added for the applicable evidentiary class and stage; verify "
+            "config/custody_periods.json's evidentiary_classes.<class>.<stage> entry "
+            "rather than retrying"
+        )
+    if code == "HOLD_COORDINATION_NOT_CONFIGURED":
+        return (
+            "this indicates a construction-time wiring defect, not an "
+            "operator-correctable condition; escalate to engineering rather than "
+            "retrying the command"
+        )
+    if code == "HOLD_STATE_CONCURRENCY_EXCEEDED":
+        return (
+            "retrying may succeed once concurrent hold-state activity on the same "
+            "audit clears; persistent recurrence indicates sustained concurrent "
+            "legal-hold management on the same audit identity that should be "
+            "investigated before continuing"
+        )
     return "correct the error and retry"

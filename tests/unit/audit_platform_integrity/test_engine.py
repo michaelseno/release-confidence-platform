@@ -567,3 +567,167 @@ def test_certification_already_certified_error_inherits_validation_error():
     error = CertificationAlreadyCertifiedError("test idempotency error")
     assert isinstance(error, ValidationError)
     assert error.error_type == "CERTIFICATION_ALREADY_CERTIFIED"
+
+
+# ---------------------------------------------------------------------------
+# Evidence Governance Workstream A1.3d.4 (Technical Design Section 20.8) --
+# engine.py is an unchanged behavior-preservation target. These tests prove
+# CertificationEngine.certify()'s existing call signatures to
+# write_cert_metadata_complete/write_artifact are unaffected by A1.3d.4, and
+# that CertificationJob (Category 3) never carries a governance field or
+# triggers hold-coordinated transaction construction, across the full
+# pipeline. Per Technical Design Section 20.10, none of these tests may
+# assert a stale PENDING/IN_PROGRESS Job, an orphaned S3 artifact, Job/
+# Metadata status divergence, or a partially-failed terminal update as
+# expected/correct behavior (issue #118 is out of scope).
+# ---------------------------------------------------------------------------
+
+
+def test_certify_forced_recertification_replaces_existing_metadata():
+    """--force with an existing CERTIFIED record must still reach
+    write_cert_metadata_complete with a freshly generated certificate_id,
+    proving the unconditional-replacement contract is exercised end to end."""
+    existing = {
+        "terminal_state": "CERTIFIED",
+        "certificate_id": "cert_existing",
+        "s3_certificate_ref": "integrity/client_test/audit_test/exec_test/...",
+    }
+    repo = _EngineTestRepository(existing_cert_metadata=existing)
+    result = _call_certify(repo, force=True)
+    assert isinstance(result, PlatformIntegrityCertificate)
+
+    write_call = next(
+        call for call in repo.write_calls if call[0] == "write_cert_metadata_complete"
+    )
+    assert write_call[1]["certificate_id"] == result.identity.certificate_id
+    assert write_call[1]["certificate_id"] != "cert_existing"
+
+
+def test_certify_certified_path_reaches_write_artifact_and_write_cert_metadata_complete():
+    """A clean CERTIFIED run must reach both write_artifact and
+    write_cert_metadata_complete exactly once."""
+    repo = _EngineTestRepository()
+    publisher = _NullPublisher()
+    result = _call_certify(repo, publisher)
+    assert result.result.terminal_state == "CERTIFIED"
+    methods = [call[0] for call in repo.write_calls]
+    assert methods.count("write_cert_metadata_complete") == 1
+    assert len(publisher.write_calls) == 1
+
+
+def build_tn12_blocked_write_artifact_call() -> tuple[str, dict]:
+    """Run the TN-12 (Phase 6 S3 artifact read failure) pipeline once and
+    return the (key, artifact) pair passed to write_artifact.
+
+    Module-level helper (not a test) so tests/unit/audit_platform_integrity/
+    test_hold_coordination.py's TN-12 tag-equivalence test can independently
+    reproduce an identity-equivalent BLOCKED-path (key, artifact) pair by
+    calling this function directly -- a plain function call, not a
+    cross-test-execution-order dependency.
+    """
+    repo = _EngineTestRepository(read_artifact_raises=Exception("S3 NoSuchKey"))
+    publisher = _NullPublisher()
+    _call_certify(repo, publisher)
+    return publisher.write_calls[0]
+
+
+def test_certify_tn12_blocked_path_reaches_write_artifact_and_write_cert_metadata_complete():
+    """TN-12: the BLOCKED-path certificate must still reach both write_artifact
+    and write_cert_metadata_complete exactly once."""
+    repo = _EngineTestRepository(read_artifact_raises=Exception("S3 NoSuchKey"))
+    publisher = _NullPublisher()
+    result = _call_certify(repo, publisher)
+    assert result.result.terminal_state == "CERTIFICATION_BLOCKED"
+    methods = [call[0] for call in repo.write_calls]
+    assert methods.count("write_cert_metadata_complete") == 1
+    assert len(publisher.write_calls) == 1
+
+    key, artifact = build_tn12_blocked_write_artifact_call()
+    assert key.startswith("integrity/")
+    assert isinstance(artifact, dict)
+
+
+def test_certify_engine_receives_no_custody_or_hold_dependency():
+    """CertificationEngine.__init__'s signature must be unaffected -- no new
+    constructor parameter for custody/hold configuration."""
+    import inspect
+
+    sig = inspect.signature(CertificationEngine.__init__)
+    assert list(sig.parameters.keys()) == [
+        "self",
+        "repository",
+        "publisher",
+        "logger",
+        "platform_version",
+    ]
+
+
+def test_certify_existing_call_shapes_unchanged():
+    """The exact kwargs passed to write_cert_metadata_complete/write_artifact
+    must be byte-identical (same key set) to pre-A1.3d.4 behavior -- the
+    engine itself never adds a governance field to either call."""
+    repo = _EngineTestRepository()
+    publisher = _NullPublisher()
+    _call_certify(repo, publisher)
+
+    write_call = next(
+        call for call in repo.write_calls if call[0] == "write_cert_metadata_complete"
+    )
+    expected_keys = {
+        "client_id",
+        "audit_id",
+        "audit_execution_id",
+        "config_version",
+        "aggregation_version",
+        "intelligence_version",
+        "report_version",
+        "cert_version",
+        "terminal_state",
+        "certificate_id",
+        "certjob_id",
+        "s3_cert_ref",
+        "s3_report_artifact_ref",
+        "aggregate_set_hash",
+        "report_id",
+        "certification_summary",
+        "disclosed_failures",
+    }
+    assert set(write_call[1].keys()) == expected_keys
+
+    key, artifact = publisher.write_calls[0]
+    assert key.startswith("integrity/")
+    assert isinstance(artifact, dict)
+
+
+def test_certification_job_write_methods_never_carry_governance_fields_full_flow():
+    """Across a full certify() run, none of the four CertificationJob write
+    calls may carry any governance field (Technical Design Section 20.2)."""
+    repo = _EngineTestRepository()
+    _call_certify(repo)
+
+    certjob_calls = [call for call in repo.write_calls if call[0] != "write_cert_metadata_complete"]
+    assert len(certjob_calls) >= 2
+    for method_name, payload in certjob_calls:
+        for field in ("custody_expires_at", "ttl_disposal_at", "evidence_class"):
+            assert field not in payload, f"{method_name} unexpectedly carries {field}"
+
+
+def test_certification_job_write_methods_zero_hold_coordinated_transaction_construction(
+    monkeypatch,
+):
+    """A full certify() run against the stub repository must never construct
+    HoldCoordinatedTransactionRunner -- engine.py has no hold-coordination
+    dependency of its own (Technical Design Section 20.8)."""
+    from release_confidence_platform.evidence_retention import hold_coordination
+
+    calls: list[tuple] = []
+    original_init = hold_coordination.HoldCoordinatedTransactionRunner.__init__
+
+    def _spy_init(self, *args, **kwargs):
+        calls.append((args, kwargs))
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(hold_coordination.HoldCoordinatedTransactionRunner, "__init__", _spy_init)
+    repo = _EngineTestRepository()
+    _call_certify(repo)
+    assert calls == []
