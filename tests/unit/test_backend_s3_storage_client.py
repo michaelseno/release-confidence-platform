@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import urllib.parse
+from typing import Any
+
 import pytest
 from botocore.exceptions import ClientError
 
@@ -182,3 +185,57 @@ def test_backend_write_json_generic_put_error_maps_to_safe_storage_error() -> No
     assert exc.value.error_type == "STORAGE_ERROR"
     assert exc.value.message == "S3 config write failed"
     assert "super-secret" not in exc.value.message
+
+
+class RecordingPutS3:
+    """Evidence Governance Workstream A1.3e (Technical Design Section 18.1,
+    18.6, 18.3): stub recording put_object calls for `write_json` (Category
+    5 -- configuration/input artifacts). `head_object` reports the key as
+    not-found so `write_json(..., overwrite=False)` reaches `put_object`
+    without raising `CONFIG_OBJECT_EXISTS`.
+    """
+
+    def __init__(self) -> None:
+        self.put_object_calls: list[dict[str, Any]] = []
+
+    def head_object(self, **kwargs):  # noqa: ARG002
+        raise _client_error("404", "missing", "HeadObject")
+
+    def put_object(self, **kwargs: Any) -> dict[str, Any]:
+        self.put_object_calls.append(kwargs)
+        return {}
+
+
+def _assert_write_json_put_object_carries_no_governance_tagging(kwargs: dict[str, Any]) -> None:
+    # `configs/*` is Category 5 (Technical Design Section 18.1, 18.6) --
+    # explicitly excluded from A1.3's custody/hold mechanism. `write_json`
+    # today never sets `Tagging` at all, but the governed requirement this
+    # test enforces is narrower than "Tagging must be absent": only the two
+    # RCP-prefixed governance tag keys must never appear, checked only if
+    # `Tagging` happens to be present. Asserting outright absence of
+    # `Tagging` would over-constrain this method against legitimate future
+    # unrelated tagging.
+    if "Tagging" in kwargs:
+        parsed_tags = urllib.parse.parse_qs(kwargs["Tagging"])
+        assert "rcp-legal-hold" not in parsed_tags
+        assert "rcp-evidence-class" not in parsed_tags
+
+
+def test_write_json_create_carries_no_governance_tagging() -> None:
+    s3 = RecordingPutS3()
+    storage = S3StorageClient("runtime-bucket", s3)
+
+    storage.write_json("configs/client123/client_config.json", {"ok": True}, overwrite=False)
+
+    assert len(s3.put_object_calls) == 1
+    _assert_write_json_put_object_carries_no_governance_tagging(s3.put_object_calls[0])
+
+
+def test_write_json_force_overwrite_carries_no_governance_tagging() -> None:
+    s3 = RecordingPutS3()
+    storage = S3StorageClient("runtime-bucket", s3)
+
+    storage.write_json("configs/client123/client_config.json", {"ok": True}, overwrite=True)
+
+    assert len(s3.put_object_calls) == 1
+    _assert_write_json_put_object_carries_no_governance_tagging(s3.put_object_calls[0])
