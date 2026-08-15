@@ -245,6 +245,8 @@ This is additive-only per `docs/architecture/naming_and_schema_versioning.md`'s 
 
 ## 8. API Contracts
 
+**AMENDMENT (A1.4b.0 — Operator CLI and RetentionService Contract Correction):** this section predates Decision 9/§19's authoritative hold-state model (`hold_version`, `sweep_status`, the canary-marker protocol) and is materially inconsistent with it — the PLACE idempotency wording below, the RELEASE command's omitted `--reason`, the `HOLD_ALREADY_ACTIVE` error code, the pre-sweep response-body shape, and the absence of a `RetentionService`-owned STATUS operation are all superseded, without being deleted, by **§21 ("Operator CLI and RetentionService Contract Correction")**. §21 states precisely what it supersedes from this section. Read §21 before relying on any command contract described below; the text in this section is retained only as the historical record of the original (now-corrected) command shape.
+
 A1 introduces CLI commands only (no HTTP API exists in this platform). Each is documented using the platform's CLI-as-API convention (parser + dispatch, following `audit_platform_integrity/commands.py`).
 
 ### Command: `rcp retention hold place`
@@ -1795,3 +1797,249 @@ Exact full paths, no approximate counts, no placeholder ownership. Files listed 
 - **Future QA acceptance criteria required by the optional-construction correction (§20.4/Invariant 31)** — these define A1.3d.4's own acceptance criteria and do not authorize A1.3d.4: `retrieve cert-*` succeeds when `certificate` has no configured custody duration; `retrieve cert-*` never invokes `CustodyPeriodConfigLoader`; `retrieve cert-*` performs no governed write; `write_cert_metadata_complete` fails before any AWS activity when `hold_repository` is absent; the same write fails before any AWS activity when `custody_period_days` is absent or invalid (Boolean, non-integer, zero, negative all rejected); `CertificationPublisher.write_artifact` fails before any AWS activity when `hold_repository` is absent, and separately fails before any hold-state read or S3 call on any key that does not parse to exactly 11 segments with `parts[0] == "integrity"`, `parts[10] == "artifact.json"`, and non-empty `client_id`/`audit_id` (§20.8.1); `certify audit` resolves `certificate` exactly once; the same `HoldRepository` instance (identity-checked) is shared between `CertificationRepository` and `CertificationPublisher`; `retrieve cert-*`'s existing behavior and output remain compatible with pre-A1.3d.4 output; `CertificationJob` (all four write methods) never carries `custody_expires_at`, `ttl_disposal_at`, `evidence_class`, any legal-hold version field, and triggers zero hold-state reads and zero hold-coordinated transaction construction (§20.2); the three new `_error_next_step` branches (§20.11.1) render identical guidance text regardless of which of Phases 5–7 triggered them, and leak no key, identifier, AWS detail, or internal exception text.
 
 No numeric duration value, environment binding, infrastructure deployment, or activation is introduced by any of the above — this inventory describes future implementation scope only and is not itself an implementation authorization.
+
+---
+
+## 21. Operator CLI and RetentionService Contract Correction (A1.4b.0 Amendment)
+
+**Status: documentation-only correction.** This section authorizes no code, test, or infrastructure change. It corrects §8 (API Contracts) — drafted before Decision 9/§19's authoritative hold-state model existed — to reconcile it with §19's already-implemented `hold_version`/`sweep_status`/canary-marker protocol, and defines the target contract a future, separately authorized **A1.4b** implementation subphase must build against. Companion ADR: new Decision 12, new Non-Negotiable Invariants 32–37.
+
+This correction originates from a read-only investigation of the already-implemented `RetentionService` (`evidence_retention/retention_service.py`), `HoldTransitions`/`HoldNotActiveError`/`is_hold_fully_enforced` (`evidence_retention/hold_transitions.py`), `HoldRepository` (`evidence_retention/hold_repository.py`), `CustodySweepClient` (`evidence_retention/custody_sweep_client.py`), `MarkerStore` (`evidence_retention/marker_store.py`), and the operator CLI (`operator_cli/`), followed by five corrective decisions from Product Strategy. Confirmed directly: **no `rcp retention hold place|release|status` CLI command exists in this repository today** — `evidence_retention/` has no `commands.py` and no `disposal_recorder.py` (confirmed by directory listing), and `operator_cli/main.py` never imports `RetentionService`. §6's `evidence_retention/commands.py` row and this section both describe target, not-yet-built scope. `RetentionService.place_legal_hold`/`release_legal_hold` (`retention_service.py:137-189`) and `HoldTransitions.place`/`release` (`hold_transitions.py:110-302`) are implemented and already match §19's corrected semantics — it is specifically §8's *documentation* of the CLI/service contract around them, not the underlying hold-transition logic itself, that this section corrects.
+
+### 21.1 What This Section Supersedes in §8
+
+Per each Product Strategy decision below, the following §8 text is superseded (not deleted — §8's original text remains above as the historical record; this section is authoritative on conflict):
+
+| §8 text | Superseded by | Decision |
+| --- | --- | --- |
+| PLACE/RELEASE/STATUS "Authentication / Authorization" and "Side Effects" prose, which does not state that the CLI may reach `HoldRepository`/`CustodySweepClient` only through `RetentionService` | §21.2 | 1 |
+| No `RetentionService`-owned STATUS operation is defined (§6's `get_hold_status()` row was forward-referenced but never specified in §8) | §21.2, §21.3 | 1 |
+| PLACE/RELEASE "Response Body": `hold_id`, `status`, `placed_at`/`released_at`, `s3_versions_retagged_count`, `dynamodb_items_updated_count` | §21.4, §21.8 | 2, 5 |
+| RELEASE "Request Parameters": `--client-id`, `--audit-id`, `--stage`, `--actor` (no `--reason`) | §21.5 | 3 |
+| PLACE "Idempotency / Duplicate Handling": *"Re-invoking `place` while already `ACTIVE` is a safe no-op that re-runs the re-tagging sweep... and writes a new `LegalHoldEvent`, incrementing `hold_count`"* | §21.6 | 4 |
+| PLACE "Error Status Codes": `HOLD_ALREADY_ACTIVE` (*"idempotent no-op with a warning, not a hard failure"*) | §21.7 | 4 |
+| RELEASE "Idempotency / Duplicate Handling" (*"Re-invoking `release` when already `RELEASED` returns `HOLD_NOT_ACTIVE`"*) | §21.6 (restated for symmetry, unchanged in substance) | 4 |
+
+STATUS's existing `NEVER_HELD` treatment (§8: *"the 'no hold ever placed' case, returned as `status=NEVER_HELD`, not an error"*) is **not** superseded — it is correct and is carried forward unchanged into §21.4.
+
+### 21.2 Service Ownership Boundary (ADR Decision 12, Invariant 32)
+
+**`RetentionService` is the sole boundary between the operator CLI and hold-state storage. It owns exactly three operations: PLACE, RELEASE, STATUS.** The future `evidence_retention/commands.py` CLI parser/dispatch must construct only `RetentionService` (and, transitively, `RetentionService`'s own declared constructor dependencies — `HoldTransitions`, `HoldRepository`, `MarkerStore`, `CustodySweepClient`, exactly as `RetentionService.__init__` already requires, `retention_service.py:121-131`) and must call only `place_legal_hold`, `release_legal_hold`, and the new `get_hold_status` (§21.3) on it. **The CLI must never call `HoldRepository.get_legal_hold`, `HoldRepository.upsert_hold`, or `HoldRepository.write_hold_event` directly, for any of the three operations, including the read-only status query.**
+
+`RetentionService.place_legal_hold`/`release_legal_hold` are already implemented and require no ownership-boundary change — they already depend on `HoldTransitions`/`MarkerStore`/`CustodySweepClient` internally and expose no raw `HoldRepository` access to their own caller. The correction is additive: `RetentionService` must gain a third public method,
+
+```python
+def get_hold_status(self, client_id: str, audit_id: str) -> HoldOperationResult:
+    ...
+```
+
+which internally uses `HoldRepository.get_legal_hold(client_id, audit_id, consistent_read=True)` (§21.3) and, when a record exists, `hold_transitions.is_hold_fully_enforced(hold_state)` (`hold_transitions.py:83-96`, already implemented, reused unmodified) to populate the `fully_enforced` field of the shared result contract (§21.4). Both are existing, already-implemented components; `get_hold_status` orchestrates them, it does not reimplement either.
+
+### 21.3 Strongly Consistent STATUS Reads (ADR Decision 12, Invariant 33)
+
+`HoldRepository.get_legal_hold` already accepts `consistent_read: bool = False` (`hold_repository.py:136-163`) and, when `True`, issues `GetItem` with `ConsistentRead=True` (`hold_repository.py:161-162`, `:385-388`). Today this parameter's only caller-facing basis is companion ADR Non-Negotiable Invariant 17, scoped specifically to a Category 1/2 **S3** write's custody-field computation (the read immediately preceding a `PutObject` tagging decision).
+
+`RetentionService.get_hold_status` must pass `consistent_read=True` on every call. This is **a second, independent basis** for using the existing parameter, not a relaxation or reinterpretation of Invariant 17's existing scope: `rcp retention hold status` is an operator-facing authoritative query that may be invoked immediately after a `place`/`release` command returns (an operator confirming the operation they just performed), so an eventually-consistent read could show a stale `status`/`sweep_status` moments after the authoritative write committed — a materially worse failure mode for an operator-trust-facing command than for an internal write-path decision that already has its own transactional backstop (Invariant 17's own reasoning for *not* requiring `ConsistentRead` on the DynamoDB write path's pre-transaction read does not apply here — there is no `TransactWriteItems` re-verification for a STATUS read; a stale read is presented directly to the operator with nothing to catch it).
+
+### 21.4 Operator-Facing Result Contract — `HoldOperationResult` (ADR Decision 12, Invariant 34)
+
+**One typed result dataclass, shared by all three operations**, defined alongside `RetentionService` in `retention_service.py` (mirroring `HoldTransitionOutcome`'s placement alongside `HoldTransitions` in `hold_transitions.py`, and `MarkerEstablishmentResult`'s placement alongside `MarkerStore` in `marker_store.py`):
+
+```python
+@dataclass(frozen=True)
+class HoldOperationResult:
+    client_id: str
+    audit_id: str
+    hold_id: str | None
+    hold_version: int | None
+    status: str            # "ACTIVE" | "RELEASED" | "NEVER_HELD"
+    sweep_status: str | None   # "PENDING" | "IN_PROGRESS" | "COMPLETE" | "FAILED" | None (NEVER_HELD)
+    fully_enforced: bool
+    placed_at: str | None
+    released_at: str | None
+    hold_count: int
+    disposition: str | None    # "completed" | "resumed" | "no_op" (PLACE/RELEASE) | None (STATUS)
+```
+
+Field set is exactly Decision 2's specified list — no additional field (no `placed_by`, `released_by`, `reason`, `marker_s3_key`, or any DynamoDB/S3 identity-shaped value) is added. This is a structural guarantee, not only a rendering-time scrub: the dataclass simply has no attribute capable of carrying a storage-internal value, the same "cannot leak by construction" idiom already used elsewhere in this design (e.g. `CustodySweepClient` has no `put_object`/`delete_object` method at all, §5.2).
+
+**`NEVER_HELD` (STATUS only, when `HoldRepository.get_legal_hold` returns `None` — no `LegalHold` record has ever been written for the audit identity):** `status = "NEVER_HELD"`, `sweep_status = None`, `fully_enforced = False`, `hold_count = 0`, `hold_id = None`, `hold_version = None`, `placed_at = None`, `released_at = None`, `disposition = None`. `client_id`/`audit_id` are always populated (they are the query identity, not hold-specific state) — this is unchanged from §8's existing correct treatment of this case.
+
+**`disposition`** answers "what did this invocation of `place`/`release` do," and is `None` for `get_hold_status` (a pure read has no disposition — it did not do anything). For PLACE/RELEASE:
+
+- `"completed"` — a fresh PLACE or RELEASE transition was initiated by this invocation and its complete marker, sweep, and reconciliation sequence reached `sweep_status = COMPLETE` (§19.2 step 3 / §19.3 step 2's first case — the "no eligible prior episode/transition" branch). For PLACE, this creates a new hold episode and a fresh `hold_id`; for RELEASE, this creates the release transition within the existing episode and reuses that episode's `hold_id` (§19.5.2's identity model, ADR Invariant 21) — `"completed"` never implies a new hold episode for RELEASE.
+- `"resumed"` — an interrupted episode's sequence (marker and/or sweep and/or reconciliation not yet complete on entry) was resumed and ran to `sweep_status = COMPLETE` in this invocation (§19.2 step 4's `sweep_status != COMPLETE` branch / §19.3 step 2's second case).
+- `"no_op"` — a stale re-invocation found `sweep_status = COMPLETE` already recorded for the current episode and returned immediately without any marker/sweep/reconciliation activity (§19.2 step 4's `sweep_status == COMPLETE` branch; ADR Invariant 23). RELEASE cannot produce this disposition today — its structurally equivalent case (§19.3 step 2's third case) raises `HoldNotActiveError` instead of returning a no-op result (`hold_transitions.py:296-302`); this is unchanged by this correction (§21.6).
+
+#### 21.4.1 The Genuine Pre-Sweep-Snapshot Defect and Its Correction
+
+**Confirmed defect, not merely a CLI presentation gap:** `RetentionService.place_legal_hold`/`release_legal_hold` (`retention_service.py:151-189`) call `self._transitions.place(...)`/`self._transitions.release(...)`, receive a `HoldTransitionOutcome` computed **before** any marker/sweep/reconciliation activity, then call `self._run_sweep_sequence(outcome, ...)` (lines 159-161, 186-188) — a method that returns `None` and never mutates or replaces `outcome` — and finally `return outcome` unchanged. Once `_run_sweep_sequence` durably persists `sweep_status = COMPLETE` via `self._set_sweep_status(...)` (line 247, `_upsert_current_state` at lines 353-386), the object already returned to the caller still carries whatever `sweep_status` value `HoldTransitions.place`/`release` computed *before* the sweep ran (`PENDING`, for a fresh episode). A caller inspecting the returned object's `sweep_status` therefore cannot tell the operation actually finished.
+
+**Correction:** `place_legal_hold`/`release_legal_hold` must not return `HoldTransitionOutcome` directly. On the success path (after the no-op early return, or after `_run_sweep_sequence` completes without raising), each must construct and return a `HoldOperationResult` by re-reading the just-persisted authoritative `LegalHold` state — the identical read `get_hold_status` performs (§21.3) — combined with a `disposition` value derived from the `HoldTransitionOutcome` this invocation already computed, in this exact precedence order: (1) `outcome.is_noop` → `"no_op"`; (2) else `outcome.is_resumption` → `"resumed"`; (3) else → `"completed"`. Concretely, this requires:
+
+1. A shared internal helper, `RetentionService._build_result(client_id, audit_id, *, disposition)`, that performs `HoldRepository.get_legal_hold(client_id, audit_id, consistent_read=True)` and maps the result into a `HoldOperationResult` (the `NEVER_HELD` branch is unreachable from `place_legal_hold`/`release_legal_hold`'s own success paths, since both require an existing or just-created `LegalHold` record to reach this point — per ADR Invariant 13's ordering guarantee, `upsert_hold` for the current episode is always durably committed before this helper is ever called). `get_hold_status` calls the same helper with `disposition=None`.
+2. `place_legal_hold`/`release_legal_hold`'s no-op early-return branch (`retention_service.py:152-158`, `:177-185`) must call `self._build_result(client_id, audit_id, disposition="no_op")` instead of returning `outcome` directly — precedence step (1) above, sourced directly from `outcome.is_noop`, which this branch's own gate condition already guarantees `True`.
+3. `place_legal_hold`/`release_legal_hold`'s success path (after `_run_sweep_sequence` returns without raising) must call `self._build_result(client_id, audit_id, disposition="resumed" if outcome.is_resumption else "completed")` instead of `return outcome` — precedence steps (2)/(3) above.
+4. Distinguishing `"resumed"` from `"completed"` (item 3) requires `HoldTransitionOutcome` (`hold_transitions.py:56-80`) to carry the branch `HoldTransitions.place`/`release` already internally selects but does not currently expose: a new field, **`is_resumption: bool`** — not `is_new_episode` (an earlier draft of this correction proposed that name and is superseded here; it was semantically incorrect for RELEASE, since a fresh RELEASE does not create a new hold episode — it creates a new transition within the existing PLACE→RELEASE episode and deliberately reuses the existing `hold_id`, per §19.5.2's identity model and ADR Invariant 21). Required assignments, all five branches across both methods:
+   - fresh PLACE (§21.6 PLACE case 1): `is_resumption = False`
+   - resumed PLACE (§21.6 PLACE case 2): `is_resumption = True`
+   - completed PLACE no-op (§21.6 PLACE case 3): `is_resumption = False` (irrelevant to disposition here, since precedence step (1) already resolves this branch via `is_noop` before `is_resumption` is ever consulted — set for internal consistency only)
+   - fresh RELEASE (§21.6 RELEASE case 1): `is_resumption = False`
+   - resumed RELEASE (§21.6 RELEASE case 2): `is_resumption = True`
+
+   This is the one field addition this correction requires on an already-implemented dataclass; every other change described in this section is additive at the `RetentionService`/CLI layer.
+
+**A failed marker establishment, sweep, or reconciliation never reaches this return path** — `_run_sweep_sequence` propagates `MarkerEstablishmentFailedError`/`MarkerIntegrityError`/`StorageError` on failure (`retention_service.py:206-245`), and `place_legal_hold`/`release_legal_hold` do not catch them; a `HoldOperationResult` is therefore only ever constructed for a genuinely successful, fully-persisted operation, consistent with Decision 2's requirement that a successful command return authoritative final state.
+
+### 21.5 Corrected Command Contracts
+
+#### Command: `rcp retention hold place`
+
+**Request Parameters:** `--client-id` (required), `--audit-id` (required), `--stage` (required), `--reason` (required, non-empty), `--actor` (required). **Unchanged from §8** — PLACE already correctly required `--reason`; this correction changes only RELEASE (below).
+
+**Response Body:** `HoldOperationResult` (§21.4), rendered per §21.9.
+
+**Error Status Codes:** `INVALID_IDENTIFIER` (client_id/audit_id fail `validate_identifier`), `HOLD_MARKER_ESTABLISHMENT_FAILED` (marker `PutObject`/`HeadObject` read-back exhausted its bounded retry/wall-clock budget, §19.5.6/§19.15 — code `HOLD_MARKER_ESTABLISHMENT_FAILED`, `constants.py:196`), `HOLD_MARKER_INTEGRITY_VIOLATION` (a genuine marker-key identity collision, §19.5.7 — code `constants.py:208`), `STORAGE_ERROR` (DynamoDB/S3 infrastructure failure during the hold-state write or sweep). **`HOLD_ALREADY_ACTIVE` is removed** (§21.7).
+
+**Validation Rules:** `client_id`/`audit_id` validated via `validate_identifier`; `reason` must be non-empty (both unchanged from §8).
+
+**Side Effects:** Exclusively via `RetentionService.place_legal_hold`, which itself uses `HoldTransitions` (LegalHold/LegalHoldEvent writes), `MarkerStore` (canary marker), and `CustodySweepClient` (S3 re-tag sweep, DynamoDB `ttl_disposal_at` removal, reconciliation) — the CLI performs no direct storage access (§21.2).
+
+**Idempotency / Duplicate Handling:** See §21.6 (three-case model).
+
+#### Command: `rcp retention hold release`
+
+**Request Parameters:** `--client-id` (required), `--audit-id` (required), `--stage` (required), `--actor` (required), **`--reason` (required, non-empty)** — this is the correction (Decision 3). `HoldTransitions.release` (`hold_transitions.py:215-302`) already requires and persists `reason` onto `LegalHoldEvent` via `write_hold_event` (`hold_transitions.py:239-250`); §8 simply never listed it as a required CLI argument. **No synthetic or default reason may be generated by the CLI** — a legal-hold release is a governance action, and its immutable `LegalHoldEvent` must carry the operator's actual justification, not a placeholder.
+
+**Response Body:** `HoldOperationResult` (§21.4), rendered per §21.9.
+
+**Error Status Codes:** `INVALID_IDENTIFIER`, `HOLD_NOT_ACTIVE` (`hold_transitions.py:44-53` — no eligible hold to release: never held, or the most recent episode already reached `RELEASED` with `sweep_status = COMPLETE`), `HOLD_MARKER_ESTABLISHMENT_FAILED`, `HOLD_MARKER_INTEGRITY_VIOLATION`, `STORAGE_ERROR`.
+
+**Validation Rules:** `client_id`/`audit_id` validated via `validate_identifier`; `reason` must be non-empty.
+
+**Side Effects:** Exclusively via `RetentionService.release_legal_hold`, symmetric with `place` above (LegalHold/LegalHoldEvent writes, marker, sweep, reconciliation — tagging back to `rcp-legal-hold=false`, restoring `ttl_disposal_at`).
+
+**Idempotency / Duplicate Handling:** See §21.6.
+
+#### Command: `rcp retention hold status`
+
+**Request Parameters:** `--client-id`, `--audit-id`, `--stage` (all required). Unchanged from §8.
+
+**Response Body:** `HoldOperationResult` (§21.4), including the `NEVER_HELD` case, rendered per §21.9.
+
+**Success Status Codes:** Exit code `0` (including `NEVER_HELD` — unchanged from §8, this is not an error).
+
+**Error Status Codes:** `INVALID_IDENTIFIER`, `STORAGE_ERROR`.
+
+**Side Effects:** None (read-only) — **but now exclusively via `RetentionService.get_hold_status`, never a direct `HoldRepository.get_legal_hold` call from the CLI** (§21.2), and now strongly consistent (§21.3) where §8 left the read's consistency level unspecified.
+
+**Idempotency:** N/A — pure read.
+
+### 21.6 PLACE and RELEASE Semantics — the Three-Case Model (ADR Decision 12, Invariant 36)
+
+§8's PLACE idempotency wording — *"Re-invoking `place` while already `ACTIVE` is a safe no-op that re-runs the re-tagging sweep... and writes a new `LegalHoldEvent`, incrementing `hold_count`"* — is superseded. It describes neither the current implementation (`hold_transitions.py:174-209`) nor §19.2's corrected sequence. The authoritative model, already implemented and unchanged by this correction, is:
+
+**PLACE (`HoldTransitions.place`, `hold_transitions.py:110-209`):**
+
+1. **No active hold exists** (no `LegalHold` record, or the existing record's `status = RELEASED`): a genuine new episode. A fresh `hold_id` is generated, `hold_version` increments, a new `LegalHoldEvent` (`action = PLACE`) is written, `LegalHold.status → ACTIVE`, `sweep_status → PENDING`. Marker, sweep, and reconciliation then run; the final authoritative state is returned (`HoldOperationResult`, `disposition = "completed"`).
+2. **`status = ACTIVE` and `sweep_status != COMPLETE`** (`PENDING`, `IN_PROGRESS`, or `FAILED`): a resumption of an interrupted transition. No new `upsert_hold` call, no new `LegalHoldEvent`, no new `hold_id`, `hold_version` unchanged — the invocation reuses the existing episode's identity. Marker (reusing a `CONFIRMED` marker via `LegalHoldEvent.marker_status` if already established, ADR Invariant 24), sweep, and reconciliation resume; the final authoritative state is returned (`disposition = "resumed"`).
+3. **`status = ACTIVE` and `sweep_status = COMPLETE`:** a terminal, successful no-op (ADR Invariant 23). No `upsert_hold` call, no `LegalHoldEvent` write, no `hold_count` increment, no marker/sweep/reconciliation activity of any kind. Returns immediately with exit code `0` and `disposition = "no_op"`.
+
+**RELEASE (`HoldTransitions.release`, `hold_transitions.py:215-302`) — restated for symmetry, unchanged in substance from the already-correct existing design:**
+
+1. **`status = ACTIVE`:** a genuine new release. Reuses the episode's existing `hold_id` (no new `hold_id` is generated for a release — §19.5.2's identity model), `hold_version` increments, a new `LegalHoldEvent` (`action = RELEASE`) is written, `LegalHold.status → RELEASED`, `sweep_status → PENDING`. Marker, sweep, and reconciliation run (tagging back to `rcp-legal-hold=false`, restoring `ttl_disposal_at`); returns `disposition = "completed"`.
+2. **`status = RELEASED` and `sweep_status != COMPLETE`:** resumption of this same episode's own interrupted release-sweep. No new `upsert_hold` call, no new `LegalHoldEvent`, existing `hold_id`/`hold_version` reused. Returns `disposition = "resumed"` on completion.
+3. **`status = RELEASED` and `sweep_status = COMPLETE`, or no `LegalHold` record exists at all:** `HoldNotActiveError` is raised (`HOLD_NOT_ACTIVE`) — a second release attempt against an already-completed release, or a release attempted with no hold ever placed, is treated as an operator-facing error, not a silent no-op, since it likely indicates confusion about current state (`rcp retention hold status` is available to check first). This case never reaches the marker step.
+
+### 21.7 Error Code Contract — `HOLD_ALREADY_ACTIVE` Removed (ADR Decision 12, Invariant 36)
+
+**`HOLD_ALREADY_ACTIVE` is removed from the operative error-code contract entirely.** It is not raised anywhere in the current implementation — `HoldTransitions.place` (§21.6 case 3) never raises when an audit is already held with a complete sweep; it returns a `HoldOperationResult` with `disposition = "no_op"` and exit code `0`. §8's description of it as *"idempotent no-op with a warning, not a hard failure"* was directionally correct about the outcome (a no-op) but incorrect to model it as an error code at all — a completed, repeated PLACE is a successful command, full stop, not a warning-annotated failure. No CLI error rendering path (`render_error`, `operator_cli/result.py:332-348`) may reference this code, and no future `_error_next_step` branch (`result.py:351+`) may be added for it.
+
+### 21.7.1 `HOLD_STATE_CONCURRENCY_EXCEEDED` Is Not Reachable From This Contract — Repository-Truth Clarification
+
+**Confirmed by direct repository inspection:** `RetentionService` (`retention_service.py`) does not import `hold_coordination.py` and has no dependency, direct or transitive, on `HoldCoordinatedTransactionRunner` — the sole component in this codebase that raises `HoldStateConcurrencyExceededError` (`hold_coordination.py:62-72`, `:234`). `RetentionService.place_legal_hold`/`release_legal_hold`'s own docstrings (`retention_service.py:142-150`, `:169-175`) currently list `HoldStateConcurrencyExceededError` among the errors "propagated unchanged from HoldTransitions/HoldRepository/CustodySweepClient" — this is **stale and inaccurate**. Neither `HoldTransitions` nor `HoldRepository` nor `CustodySweepClient` raises it either; `HoldCoordinatedTransactionRunner` is a separate, reusable mechanism (companion ADR Decision 9/§19.4) for Category 1/2 **governed-evidence write paths** (Phase 1–7's own CREATE/regeneration transactions, each conditioned against `LegalHold.hold_version` via `TransactWriteItems`) — it is not part of the PLACE/RELEASE/STATUS hold-management orchestration path this section governs, and `RetentionService` neither constructs nor calls it.
+
+**This correction establishes, explicitly:**
+
+- `HOLD_STATE_CONCURRENCY_EXCEEDED` is **not** part of the A1.4b PLACE/RELEASE/STATUS operator-facing error contract (§21.5's three command contracts correctly omit it already — this subsection makes that omission an explicit, reasoned exclusion rather than an accidental one).
+- A1.4b's future implementation must not add CLI guidance, `_error_next_step` wording, or test coverage claiming this code is reachable from `rcp retention hold place|release|status` — doing so would assert a failure mode that does not exist on this call path.
+- The future A1.4b implementation subphase **may** correct the stale `HoldStateConcurrencyExceededError` docstring references in `retention_service.py`'s `place_legal_hold`/`release_legal_hold` docstrings while that file is already being modified for this correction's other changes (§21.4.1, §21.11) — this is a documentation-precision fix to an already-merged docstring, not a behavior change, and is noted here so it is not lost before implementation begins.
+- This clarification **does not alter** `HOLD_STATE_CONCURRENCY_EXCEEDED`'s existing, correct use by Category 1/2 governed-evidence write paths (companion ADR §19.4, `operator_cli/result.py`'s existing `_error_next_step` branch for this code) — that mechanism and its CLI guidance are unchanged and out of scope for this correction.
+
+Retained, operative A1.4b error set (§21.5, unchanged by this clarification): `INVALID_IDENTIFIER`; `HOLD_NOT_ACTIVE`; `HOLD_MARKER_ESTABLISHMENT_FAILED`; `HOLD_MARKER_INTEGRITY_VIOLATION`; `STORAGE_ERROR` and other sanitized underlying storage/configuration failure codes already governed elsewhere in this design. No new error code is introduced by this clarification.
+
+### 21.8 Operation Counts — Resolution (ADR Decision 12, Invariant 37)
+
+**Confirmed defect:** `CustodySweepClient.remove_ttl_disposal_at`, `restore_ttl_disposal_at`, `retag_s3_versions`, and `reconcile_versions` all return `int` counts (`custody_sweep_client.py:173,200,292,357`). `RetentionService._run_sweep_sequence` (`retention_service.py:198-247`) calls all four but assigns none of their return values to anything — every count is computed and immediately discarded. `HoldRepository.write_hold_event`'s signature already accepts `s3_versions_retagged_count`/`dynamodb_items_updated_count` (`hold_repository.py:180+`), but `HoldTransitions.place`/`release` (the only current callers) always pass literal `0` for both (`hold_transitions.py:143-144`, `:248-249`), and that write happens *before* any sweep runs in any case. **No code path in this codebase today can supply an authoritative, non-fabricated value for either count.**
+
+**Resolution: option (b) — these two fields are removed from the operator-facing contract entirely for this subphase.** `HoldOperationResult` (§21.4) has no `s3_versions_retagged_count` or `dynamodb_items_updated_count` field; this is not an oversight, it is Decision 2's own explicit, fixed field list, which Product Strategy specified without either field. Neither the CLI's text nor JSON rendering may report them, default them to `0`, estimate them, or otherwise present a value as an observed operational count when none has been authoritatively persisted.
+
+**Why (b), not (a):** Decision 2 already fixes the operator-facing contract's field set, and that set does not include operation counts — designing an authoritative persistence mechanism for them (option (a)) would add scope to this contract correction that Product Strategy's own result-contract specification does not call for. `LegalHoldEvent`'s existing `s3_versions_retagged_count`/`dynamodb_items_updated_count` fields (§7.2) remain in the data model, still always `0` today, and are not read or referenced by any part of this correction. §19.2 step 8 already separately notes a possible future extension of `LegalHoldEvent` with a `s3_reconciliation_versions_retagged_count` field for audit-trail purposes (an internal, `LegalHoldEvent`-scoped concern, not the operator CLI contract) — this correction does not implement, extend, or depend on that note. Authoritatively wiring real counts into `LegalHoldEvent`, and separately deciding whether to re-add either field to the operator-facing contract, is out of scope here and would require its own, separately reviewed amendment; this correction only narrows §8's promised fields to what implementation can actually deliver without fabrication.
+
+### 21.9 Sanitized Rendering — Text and JSON (ADR Decision 12)
+
+Both render paths reuse the existing, already-implemented `operator_cli/result.py` **sanitization mechanism and sanitization order unmodified**: `CommandResult.data` is populated from `HoldOperationResult`'s fields (via `dataclasses.asdict` or equivalent field-by-field mapping), and `render(result, output=...)`/`render_error(...)` sanitize the full payload before any output is produced (`result.py:22-35`, `:332-348`) — the same central boundary §20.11 already confirmed effective for Phase 5–7's custody/hold error codes, applied here without any change to how or when sanitization runs. **The file itself, `operator_cli/result.py`, is modified** — per §21.11's inventory, it gains this section's `HoldOperationResult` field-rendering rules (the table below) and the three new `_error_next_step` branches (`HOLD_NOT_ACTIVE`, `HOLD_MARKER_ESTABLISHMENT_FAILED`, `HOLD_MARKER_INTEGRITY_VIOLATION`, §21.5). Do not read the preceding sentence as implying the file, or rendering behavior generally, remains textually unchanged — only the sanitization mechanism and its position in the render pipeline (sanitize before any output is produced) are unmodified; every addition described in this section and §21.5 must still pass through that same, unmodified sanitization step.
+
+| Field | Text output | JSON output |
+| --- | --- | --- |
+| `client_id`, `audit_id` | Shown (existing `render()` key list, `result.py:48-58`, already includes these) | Included |
+| `status` | Shown | Included |
+| `sweep_status` | Shown | Included |
+| `hold_id` | Shown when not `None` | Included (`null` when `None`) |
+| `hold_version` | Shown when not `None` | Included (`null` when `None`) |
+| `fully_enforced` | Shown (`true`/`false`, lowercase, matching existing boolean-rendering convention e.g. `truncated`, `result.py:62-63`) | Included |
+| `placed_at`, `released_at` | Shown when not `None` | Included (`null` when `None`) |
+| `hold_count` | Shown | Included |
+| `disposition` | Shown when not `None` (PLACE/RELEASE only) | Included (`null` for STATUS) |
+
+**Neither rendering path may ever include:** a DynamoDB `PK`/`SK` or key shape, an S3 bucket name or object key (including a marker key), `marker_s3_key`, `marker_confirmed_last_modified`, `placed_by`/`released_by`, or `reason`. This is guaranteed structurally, not only by `sanitize()`'s runtime scrubbing: `HoldOperationResult` (§21.4) has no field capable of carrying any of these values, so there is nothing for either renderer to leak by construction — consistent with `docs/architecture/adr_sanitization_boundary.md`'s existing boundary, applied here as a second, independent layer (a field that does not exist cannot be sanitized incorrectly).
+
+### 21.10 Future QA Scope (A1.4b Implementation Subphase)
+
+Documented here as the required future test coverage; no test file is created by this correction. Ownership is expected to fall to `tests/unit/evidence_retention/test_retention_service.py` (already exists, 14 tests today — gains `RetentionService`/`HoldOperationResult`/`get_hold_status`-level coverage), `tests/unit/evidence_retention/test_hold_transitions.py` (already exists, 14 tests today — gains `is_resumption` assignment coverage, item 1a below), and a new `tests/unit/test_operator_cli_retention.py` (for CLI dispatch/composition/rendering coverage), mirroring the naming convention already established for Phase 5–7 (`test_operator_cli_generate_intelligence.py`, `test_operator_cli_generate_report.py`, §20.12).
+
+1. **Fresh PLACE** (§21.6 case 1): no prior `LegalHold` record — assert `disposition = "completed"`, new `hold_id`, `hold_version = 1`, `sweep_status = "COMPLETE"` on return, `fully_enforced = True`, and (at the `HoldTransitions.place` level, `test_hold_transitions.py`) `outcome.is_resumption = False`.
+1a. **`HoldTransitionOutcome.is_resumption` — all five branch assignments** (`test_hold_transitions.py`, direct unit coverage of `HoldTransitions.place`/`release`, independent of `RetentionService`): fresh PLACE → `False`; resumed PLACE → `True`; completed PLACE no-op → `False`; fresh RELEASE → `False`; resumed RELEASE → `True`. This is the direct regression test for §21.4.1 item 4's field semantics — asserted at the `HoldTransitionOutcome` level, not only inferred from `RetentionService`'s derived `disposition`.
+2. **Interrupted PLACE resumption** (§21.6 case 2): a prior invocation left `status = ACTIVE`, `sweep_status = "IN_PROGRESS"` (or `PENDING`/`FAILED`) — assert `disposition = "resumed"`, `hold_id`/`hold_version` unchanged from the interrupted attempt, no new `LegalHoldEvent` write, final `sweep_status = "COMPLETE"`, and `outcome.is_resumption = True`.
+3. **Completed PLACE no-op** (§21.6 case 3): `status = ACTIVE`, `sweep_status = "COMPLETE"` — assert `disposition = "no_op"` (derived from `outcome.is_noop`, per §21.4.1's precedence order — `is_resumption` is never consulted for this branch), exit code `0`, zero marker/sweep/reconciliation calls, zero `LegalHoldEvent`/`LegalHold` writes, `hold_count` unchanged.
+4. **Fresh RELEASE**: symmetric with item 1 — `disposition = "completed"`, existing `hold_id` reused, `hold_version` incremented, `status = "RELEASED"`, `outcome.is_resumption = False`.
+5. **Interrupted RELEASE resumption**: symmetric with item 2 — `disposition = "resumed"`, `outcome.is_resumption = True`.
+6. **`HOLD_NOT_ACTIVE`**: `status = RELEASED` with `sweep_status = COMPLETE`, and separately, no `LegalHold` record at all — both invoking `release` — assert `HoldNotActiveError`/`HOLD_NOT_ACTIVE` raised in both cases, no marker/sweep activity.
+7. **STATUS — `NEVER_HELD`**: no `LegalHold` record — assert the exact `HoldOperationResult` shape in §21.4's `NEVER_HELD` paragraph, exit code `0`.
+8. **STATUS — `ACTIVE`/incomplete**: `sweep_status != COMPLETE` — assert `fully_enforced = False`.
+9. **STATUS — `ACTIVE`/complete**: assert `fully_enforced = True`.
+10. **STATUS — `RELEASED`/incomplete**: assert `fully_enforced = False` (per `is_hold_fully_enforced`'s definition, only `ACTIVE` + `COMPLETE` is `True`).
+11. **STATUS — `RELEASED`/complete**: assert `fully_enforced = False` (released holds are never "fully enforced" — that predicate is specifically about protection currently being in effect).
+12. **Strongly consistent STATUS reads**: assert `get_hold_status` invokes `HoldRepository.get_legal_hold` with `consistent_read=True` on every call (a construction/mock-level assertion, not an integration test against real DynamoDB).
+13. **Final CLI output reflects persisted `COMPLETE`, not stale pre-sweep `PENDING`**: the direct regression test for §21.4.1's defect — assert that after a successful `place`/`release` invocation, the returned `HoldOperationResult.sweep_status` equals the value actually persisted to `LegalHold` (`COMPLETE`), never the `HoldTransitionOutcome.sweep_status` value computed before the sweep ran.
+14. **Mandatory non-empty RELEASE `--reason`**: assert CLI argument parsing rejects a missing or empty-string `--reason` for `rcp retention hold release` before any `RetentionService` call, and that a non-empty `--reason` is persisted verbatim onto the resulting `LegalHoldEvent`.
+15. **No `HOLD_ALREADY_ACTIVE` error path**: assert this code is never raised, never rendered, and does not appear in `_error_next_step`'s branch set (`result.py`) — a negative/regression test, not merely an absence-of-use observation.
+16. **No direct CLI access to repository mutation or read methods outside `RetentionService`**: a structural/import-level test (or code-review-enforced convention, if no automatable check exists) asserting `evidence_retention/commands.py` never imports or calls `HoldRepository.get_legal_hold`/`upsert_hold`/`write_hold_event` directly.
+17. **Sanitized text and JSON output**: per §21.9's table — assert no `PK`/`SK`, S3 key, marker key, `placed_by`/`released_by`, or `reason` value appears in either rendering for all three commands' success and error paths.
+18. **No unsubstantiated count fields**: assert neither `s3_versions_retagged_count` nor `dynamodb_items_updated_count` appears anywhere in `HoldOperationResult`, `CommandResult.data`, rendered text, or rendered JSON, for any of the three commands.
+19. **Zero AWS mutation for STATUS**: assert `get_hold_status` issues exactly one `GetItem` call (`ConsistentRead=True`) and no `PutItem`/`UpdateItem`/S3 API call of any kind, for both the `NEVER_HELD` and existing-record cases.
+
+### 21.11 Per-Subphase Implementation Inventory (A1.4b — Not Authorized by This Document)
+
+Exact paths, mirroring §20.12's convention. No file below is created or modified by this documentation-only correction — the classification below (modified vs. new) reflects each file's status in the repository **today**, confirmed by direct inspection, not a claim about what this correction itself touches.
+
+**Modified production** (all four files already exist today):
+- `src/release_confidence_platform/evidence_retention/retention_service.py` — new `HoldOperationResult` dataclass; new `get_hold_status` method; new `_build_result` helper; `place_legal_hold`/`release_legal_hold` return-type change from `HoldTransitionOutcome` to `HoldOperationResult`, per §21.4.1; stale `HoldStateConcurrencyExceededError` docstring references corrected per §21.7.1.
+- `src/release_confidence_platform/evidence_retention/hold_transitions.py` — `HoldTransitionOutcome` gains `is_resumption: bool`, set by `place`/`release` at each of their existing branch points, §21.4.1 item 4.
+- `src/release_confidence_platform/operator_cli/main.py` — already exists (confirmed: contains `build_parser()`/`dispatch()` for every existing command group); gains new dispatch wiring for the `retention hold` command group, following the existing per-command-group construction pattern already used for `generate intelligence`/`generate report`/`certify audit` (§21.2/§21.3 — `HoldRepository`, `CustodySweepClient`, `MarkerStore`, `HoldTransitions` constructed once per invocation, passed into a single `RetentionService`).
+- `src/release_confidence_platform/operator_cli/result.py` — §21.9's rendering rules for `HoldOperationResult`; `_error_next_step` branches for `HOLD_NOT_ACTIVE`, `HOLD_MARKER_ESTABLISHMENT_FAILED`, `HOLD_MARKER_INTEGRITY_VIOLATION` (none exists today, confirmed by grep — all three currently fall through to the generic fallback; `HOLD_STATE_CONCURRENCY_EXCEEDED`'s existing branch, already present for governed evidence write paths, is untouched and must not gain retention-specific wording per §21.7.1).
+
+**New production:**
+- `src/release_confidence_platform/evidence_retention/commands.py` — `rcp retention hold place|release|status` parser/dispatch; first implementation, none exists today (confirmed: no `commands.py` in `evidence_retention/`).
+
+**Modified tests** (all three files already exist today):
+- `tests/unit/evidence_retention/test_retention_service.py` (14 tests today) — §21.10 items 1–5 (`RetentionService`-level disposition assertions), 6, 8–13, 19.
+- `tests/unit/evidence_retention/test_hold_transitions.py` (14 tests today) — §21.10 item 1a (the direct `is_resumption` five-branch regression proof at the `HoldTransitionOutcome` level).
+- `tests/unit/test_operator_cli_result.py` (already exists) — new `_error_next_step`/rendering coverage for the three codes added to `result.py` above, mirroring §20.11.1's existing per-code test pattern; must include a negative assertion that no `HOLD_STATE_CONCURRENCY_EXCEEDED`-specific retention wording was added (§21.7.1).
+
+**New tests:**
+- `tests/unit/test_operator_cli_retention.py` — §21.10 items 14–18, plus CLI-level dispatch/composition coverage mirroring `test_operator_cli_generate_intelligence.py`'s composition-assertion style.
+
+**Docs:** `docs/backend/a1_4b_operator_cli_retention_service_implementation_plan.md`, `docs/backend/a1_4b_operator_cli_retention_service_implementation_report.md`, `docs/qa/a1_4b_operator_cli_retention_service_test_plan.md`, `docs/qa/a1_4b_operator_cli_retention_service_test_report.md`.
+
+No numeric duration value, deployment action, or AWS mutation is introduced or implied by this section — it corrects a documentation/return-contract inconsistency and specifies target scope for a future, separately authorized implementation subphase only.
