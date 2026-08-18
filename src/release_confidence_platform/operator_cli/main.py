@@ -24,6 +24,10 @@ from release_confidence_platform.audit_platform_integrity.commands import build_
 from release_confidence_platform.audit_platform_integrity.cert_retrieve_commands import (
     build_cert_retrieve_parser,
 )
+from release_confidence_platform.evidence_retention.commands import (
+    build_retention_hold_parser,
+    dispatch_retention_hold,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -121,6 +125,9 @@ def build_parser() -> argparse.ArgumentParser:
     certify = sub.add_parser("certify", help="Run platform integrity certification")
     certify_sub = certify.add_subparsers(dest="certify_command", required=True)
     build_certify_parser(certify_sub)
+    retention = sub.add_parser("retention", help="Manage evidence retention legal holds")
+    retention_sub = retention.add_subparsers(dest="retention_command", required=True)
+    build_retention_hold_parser(retention_sub)
     generate = sub.add_parser("generate", help="Generate intelligence artifacts")
     generate_sub = generate.add_subparsers(dest="generate_command", required=True)
     intel_gen = generate_sub.add_parser(
@@ -524,6 +531,69 @@ def dispatch(args: argparse.Namespace) -> CommandResult:
             data=result,
             exit_code=0,
         )
+    if args.group == "retention":
+        from release_confidence_platform.config.stage_config import (
+            StageConfigLoader,  # noqa: PLC0415
+        )
+        from release_confidence_platform.evidence_retention.custody_sweep_client import (
+            CustodySweepClient,  # noqa: PLC0415
+        )
+        from release_confidence_platform.evidence_retention.hold_repository import (
+            HoldRepository,  # noqa: PLC0415
+        )
+        from release_confidence_platform.evidence_retention.hold_transitions import (
+            HoldTransitions,  # noqa: PLC0415
+        )
+        from release_confidence_platform.evidence_retention.marker_store import (
+            MarkerStore,  # noqa: PLC0415
+        )
+        from release_confidence_platform.evidence_retention.retention_service import (
+            RetentionService,  # noqa: PLC0415
+        )
+        from release_confidence_platform.storage.aws_client_factory import (
+            AwsClientFactory,  # noqa: PLC0415
+        )
+
+        stage_config = StageConfigLoader().load(args.stage)
+        factory = AwsClientFactory(stage_config)
+        dynamodb_client = factory._session.client("dynamodb")
+        s3_client = factory._session.client("s3")
+
+        # Technical Design Section 21.2 (ADR Non-Negotiable Invariant 32):
+        # RetentionService is the sole boundary between this CLI and
+        # hold-state storage. This is the only place HoldRepository/
+        # CustodySweepClient/MarkerStore/HoldTransitions are constructed for
+        # the `retention hold` command group -- dispatch_retention_hold
+        # itself receives only the resulting RetentionService instance.
+        hold_repository = HoldRepository(stage_config.audit_metadata_table, dynamodb_client)
+        custody_sweep_client = CustodySweepClient(
+            stage_config.audit_metadata_table,
+            dynamodb_client,
+            stage_config.config_bucket,
+            s3_client,
+        )
+        marker_store = MarkerStore(stage_config.config_bucket, s3_client)
+        hold_transitions = HoldTransitions(hold_repository)
+        service = RetentionService(
+            hold_transitions, hold_repository, marker_store, custody_sweep_client
+        )
+        result = dispatch_retention_hold(args, service)
+        hold_command = getattr(args, "hold_command", "unknown")
+        if hold_command == "status":
+            summary = f"Legal hold status {result.get('status')} for {args.audit_id}"
+        else:
+            summary = (
+                f"Legal hold {hold_command} {result.get('disposition')} "
+                f"for {args.audit_id}"
+            )
+        return CommandResult(
+            command=f"retention hold {hold_command}",
+            stage=args.stage,
+            status="success",
+            summary=summary,
+            data=result,
+            exit_code=0,
+        )
     if args.group == "client":
         if args.client_command == "list":
             return services.client_list_command(args)
@@ -602,6 +672,8 @@ def _command_name(args: argparse.Namespace) -> str:
         return f"generate {getattr(args, 'generate_command', 'unknown')}"
     if getattr(args, "group", None) == "certify":
         return f"certify {getattr(args, 'certify_command', 'unknown')}"
+    if getattr(args, "group", None) == "retention":
+        return f"retention hold {getattr(args, 'hold_command', 'unknown')}"
     return f"audit {getattr(args, 'audit_command', 'unknown')}"
 
 

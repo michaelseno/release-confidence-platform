@@ -14,12 +14,20 @@ HoldRepository/MarkerStore/CustodySweepClient collaborators, exactly as
 test_hold_transitions.py already does for HoldTransitions), not for
 replacing RetentionService's own orchestration logic.
 
-Two public methods only, mirroring Technical Design Section 8/10.4's
-existing `rcp retention hold place|release` command shape (no CLI wiring
-here -- that remains a later, explicitly out-of-scope subphase):
+Three public methods, mirroring the `rcp retention hold place|release|status`
+command shape (Technical Design Section 21.2, A1.4b.0 Amendment --
+RetentionService is the sole boundary between the operator CLI and hold-state
+storage for all three operations, including the read-only status query):
 
   place_legal_hold(client_id, audit_id, actor, reason, now)
   release_legal_hold(client_id, audit_id, actor, reason, now)
+  get_hold_status(client_id, audit_id)
+
+place_legal_hold/release_legal_hold return the audit identity's
+authoritative, currently-persisted HoldOperationResult (Section 21.4) --
+never the pre-sweep HoldTransitionOutcome snapshot HoldTransitions.place()/
+release() compute before the marker/sweep/reconciliation sequence runs
+(Section 21.4.1's corrected defect).
 
 Orchestration, per transition:
   1. HoldTransitions.place()/release() -- decides new episode vs. resume vs.
@@ -73,6 +81,7 @@ caller needs it.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -92,6 +101,7 @@ from release_confidence_platform.evidence_retention.hold_repository import HoldR
 from release_confidence_platform.evidence_retention.hold_transitions import (
     HoldTransitionOutcome,
     HoldTransitions,
+    is_hold_fully_enforced,
 )
 from release_confidence_platform.evidence_retention.marker_store import (
     MarkerEstablishmentFailedError,
@@ -100,6 +110,58 @@ from release_confidence_platform.evidence_retention.marker_store import (
     MarkerStore,
     build_marker_key,
 )
+
+
+@dataclass(frozen=True)
+class HoldOperationResult:
+    """Operator-facing result contract shared by PLACE, RELEASE, and STATUS
+    (A1.4b.0 Amendment; Technical Design Section 21.4; companion ADR Decision
+    12, Non-Negotiable Invariant 34).
+
+    Represents the audit identity's authoritative, currently-persisted
+    LegalHold state at the moment this result was constructed -- for PLACE/
+    RELEASE, this is read back AFTER the marker/sweep/reconciliation
+    sequence completes (never the pre-sweep HoldTransitionOutcome snapshot
+    computed before that sequence runs, Section 21.4.1's corrected defect);
+    for STATUS, it is a direct strongly consistent read with no mutation of
+    any kind.
+
+    Field set is exactly Decision 2's specified list -- no additional field
+    (no placed_by, released_by, reason, marker_s3_key, or any DynamoDB/S3
+    identity-shaped value, and no s3_versions_retagged_count/
+    dynamodb_items_updated_count, Section 21.8/ADR Invariant 37) is added.
+    This is a structural guarantee, not only a rendering-time scrub: this
+    dataclass simply has no attribute capable of carrying any of those
+    values.
+
+    NEVER_HELD (STATUS only, when HoldRepository.get_legal_hold returns
+    None -- no LegalHold record has ever been written for the audit
+    identity): status="NEVER_HELD", sweep_status=None, fully_enforced=False,
+    hold_count=0, hold_id=None, hold_version=None, placed_at=None,
+    released_at=None, disposition=None. client_id/audit_id are always
+    populated (they are the query identity, not hold-specific state).
+
+    disposition answers "what did this invocation of place/release do," and
+    is None for get_hold_status (a pure read has no disposition). For
+    PLACE/RELEASE: "completed" (a fresh transition ran to sweep_status=
+    COMPLETE), "resumed" (an interrupted transition was resumed and
+    completed), or "no_op" (a stale re-invocation found sweep_status=
+    COMPLETE already recorded and returned without any activity -- PLACE
+    only, per Section 21.4's case 3; RELEASE's structurally equivalent case
+    raises HoldNotActiveError instead, unchanged by this correction).
+    """
+
+    client_id: str
+    audit_id: str
+    hold_id: str | None
+    hold_version: int | None
+    status: str
+    sweep_status: str | None
+    fully_enforced: bool
+    placed_at: str | None
+    released_at: str | None
+    hold_count: int
+    disposition: str | None
 
 
 def _epoch_seconds(now: str) -> int:
@@ -136,17 +198,25 @@ class RetentionService:
 
     def place_legal_hold(
         self, client_id: str, audit_id: str, actor: str, reason: str, now: str
-    ) -> HoldTransitionOutcome:
-        """Technical Design Section 19.2 steps 1-9, end to end.
+    ) -> HoldOperationResult:
+        """Technical Design Section 19.2 steps 1-9, end to end (A1.4b.0
+        Amendment, Section 21.4.1: returns the authoritative, currently-
+        persisted LegalHold state, not the pre-sweep HoldTransitionOutcome
+        snapshot).
 
         Raises:
             MarkerEstablishmentFailedError: Marker establishment exhausted
                 its retry/wall-clock budget (Section 19.5.6).
             MarkerIntegrityError: A genuine marker identity collision was
                 found (Section 19.5.7).
-            HoldStateConcurrencyExceededError / StorageError: Propagated
-                unchanged from HoldTransitions/HoldRepository/
-                CustodySweepClient on their own respective failure modes.
+            StorageError: Propagated unchanged from
+                HoldTransitions/HoldRepository/CustodySweepClient on their
+                own respective failure modes. RetentionService has no
+                dependency, direct or transitive, on
+                HoldCoordinatedTransactionRunner -- the sole component that
+                raises HoldStateConcurrencyExceededError -- so that
+                exception is not reachable from this method (Section
+                21.7.1's correction to this docstring's prior, stale claim).
         """
         outcome = self._transitions.place(client_id, audit_id, actor, reason, now)
         if outcome.is_noop:
@@ -155,23 +225,31 @@ class RetentionService:
             # orchestration -- return immediately without touching the
             # marker, CustodySweepClient, or LegalHoldEvent/LegalHold in any
             # way beyond what HoldTransitions itself already did (nothing).
-            return outcome
+            return self._build_result(client_id, audit_id, disposition="no_op")
         self._run_sweep_sequence(
             outcome, transition=HOLD_ACTION_PLACE, legal_hold=True, now=now
         )
-        return outcome
+        return self._build_result(
+            client_id,
+            audit_id,
+            disposition="resumed" if outcome.is_resumption else "completed",
+        )
 
     def release_legal_hold(
         self, client_id: str, audit_id: str, actor: str, reason: str, now: str
-    ) -> HoldTransitionOutcome:
-        """Technical Design Section 19.3 steps 1-7, end to end.
+    ) -> HoldOperationResult:
+        """Technical Design Section 19.3 steps 1-7, end to end (A1.4b.0
+        Amendment, Section 21.4.1: returns the authoritative, currently-
+        persisted LegalHold state, not the pre-sweep HoldTransitionOutcome
+        snapshot).
 
         Raises:
             HoldNotActiveError: Nothing eligible to release (Section 19.3
                 step 2's third case) -- propagated unchanged from
                 HoldTransitions.release().
             MarkerEstablishmentFailedError / MarkerIntegrityError /
-            HoldStateConcurrencyExceededError / StorageError: As above.
+            StorageError: As above. HoldStateConcurrencyExceededError is not
+                reachable from this method (Section 21.7.1).
         """
         outcome = self._transitions.release(client_id, audit_id, actor, reason, now)
         if outcome.is_noop:
@@ -182,11 +260,73 @@ class RetentionService:
             # so RetentionService never depends on which of the two
             # branches HoldTransitions happens to implement a given no-op
             # case through.
-            return outcome
+            return self._build_result(client_id, audit_id, disposition="no_op")
         self._run_sweep_sequence(
             outcome, transition=HOLD_ACTION_RELEASE, legal_hold=False, now=now
         )
-        return outcome
+        return self._build_result(
+            client_id,
+            audit_id,
+            disposition="resumed" if outcome.is_resumption else "completed",
+        )
+
+    def get_hold_status(self, client_id: str, audit_id: str) -> HoldOperationResult:
+        """Strongly consistent, read-only STATUS query (A1.4b.0 Amendment,
+        Section 21.2/21.3; companion ADR Decision 12, Non-Negotiable
+        Invariant 33). Performs exactly one HoldRepository.get_legal_hold
+        call with consistent_read=True and no mutation of any kind (no
+        PutItem/UpdateItem/S3 call).
+        """
+        return self._build_result(client_id, audit_id, disposition=None)
+
+    # ------------------------------------------------------------------
+    # Shared authoritative-state read (Technical Design Section 21.4.1)
+    # ------------------------------------------------------------------
+
+    def _build_result(
+        self, client_id: str, audit_id: str, *, disposition: str | None
+    ) -> HoldOperationResult:
+        """Re-read the just-persisted (or, for STATUS, current) authoritative
+        LegalHold state via a strongly consistent GetItem, and map it into
+        HoldOperationResult. Shared by place_legal_hold/release_legal_hold's
+        success paths and get_hold_status (Section 21.4.1 item 1).
+
+        The NEVER_HELD branch is unreachable from place_legal_hold/
+        release_legal_hold's own success paths -- both require an existing
+        or just-created LegalHold record to reach this point (ADR Invariant
+        13's ordering guarantee: upsert_hold for the current episode is
+        always durably committed before this helper is ever called) -- but
+        is exercised whenever get_hold_status calls this helper for an
+        audit identity that has never been held.
+        """
+        current = self._holds.get_legal_hold(client_id, audit_id, consistent_read=True)
+        if current is None:
+            return HoldOperationResult(
+                client_id=client_id,
+                audit_id=audit_id,
+                hold_id=None,
+                hold_version=None,
+                status="NEVER_HELD",
+                sweep_status=None,
+                fully_enforced=False,
+                placed_at=None,
+                released_at=None,
+                hold_count=0,
+                disposition=None,
+            )
+        return HoldOperationResult(
+            client_id=client_id,
+            audit_id=audit_id,
+            hold_id=current.get("hold_id"),
+            hold_version=current.get("hold_version"),
+            status=current.get("status"),
+            sweep_status=current.get("sweep_status"),
+            fully_enforced=is_hold_fully_enforced(current),
+            placed_at=current.get("placed_at"),
+            released_at=current.get("released_at"),
+            hold_count=current.get("hold_count", 0),
+            disposition=disposition,
+        )
 
     # ------------------------------------------------------------------
     # Shared sequence (Technical Design Section 19.2 steps 5-9 / Section
@@ -386,4 +526,4 @@ class RetentionService:
         )
 
 
-__all__ = ["RetentionService"]
+__all__ = ["HoldOperationResult", "RetentionService"]

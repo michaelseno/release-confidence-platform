@@ -81,6 +81,13 @@ def render(result: CommandResult, *, output: str = "text") -> str:
         return _render_config_stage_info_text(result, payload)
     if result.command == "audit run" and (result.exit_code != 0 or result.status == "failed"):
         _append_audit_run_failure_details(lines, payload)
+    _retention_hold_commands = {
+        "retention hold place",
+        "retention hold release",
+        "retention hold status",
+    }
+    if result.command in _retention_hold_commands:
+        _append_hold_operation_fields(lines, payload)
     actions = (
         payload.get("planned_actions")
         or payload.get("planned_schedules")
@@ -305,6 +312,41 @@ def _append_audit_run_failure_details(lines: list[str], payload: dict[str, Any])
         lines.append(f"failure_message: {payload['failure_message']}")
 
 
+def _append_hold_operation_fields(lines: list[str], payload: dict[str, Any]) -> None:
+    """Text rendering for HoldOperationResult (A1.4b.0 Amendment, Technical
+    Design Section 21.9's field table), for `rcp retention hold
+    place|release|status`. `client_id`/`audit_id` are already rendered by
+    render()'s existing generic key loop above -- this appends the
+    remaining HoldOperationResult-specific fields, in the table's order.
+
+    Neither this function nor render()'s JSON path (which passes `payload`
+    through unmodified, already containing every HoldOperationResult field
+    via CommandResult.data) ever renders a DynamoDB PK/SK, an S3 bucket
+    name or object/marker key, marker_s3_key, marker_confirmed_last_modified,
+    placed_by/released_by, or reason -- HoldOperationResult has no attribute
+    capable of carrying any of these values (Section 21.4/21.9), so there is
+    nothing here to leak by construction.
+    """
+    if payload.get("status") is not None:
+        lines.append(f"status: {payload['status']}")
+    if payload.get("sweep_status") is not None:
+        lines.append(f"sweep_status: {payload['sweep_status']}")
+    if payload.get("hold_id") is not None:
+        lines.append(f"hold_id: {payload['hold_id']}")
+    if payload.get("hold_version") is not None:
+        lines.append(f"hold_version: {payload['hold_version']}")
+    if payload.get("fully_enforced") is not None:
+        lines.append(f"fully_enforced: {str(bool(payload['fully_enforced'])).lower()}")
+    if payload.get("placed_at") is not None:
+        lines.append(f"placed_at: {payload['placed_at']}")
+    if payload.get("released_at") is not None:
+        lines.append(f"released_at: {payload['released_at']}")
+    if payload.get("hold_count") is not None:
+        lines.append(f"hold_count: {payload['hold_count']}")
+    if payload.get("disposition") is not None:
+        lines.append(f"disposition: {payload['disposition']}")
+
+
 def _audit_run_failure_next_step(payload: dict[str, Any], stage: str | None) -> str:
     explicit_next_step = payload.get("next_step")
     if explicit_next_step:
@@ -482,5 +524,28 @@ def _error_next_step(code: str, message: str, stage: str | None) -> str:
             "audit clears; persistent recurrence indicates sustained concurrent "
             "legal-hold management on the same audit identity that should be "
             "investigated before continuing"
+        )
+    if code == "HOLD_NOT_ACTIVE":
+        return (
+            "there is no eligible legal hold to release for this audit identity -- "
+            "it was never held, or its most recent episode already reached "
+            "RELEASED with sweep_status=COMPLETE; run rcp retention hold status "
+            "--client-id <client_id> --audit-id <audit_id> --stage <stage> to "
+            "confirm current state before retrying"
+        )
+    if code == "HOLD_MARKER_ESTABLISHMENT_FAILED":
+        return (
+            "the canary marker establishment/confirmation sequence exhausted its "
+            "bounded retry and wall-clock budget; verify S3 connectivity and "
+            "permissions for the retention-markers/ prefix, then retry the same "
+            "place/release command -- it safely resumes the interrupted "
+            "transition rather than starting a new one"
+        )
+    if code == "HOLD_MARKER_INTEGRITY_VIOLATION":
+        return (
+            "a genuine canary marker identity collision was detected at this "
+            "transition's marker key; this indicates a data-integrity condition "
+            "rather than an operator-correctable input error -- escalate to "
+            "engineering with the audit identity and stage rather than retrying"
         )
     return "correct the error and retry"

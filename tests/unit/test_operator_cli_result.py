@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from release_confidence_platform.operator_cli.result import render_error
+from release_confidence_platform.operator_cli.result import CommandResult, render, render_error
 
 
 def test_force_recreate_blocked_guidance_is_actionable():
@@ -208,3 +208,248 @@ def test_error_next_step_guidance_leaks_no_identifier_or_key():
     guidance = rendered.split("next_step: ", 1)[1]
     for probe in (fake_client_id, fake_audit_id, fake_key):
         assert probe not in guidance
+
+
+# ---------------------------------------------------------------------------
+# A1.4b.0 Amendment (Technical Design Section 21.5/21.9): _error_next_step
+# guidance for the three previously-unreachable retention hold error codes
+# (none had a branch before this correction -- all three fell through to the
+# generic "correct the error and retry" fallback).
+# ---------------------------------------------------------------------------
+
+
+def test_error_next_step_hold_not_active():
+    rendered = render_error(
+        "retention hold release",
+        "dev",
+        "HOLD_NOT_ACTIVE",
+        "No active legal hold to release",
+    )
+    assert "next_step:" in rendered
+    assert "no eligible legal hold to release" in rendered
+    assert "rcp retention hold status" in rendered
+
+
+def test_error_next_step_hold_marker_establishment_failed():
+    rendered = render_error(
+        "retention hold place",
+        "dev",
+        "HOLD_MARKER_ESTABLISHMENT_FAILED",
+        "Canary marker establishment failed",
+    )
+    assert "next_step:" in rendered
+    assert "canary marker establishment" in rendered
+    assert "retry the same place/release command" in rendered
+    assert "safely resumes" in rendered
+
+
+def test_error_next_step_hold_marker_integrity_violation():
+    rendered = render_error(
+        "retention hold place",
+        "dev",
+        "HOLD_MARKER_INTEGRITY_VIOLATION",
+        "Canary marker integrity violation",
+    )
+    assert "next_step:" in rendered
+    assert "identity collision" in rendered
+    assert "escalate to" in rendered
+
+
+@pytest.mark.parametrize(
+    "code,message",
+    [
+        ("HOLD_NOT_ACTIVE", "No active legal hold to release"),
+        ("HOLD_MARKER_ESTABLISHMENT_FAILED", "Canary marker establishment failed"),
+        ("HOLD_MARKER_INTEGRITY_VIOLATION", "Canary marker integrity violation"),
+    ],
+)
+def test_retention_hold_error_rendering_preserves_code_and_leaks_nothing(code, message):
+    fake_client_id = "client_retention_leaksentinel_1a"
+    fake_audit_id = "audit_retention_leaksentinel_2b"
+    for output_format in ("text", "json"):
+        rendered = render_error("retention hold place", "dev", code, message, output=output_format)
+        assert code in rendered
+        assert "Traceback" not in rendered
+        for probe in (fake_client_id, fake_audit_id):
+            assert probe not in rendered
+
+
+def test_hold_already_active_is_not_a_recognized_error_code():
+    """Companion ADR Non-Negotiable Invariant 36 / Technical Design Section
+    21.7: HOLD_ALREADY_ACTIVE must not exist as an operative error path --
+    not raised, not rendered, not referenced in any _error_next_step branch.
+    This asserts the negative: it falls through to the generic fallback,
+    exactly like any other unrecognized code, rather than having dedicated
+    guidance."""
+    generic_rendered = render_error(
+        "retention hold place", "dev", "SOME_UNRECOGNIZED_CODE", "unrecognized"
+    )
+    generic_guidance = generic_rendered.split("next_step: ", 1)[1]
+
+    hold_already_active_rendered = render_error(
+        "retention hold place", "dev", "HOLD_ALREADY_ACTIVE", "irrelevant message"
+    )
+    hold_already_active_guidance = hold_already_active_rendered.split("next_step: ", 1)[1]
+
+    assert hold_already_active_guidance == generic_guidance == "correct the error and retry"
+
+
+def test_hold_state_concurrency_exceeded_guidance_unchanged_no_retention_wording():
+    """Technical Design Section 21.7.1: HOLD_STATE_CONCURRENCY_EXCEEDED's
+    existing branch (added for Category 1/2 governed-evidence write paths)
+    must not gain retention-hold-specific wording, and must not mention
+    `rcp retention hold` at all."""
+    rendered = render_error(
+        "retention hold place",
+        "dev",
+        "HOLD_STATE_CONCURRENCY_EXCEEDED",
+        "Legal hold state concurrency retries exhausted",
+    )
+    guidance = rendered.split("next_step: ", 1)[1]
+    assert "retrying may succeed" in guidance
+    assert "investigated before continuing" in guidance
+    assert "retention hold" not in guidance
+    assert "rcp retention" not in guidance
+
+
+# ---------------------------------------------------------------------------
+# A1.4b.0 Amendment (Technical Design Section 21.9): text/JSON rendering of
+# HoldOperationResult fields for `rcp retention hold place|release|status`.
+# ---------------------------------------------------------------------------
+
+
+def _hold_operation_data(**overrides):
+    base = {
+        "client_id": "client1",
+        "audit_id": "audit1",
+        "hold_id": "hold_abc123",
+        "hold_version": 1,
+        "status": "ACTIVE",
+        "sweep_status": "COMPLETE",
+        "fully_enforced": True,
+        "placed_at": "2026-07-18T00:00:00Z",
+        "released_at": None,
+        "hold_count": 1,
+        "disposition": "completed",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_retention_hold_place_text_rendering_includes_expected_fields():
+    result = CommandResult(
+        command="retention hold place",
+        stage="dev",
+        status="success",
+        summary="Legal hold place completed for audit1",
+        data=_hold_operation_data(),
+        exit_code=0,
+    )
+    rendered = render(result, output="text")
+
+    assert "status: ACTIVE" in rendered
+    assert "sweep_status: COMPLETE" in rendered
+    assert "hold_id: hold_abc123" in rendered
+    assert "hold_version: 1" in rendered
+    assert "fully_enforced: true" in rendered
+    assert "placed_at: 2026-07-18T00:00:00Z" in rendered
+    assert "hold_count: 1" in rendered
+    assert "disposition: completed" in rendered
+    # released_at is None -- must not be rendered per Section 21.9's table.
+    assert "released_at:" not in rendered
+
+
+def test_retention_hold_status_never_held_text_rendering():
+    result = CommandResult(
+        command="retention hold status",
+        stage="dev",
+        status="success",
+        summary="Legal hold status NEVER_HELD for audit1",
+        data=_hold_operation_data(
+            hold_id=None,
+            hold_version=None,
+            status="NEVER_HELD",
+            sweep_status=None,
+            fully_enforced=False,
+            placed_at=None,
+            hold_count=0,
+            disposition=None,
+        ),
+        exit_code=0,
+    )
+    rendered = render(result, output="text")
+
+    assert "status: NEVER_HELD" in rendered
+    assert "hold_id:" not in rendered
+    assert "hold_version:" not in rendered
+    assert "sweep_status:" not in rendered
+    assert "placed_at:" not in rendered
+    assert "disposition:" not in rendered
+    assert "fully_enforced: false" in rendered
+    assert "hold_count: 0" in rendered
+
+
+def test_retention_hold_json_rendering_includes_every_field_and_no_forbidden_key():
+    result = CommandResult(
+        command="retention hold release",
+        stage="dev",
+        status="success",
+        summary="Legal hold release completed for audit1",
+        data=_hold_operation_data(status="RELEASED", released_at="2026-07-19T00:00:00Z"),
+        exit_code=0,
+    )
+    rendered = render(result, output="json")
+    parsed = json.loads(rendered)
+
+    for key in (
+        "client_id",
+        "audit_id",
+        "hold_id",
+        "hold_version",
+        "status",
+        "sweep_status",
+        "fully_enforced",
+        "placed_at",
+        "released_at",
+        "hold_count",
+        "disposition",
+    ):
+        assert key in parsed
+    for forbidden in (
+        "PK",
+        "SK",
+        "marker_s3_key",
+        "marker_confirmed_last_modified",
+        "placed_by",
+        "released_by",
+        "reason",
+        "s3_versions_retagged_count",
+        "dynamodb_items_updated_count",
+    ):
+        assert forbidden not in parsed
+
+
+def test_retention_hold_rendering_never_leaks_forbidden_fields_text():
+    """Section 21.9: neither rendering path may ever include a DynamoDB
+    PK/SK, S3 bucket/key, marker_s3_key, marker_confirmed_last_modified,
+    placed_by/released_by, or reason -- guaranteed structurally, since
+    HoldOperationResult has no such field, but this proves the text
+    renderer specifically never introduces one incidentally."""
+    result = CommandResult(
+        command="retention hold place",
+        stage="dev",
+        status="success",
+        summary="Legal hold place completed for audit1",
+        data=_hold_operation_data(),
+        exit_code=0,
+    )
+    rendered = render(result, output="text")
+    for forbidden in (
+        "marker_s3_key",
+        "marker_confirmed_last_modified",
+        "placed_by",
+        "released_by",
+        "s3_versions_retagged_count",
+        "dynamodb_items_updated_count",
+    ):
+        assert forbidden not in rendered
