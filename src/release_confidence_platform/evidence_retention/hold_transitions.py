@@ -68,6 +68,22 @@ class HoldTransitionOutcome:
     episode is being resumed) and a future RetentionService should proceed
     with the marker/sweep/reconciliation sequence this module does not
     implement. is_noop and should_run_sweep are never both True.
+
+    is_resumption=True means this invocation resumed an interrupted
+    episode's own transition (sweep_status != COMPLETE on entry, an
+    existing hold_id/hold_version reused unchanged) rather than initiating
+    a genuinely fresh PLACE or RELEASE transition (A1.4b.0 Amendment,
+    Technical Design Section 21.4.1 item 4; ADR Non-Negotiable Invariant
+    34). Exact assignments, all five branches across place()/release():
+    fresh PLACE -> False; resumed PLACE -> True; completed PLACE no-op ->
+    False (irrelevant to RetentionService's disposition derivation for this
+    branch, since is_noop is checked first -- set for internal consistency
+    only); fresh RELEASE -> False; resumed RELEASE -> True. Deliberately
+    not named "is_new_episode": a fresh RELEASE does not create a new hold
+    episode, it creates a new transition within the existing PLACE->RELEASE
+    episode and reuses that episode's hold_id (Technical Design Section
+    19.5.2's identity model, ADR Invariant 21) -- that name would be
+    semantically incorrect for RELEASE.
     """
 
     client_id: str
@@ -78,6 +94,7 @@ class HoldTransitionOutcome:
     sweep_status: str
     is_noop: bool
     should_run_sweep: bool
+    is_resumption: bool
 
 
 def is_hold_fully_enforced(hold_state: dict[str, Any] | None) -> bool:
@@ -170,6 +187,7 @@ class HoldTransitions:
                 sweep_status=SWEEP_STATUS_PENDING,
                 is_noop=False,
                 should_run_sweep=True,
+                is_resumption=False,
             )
 
         # current["status"] == ACTIVE: a re-run of an already-placed hold.
@@ -192,6 +210,7 @@ class HoldTransitions:
                 sweep_status=SWEEP_STATUS_COMPLETE,
                 is_noop=True,
                 should_run_sweep=False,
+                is_resumption=False,
             )
 
         # sweep_status in {PENDING, IN_PROGRESS, FAILED}: genuine resumption
@@ -206,6 +225,7 @@ class HoldTransitions:
             sweep_status=current.get("sweep_status", SWEEP_STATUS_PENDING),
             is_noop=False,
             should_run_sweep=True,
+            is_resumption=True,
         )
 
     # ------------------------------------------------------------------
@@ -271,6 +291,7 @@ class HoldTransitions:
                 sweep_status=SWEEP_STATUS_PENDING,
                 is_noop=False,
                 should_run_sweep=True,
+                is_resumption=False,
             )
 
         if (
@@ -292,6 +313,7 @@ class HoldTransitions:
                 sweep_status=current.get("sweep_status", SWEEP_STATUS_PENDING),
                 is_noop=False,
                 should_run_sweep=True,
+                is_resumption=True,
             )
 
         # Step 2, third case: status=RELEASED with sweep_status=COMPLETE, or

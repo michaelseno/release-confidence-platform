@@ -75,6 +75,7 @@ def test_place_new_episode_starts_hold_version_at_one():
     assert outcome.should_run_sweep is True
     assert outcome.status == "ACTIVE"
     assert outcome.sweep_status == "PENDING"
+    assert outcome.is_resumption is False
 
 
 def test_place_then_release_share_hold_id_and_increment_version_by_exactly_one():
@@ -88,6 +89,7 @@ def test_place_then_release_share_hold_id_and_increment_version_by_exactly_one()
     assert release_outcome.hold_id == place_outcome.hold_id
     assert release_outcome.hold_version == place_outcome.hold_version + 1
     assert release_outcome.status == "RELEASED"
+    assert release_outcome.is_resumption is False
 
 
 def test_full_cycle_place_release_place_yields_three_strictly_increasing_versions():
@@ -145,6 +147,7 @@ def test_place_reinvocation_after_sweep_complete_is_pure_noop():
 
     assert outcome.is_noop is True
     assert outcome.should_run_sweep is False
+    assert outcome.is_resumption is False
     # The direct proof of the defect this correction closes: no new
     # LegalHoldEvent write, no upsert_hold call, at all.
     assert len(fake.write_event_calls) == write_calls_before
@@ -185,6 +188,7 @@ def test_place_resumes_interrupted_episode_without_new_write(interrupted_sweep_s
 
     assert resumed.is_noop is False
     assert resumed.should_run_sweep is True
+    assert resumed.is_resumption is True
     assert resumed.hold_id == first.hold_id
     assert resumed.hold_version == first.hold_version
     assert len(fake.write_event_calls) == write_calls_before
@@ -206,10 +210,43 @@ def test_release_resumes_interrupted_episode_without_new_write(interrupted_sweep
 
     assert resumed.is_noop is False
     assert resumed.should_run_sweep is True
+    assert resumed.is_resumption is True
     assert resumed.hold_id == first_release.hold_id
     assert resumed.hold_version == first_release.hold_version
     assert len(fake.write_event_calls) == write_calls_before
     assert len(fake.upsert_calls) == upsert_calls_before
+
+
+# ---------------------------------------------------------------------------
+# A1.4b.0 Amendment (Technical Design Section 21.4.1 item 4 / Section 21.10
+# item 1a): direct, consolidated proof of all five HoldTransitionOutcome.
+# is_resumption branch assignments, independent of RetentionService's own
+# disposition derivation (already covered individually above; this test
+# re-asserts them together as the single, traceable regression proof).
+# ---------------------------------------------------------------------------
+
+
+def test_is_resumption_all_five_branch_assignments():
+    transitions, fake = _make_transitions()
+
+    fresh_place = transitions.place(_CLIENT_ID, _AUDIT_ID, _ACTOR, _REASON, now="t0")
+    assert fresh_place.is_resumption is False
+
+    fake.hold_state["sweep_status"] = "IN_PROGRESS"
+    resumed_place = transitions.place(_CLIENT_ID, _AUDIT_ID, _ACTOR, "resume", now="t1")
+    assert resumed_place.is_resumption is True
+
+    fake.hold_state["sweep_status"] = "COMPLETE"
+    noop_place = transitions.place(_CLIENT_ID, _AUDIT_ID, _ACTOR, "stale", now="t2")
+    assert noop_place.is_noop is True
+    assert noop_place.is_resumption is False
+
+    fresh_release = transitions.release(_CLIENT_ID, _AUDIT_ID, _ACTOR, "released", now="t3")
+    assert fresh_release.is_resumption is False
+
+    fake.hold_state["sweep_status"] = "IN_PROGRESS"
+    resumed_release = transitions.release(_CLIENT_ID, _AUDIT_ID, _ACTOR, "resume", now="t4")
+    assert resumed_release.is_resumption is True
 
 
 # ---------------------------------------------------------------------------
