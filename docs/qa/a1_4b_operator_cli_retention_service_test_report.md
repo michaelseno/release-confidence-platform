@@ -63,26 +63,44 @@ suite grew from 2189 to 2207 passed, matching the +18 exactly.
 ## 3. Additional Verification (Task-Specific Items Beyond §21.10's 19)
 
 **Changed file set is exactly the 9 production/test files (item 18 of the task brief), plus the
-required documentation set — 13 files total in the final committed state (verified against commit
-`3a9d0741ffbc3e9b3e6fc3fc21c135c997823588`, which is what merged into PR #129):**
+required documentation set — 13 files total, verified against this PR's cumulative diff from its
+base commit to its current head (i.e. `git diff --stat <base>...<head>`, evaluated generically
+rather than pinned to any single "final" commit SHA, since this document's own commits are part of
+that head and pinning a SHA here would go stale the moment this correction itself is committed).
+The base is `acb0012` — main's tip at branch creation, stable and unchanging:**
 
 ```
-$ git show --stat 3a9d0741ffbc3e9b3e6fc3fc21c135c997823588
+$ git diff --cached --stat acb001297f06319774037b8dcdba63da6d999fe3
  docs/backend/a1_4b_operator_cli_retention_service_implementation_plan.md   | 187 ++++
  docs/backend/a1_4b_operator_cli_retention_service_implementation_report.md | 477 ++++++++++
  docs/qa/a1_4b_operator_cli_retention_service_test_plan.md                  | 100 +++
- docs/qa/a1_4b_operator_cli_retention_service_test_report.md                | 265 ++++++
+ docs/qa/a1_4b_operator_cli_retention_service_test_report.md                | 301 ++++
  src/release_confidence_platform/evidence_retention/commands.py             | 195 ++++
  src/release_confidence_platform/evidence_retention/hold_transitions.py     |  22 +
  src/release_confidence_platform/evidence_retention/retention_service.py    | 172 +++-
- ... (plus operator_cli/main.py, operator_cli/result.py, and the 4 corresponding
-     test files, per the diffstat)
-
-$ git status --porcelain
-?? AGENTS.md
+ src/release_confidence_platform/operator_cli/main.py                       |  72 ++
+ src/release_confidence_platform/operator_cli/result.py                     |  65 ++
+ tests/unit/evidence_retention/test_hold_transitions.py                     |  37 +
+ tests/unit/evidence_retention/test_retention_service.py                   | 217 ++++-
+ tests/unit/test_operator_cli_result.py                                     | 247 ++++-
+ tests/unit/test_operator_cli_retention.py                                  | 995 +++++++++++++++++++++
+ 13 files changed, 3064 insertions(+), 23 deletions(-)
 ```
 
-Confirmed: the final committed state is exactly 13 files, in four categories:
+This is the cumulative diff of every commit PR #129 currently contains — `3a9d074` and `61419e7` —
+measured against the stable base, staged to include this document's own correction. This report's
+own line count in that diffstat (301 lines added, since the file did not exist at the base commit)
+matches its actual line count, confirmed via `wc -l`: 301.
+
+PR #129's commit structure (referenced by short SHA where historical/immutable — not by "final
+head," since that framing is self-defeating in a document whose own commit becomes part of the
+head): `3a9d074` (original A1.4b implementation) and `61419e7` (a QA-report corrective commit for a
+stale line-count/file-set issue) are both already pushed to PR #129. This document's current
+correction is a third commit — a further documentation-only correction — bringing the PR to three
+commits total, unless a later correction is required. PR #129 itself remains open and unmerged;
+these commits have been pushed to the PR branch, not merged.
+
+Confirmed: the committed state is exactly 13 files, in four categories:
 
 - **9 production/test files** — 7 modified (`hold_transitions.py`, `retention_service.py`,
   `operator_cli/main.py`, `operator_cli/result.py`, `test_hold_transitions.py`,
