@@ -50,7 +50,7 @@ suite grew from 2189 to 2207 passed, matching the +18 exactly.
 | 8 | Final persisted `COMPLETE` vs. stale pre-sweep state (§21.4.1 defect) | Pass | Direct source read confirms `place_legal_hold`/`release_legal_hold` no longer `return outcome`; both call `self._build_result(...)`, which performs a fresh `consistent_read=True` `get_legal_hold` after `_run_sweep_sequence` completes. `test_place_legal_hold_establishes_marker_runs_sweep_and_reconciliation_then_completes` explicitly asserts `outcome.sweep_status == "COMPLETE"` immediately after asserting `fake_repo.hold_state["sweep_status"] == "COMPLETE"` — this is the direct regression proof the returned object reflects persisted state, not the pre-sweep `PENDING` snapshot `HoldTransitions.place()` itself would have produced. |
 | 9 | Mandatory non-empty `--reason`, both PLACE and RELEASE, rejected pre-service-call, incl. whitespace-only | Pass | `commands.py::_require_non_empty_reason` — `if not isinstance(reason, str) or not reason.strip(): raise ValidationError(...)` — called before `service.place_legal_hold`/`release_legal_hold` in both branches of `dispatch_retention_hold`. Verified via `test_release_requires_non_empty_reason_before_any_service_call` (empty string), `test_release_requires_non_empty_reason_whitespace_only_rejected` (`"   "`), `test_place_requires_non_empty_reason_before_any_service_call` (empty string) — all three assert the relevant `*_calls` list on the fake service remains empty after the raise. |
 | 10 | `main.py` retention dispatch constructs exactly one of each dependency and exactly one `RetentionService` — asserted by test, not visual inspection | Pass | `test_main_place_constructs_exactly_one_retention_service_with_declared_dependencies` asserts `len(_CapturingRetentionService.instances) == 1` and `isinstance()` for all 4 injected dependencies, plus `instance.hold_transitions._holds is instance.hold_repository` (identity check confirming shared, not duplicated, construction). This is a genuine construction-count/identity assertion, not merely a plausible-looking read of `main.py`. |
-| 11 | `commands.py` never calls `HoldRepository.get_legal_hold`/`upsert_hold`/`write_hold_event` directly — genuine structural check | Pass | `test_commands_module_never_references_hold_repository_directly` parses `commands.py`'s AST and collects `Attribute`/`Name`/import-alias node identifiers (explicitly excluding string/docstring content, since those aren't represented as these node types), asserting `get_legal_hold`/`upsert_hold`/`write_hold_event`/`HoldRepository` are absent. Independently confirmed by direct manual read of the full 154-line `commands.py` source: it imports only `argparse`, `dataclasses`, `typing.Any` at module level, and `core.time.utc_now_iso`/`core.validators.validate_identifier`/`core.exceptions.ValidationError` inside function bodies — no `HoldRepository` import anywhere, no dynamic `getattr`-based dispatch to defeat the AST check. This is a real structural proof, not a superficial mock-call assertion. |
+| 11 | `commands.py` never calls `HoldRepository.get_legal_hold`/`upsert_hold`/`write_hold_event` directly — genuine structural check | Pass | `test_commands_module_never_references_hold_repository_directly` parses `commands.py`'s AST and collects `Attribute`/`Name`/import-alias node identifiers (explicitly excluding string/docstring content, since those aren't represented as these node types), asserting `get_legal_hold`/`upsert_hold`/`write_hold_event`/`HoldRepository` are absent. Independently confirmed by direct manual read of the full 195-line `commands.py` source: it imports only `argparse`, `dataclasses`, `typing.Any` at module level, and `core.time.utc_now_iso`/`core.validators.validate_identifier`/`core.exceptions.ValidationError` inside function bodies — no `HoldRepository` import anywhere, no dynamic `getattr`-based dispatch to defeat the AST check. This is a real structural proof, not a superficial mock-call assertion. |
 | 12 | Sanitized text/JSON output — no PK/SK/S3 key/`marker_s3_key`/`marker_confirmed_last_modified`/`placed_by`/`released_by`/`reason` | Pass | `HoldOperationResult` (11 fields, verified below) has no attribute capable of carrying any forbidden value — a structural, not merely rendering-time, guarantee. `_append_hold_operation_fields` in `result.py` only reads `payload.get(...)` for the 9 legitimate keys plus the 2 already-rendered by `render()`'s generic loop (`client_id`/`audit_id`). Confirmed by `test_retention_hold_json_rendering_includes_every_field_and_no_forbidden_key` and `test_retention_hold_rendering_never_leaks_forbidden_fields_text`, both of which assert absence of every forbidden token, for both success paths (text/JSON) — error paths covered separately by `test_retention_hold_error_rendering_preserves_code_and_leaks_nothing`, which round-trips fake client/audit-id sentinels through both output formats and confirms neither leaks. |
 | 13 | Exact `HoldOperationResult` 11-field contract, no more/fewer | Pass | Direct read of the dataclass: `client_id, audit_id, hold_id, hold_version, status, sweep_status, fully_enforced, placed_at, released_at, hold_count, disposition` = exactly 11 fields, matching TD §21.4's list verbatim in the same order. `test_hold_operation_result_field_set_is_exactly_decision_2s_list` asserts `{f.name for f in dataclasses.fields(HoldOperationResult)} == {...}` (the exact 11-name set) — a genuine structural equality test, not a subset check. |
 | 14 | No unsubstantiated count fields anywhere | Pass | `grep -rn "s3_versions_retagged_count\|dynamodb_items_updated_count"` across all touched production files returns zero hits outside `retention_service.py`'s own docstring prose explaining their deliberate absence. `test_hold_operation_result_never_carries_fabricated_count_fields` (parametrized over PLACE and STATUS) asserts absence from both the dataclass field-name set and `dataclasses.asdict(result)`. `test_main_place_json_output_has_no_fabricated_count_fields` asserts absence from the actual rendered CLI JSON output end to end. |
@@ -62,29 +62,47 @@ suite grew from 2189 to 2207 passed, matching the +18 exactly.
 
 ## 3. Additional Verification (Task-Specific Items Beyond §21.10's 19)
 
-**Changed file set is exactly the 9 files (item 18 of the task brief):**
+**Changed file set is exactly the 9 production/test files (item 18 of the task brief), plus the
+required documentation set — 13 files total in the final committed state (verified against commit
+`3a9d0741ffbc3e9b3e6fc3fc21c135c997823588`, which is what merged into PR #129):**
 
 ```
+$ git show --stat 3a9d0741ffbc3e9b3e6fc3fc21c135c997823588
+ docs/backend/a1_4b_operator_cli_retention_service_implementation_plan.md   | 187 ++++
+ docs/backend/a1_4b_operator_cli_retention_service_implementation_report.md | 477 ++++++++++
+ docs/qa/a1_4b_operator_cli_retention_service_test_plan.md                  | 100 +++
+ docs/qa/a1_4b_operator_cli_retention_service_test_report.md                | 265 ++++++
+ src/release_confidence_platform/evidence_retention/commands.py             | 195 ++++
+ src/release_confidence_platform/evidence_retention/hold_transitions.py     |  22 +
+ src/release_confidence_platform/evidence_retention/retention_service.py    | 172 +++-
+ ... (plus operator_cli/main.py, operator_cli/result.py, and the 4 corresponding
+     test files, per the diffstat)
+
 $ git status --porcelain
- M src/release_confidence_platform/evidence_retention/hold_transitions.py
- M src/release_confidence_platform/evidence_retention/retention_service.py
- M src/release_confidence_platform/operator_cli/main.py
- M src/release_confidence_platform/operator_cli/result.py
- M tests/unit/evidence_retention/test_hold_transitions.py
- M tests/unit/evidence_retention/test_retention_service.py
- M tests/unit/test_operator_cli_result.py
 ?? AGENTS.md
-?? docs/backend/a1_4b_operator_cli_retention_service_implementation_plan.md
-?? docs/backend/a1_4b_operator_cli_retention_service_implementation_report.md
-?? src/release_confidence_platform/evidence_retention/commands.py
-?? tests/unit/test_operator_cli_retention.py
 ```
 
-Confirmed: exactly the 7 modified + 2 new production/test files the task brief enumerates, plus
-2 QA-required implementation docs (plan/report, expected per this subphase's own §21.11 inventory)
-and the pre-existing, unrelated `AGENTS.md` (present at branch creation per the implementation
-report, not touched by this subphase). No `config/custody_periods.json`, no `infra/` file, no other
-production or test file appears. **Pass.**
+Confirmed: the final committed state is exactly 13 files, in four categories:
+
+- **9 production/test files** — 7 modified (`hold_transitions.py`, `retention_service.py`,
+  `operator_cli/main.py`, `operator_cli/result.py`, `test_hold_transitions.py`,
+  `test_retention_service.py`, `test_operator_cli_result.py`) + 2 new
+  (`evidence_retention/commands.py`, `test_operator_cli_retention.py`) — exactly the 9 the task
+  brief enumerates.
+- **2 backend implementation documents** — `docs/backend/a1_4b_operator_cli_retention_service_implementation_plan.md`
+  and `docs/backend/a1_4b_operator_cli_retention_service_implementation_report.md`, expected per this
+  subphase's own §21.11 inventory.
+- **2 QA documents** — `docs/qa/a1_4b_operator_cli_retention_service_test_plan.md` and this
+  `test_report.md` itself. (An earlier `git status --porcelain` snapshot in this section was captured
+  before these two QA documents were committed, so it undercounted the final set by 2 — this has been
+  corrected here to reflect the actual committed state.)
+- **13 files total**, matching the commit's diffstat exactly.
+
+`AGENTS.md` remains untracked and excluded from this count — it is a pre-existing, unrelated file
+(present at branch creation per the implementation report) that was never staged, committed, or
+counted as part of this subphase's change set; `git status --porcelain` continues to show it as `??`
+in the current working tree. No `config/custody_periods.json`, no `infra/` file, no other production
+or test file appears. **Pass.**
 
 **Judgment calls (item 19 of the task brief):**
 
