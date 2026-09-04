@@ -308,6 +308,16 @@ def test_stage_config_env_override_precedence(tmp_path, monkeypatch):
                 scheduler_execution_target_arn="execution",
                 scheduler_finalization_target_arn="finalization",
                 scheduler_role_arn="role",
+                disposal_recovery_bucket_name="rcp-dev-disposal-recovery",
+                disposal_recorder_function_arn=(
+                    "arn:aws:lambda:us-east-1:111111111111:function:evidenceDisposalRecorder"
+                ),
+                disposal_recorder_event_source_mapping_uuid=(
+                    "12345678-1234-1234-1234-123456789012"
+                ),
+                metadata_table_stream_arn=(
+                    "arn:aws:dynamodb:us-east-1:111111111111:table/table/stream/2024-01-01T00:00:00.000"
+                ),
             ).to_dict()
         )
     )

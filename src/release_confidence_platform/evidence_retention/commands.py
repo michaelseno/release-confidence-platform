@@ -192,4 +192,105 @@ def _require_non_empty_reason(reason: str | None) -> None:
         raise ValidationError("reason must not be empty", "INVALID_ARGUMENT")
 
 
-__all__ = ["build_retention_hold_parser", "dispatch_retention_hold"]
+# ---------------------------------------------------------------------------
+# `rcp retention disposal-recorder redrive` (A1.4a Increment 2; Technical
+# Design Section 22.9.3). Mirrors this module's own `hold place|release|
+# status` parser/dispatch shape exactly: a thin argparse wrapper here, with
+# the actual construction-time bucket-name guarantee and six numbered
+# runtime envelope/provenance checks living in
+# `disposal_recorder_redrive.py`'s own `redrive_disposal_recorder()`.
+#
+# Deliberately no `--bucket`/`--recovery-bucket`-shaped argument is ever
+# registered here (TC-G9's construction-time guarantee) -- the recovery
+# bucket name is always resolved from `StageConfig.disposal_recovery_bucket_name`
+# by `redrive_disposal_recorder()` itself, never from a CLI argument.
+# ---------------------------------------------------------------------------
+
+
+def build_disposal_recorder_redrive_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    """Register the `disposal-recorder` subparser -- with a `redrive` child
+    -- on the provided `retention` subparsers action.
+
+    Exactly one command (`redrive`) is registered here (Technical Design
+    Section 22.9.3) -- no status/list/inspect command for this command
+    group exists in this design.
+    """
+    disposal_recorder = sub.add_parser(
+        "disposal-recorder",
+        help="Manage evidence-disposal-recorder payload-preserving recovery",
+    )
+    disposal_recorder_sub = disposal_recorder.add_subparsers(
+        dest="disposal_recorder_command", required=True
+    )
+    redrive = disposal_recorder_sub.add_parser(
+        "redrive",
+        help=(
+            "Reprocess a recovered failed-batch object from the "
+            "disposal-recorder recovery bucket"
+        ),
+    )
+    redrive.add_argument(
+        "--recovery-object-key",
+        required=True,
+        dest="recovery_object_key",
+        help="Exact S3 object key of the failed-batch object within the recovery bucket",
+    )
+    redrive.add_argument("--stage", required=True, choices=("dev", "staging", "prod"))
+    redrive.add_argument("--output", choices=("text", "json"), default="text")
+
+
+def dispatch_disposal_recorder_redrive(
+    args: argparse.Namespace,
+    *,
+    stage_config: Any,
+    s3_client: Any,
+    repository: Any,
+) -> dict[str, Any]:
+    """Dispatch `retention disposal-recorder redrive` to
+    `disposal_recorder_redrive.redrive_disposal_recorder`.
+
+    `stage_config`/`s3_client`/`repository` are constructed by
+    `operator_cli/main.py` (mirroring the existing per-command-group
+    construction pattern) -- this module constructs none of them and
+    imports no AWS client factory itself.
+
+    Args:
+        args: Parsed argparse namespace from
+            `build_disposal_recorder_redrive_parser`
+            (`disposal_recorder_command == "redrive"`).
+        stage_config: The resolved `StageConfig` for this invocation --
+            `validate_disposal_recorder_config()` must already have been
+            called against it, and `s3_client` must already have been
+            constructed from it, before this function is ever called
+            (Technical Design Section 22.9.5's ordering requirement;
+            enforced by `operator_cli/main.py`, not here).
+        s3_client: A boto3 S3 client constructed from the operator's own
+            resolved `AwsClientFactory` credentials -- never from
+            `EvidenceDisposalRecorderLambdaRole` (ADR Non-Negotiable
+            Invariant 47; TC-I4).
+        repository: A `DisposalRepository` instance.
+
+    Returns:
+        `dataclasses.asdict()` of the `DisposalRedriveResult`
+        `redrive_disposal_recorder` returned -- the exact, complete field
+        set, with no field added or removed here.
+    """
+    from release_confidence_platform.evidence_retention.disposal_recorder_redrive import (  # noqa: PLC0415, E501
+        redrive_disposal_recorder,
+    )
+
+    result = redrive_disposal_recorder(
+        recovery_object_key=args.recovery_object_key,
+        stage_config=stage_config,
+        s3_client=s3_client,
+        repository=repository,
+    )
+    return dataclasses.asdict(result)
+
+
+__all__ = [
+    "build_retention_hold_parser",
+    "dispatch_retention_hold",
+    "build_disposal_recorder_redrive_parser",
+    "dispatch_disposal_recorder_redrive",
+]

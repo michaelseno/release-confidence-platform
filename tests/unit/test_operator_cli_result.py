@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import pytest
 
+from release_confidence_platform.evidence_retention.disposal_recorder_redrive import (
+    REDRIVE_OUTCOME_PROCESSED,
+    REDRIVE_OUTCOME_REJECTED,
+    DisposalRedriveRecordOutcome,
+    DisposalRedriveResult,
+)
 from release_confidence_platform.operator_cli.result import CommandResult, render, render_error
 
 
@@ -453,3 +460,138 @@ def test_retention_hold_rendering_never_leaks_forbidden_fields_text():
         "dynamodb_items_updated_count",
     ):
         assert forbidden not in rendered
+
+
+# ---------------------------------------------------------------------------
+# `DisposalRedriveResult` sanitized rendering (A1.4a Increment 2; Technical
+# Design Section 22.9.3's "Output contract", mirroring HoldOperationResult's
+# own sanitized text/JSON rendering convention above).
+# ---------------------------------------------------------------------------
+
+_SENTINEL_RECOVERY_BUCKET = "rcp-dev-disposal-recovery-sentinel"
+
+
+def _redrive_data(**overrides):
+    result = DisposalRedriveResult(
+        recovery_object_key="aws/lambda/12345678-1234-1234-1234-123456789012/2024/01/01/x",
+        outcome=REDRIVE_OUTCOME_PROCESSED,
+        rejection_reason=None,
+        record_outcomes=(
+            DisposalRedriveRecordOutcome(
+                record_identifier="event-abc123",
+                disposition="recordable_governed_disposal",
+                reason="written",
+            ),
+        ),
+        record_count=1,
+        success_count=1,
+        failure_count=0,
+        exit_code=0,
+    )
+    data = dataclasses.asdict(result)
+    data.update(overrides)
+    return data
+
+
+def test_disposal_redrive_success_text_rendering_includes_expected_fields():
+    result = CommandResult(
+        command="retention disposal-recorder redrive",
+        stage="dev",
+        status="success",
+        summary="Disposal-recorder redrive processed 1/1 records",
+        data=_redrive_data(),
+        exit_code=0,
+    )
+    rendered = render(result, output="text")
+
+    assert f"outcome: {REDRIVE_OUTCOME_PROCESSED}" in rendered
+    assert "record_count: 1" in rendered
+    assert "success_count: 1" in rendered
+    assert "failure_count: 0" in rendered
+    assert "event-abc123: recordable_governed_disposal (written)" in rendered
+    assert "SUCCESS: retention disposal-recorder redrive" in rendered
+    # rejection_reason is None for a processed outcome -- must not render.
+    assert "rejection_reason:" not in rendered
+
+
+def test_disposal_redrive_rejected_text_rendering():
+    result = CommandResult(
+        command="retention disposal-recorder redrive",
+        stage="dev",
+        status="failed",
+        summary="Disposal-recorder redrive rejected",
+        data=_redrive_data(
+            outcome=REDRIVE_OUTCOME_REJECTED,
+            rejection_reason="stream_arn_mismatch",
+            record_outcomes=[],
+            record_count=0,
+            success_count=0,
+            failure_count=0,
+            exit_code=1,
+        ),
+        exit_code=1,
+    )
+    rendered = render(result, output="text")
+
+    assert f"outcome: {REDRIVE_OUTCOME_REJECTED}" in rendered
+    assert "rejection_reason: stream_arn_mismatch" in rendered
+    assert "FAILED: retention disposal-recorder redrive" in rendered
+
+
+def test_disposal_redrive_json_rendering_includes_every_field():
+    result = CommandResult(
+        command="retention disposal-recorder redrive",
+        stage="dev",
+        status="success",
+        summary="Disposal-recorder redrive processed 1/1 records",
+        data=_redrive_data(),
+        exit_code=0,
+    )
+    rendered = render(result, output="json")
+    parsed = json.loads(rendered)
+
+    for key in (
+        "recovery_object_key",
+        "outcome",
+        "rejection_reason",
+        "record_outcomes",
+        "record_count",
+        "success_count",
+        "failure_count",
+        "exit_code",
+    ):
+        assert key in parsed
+    assert parsed["record_outcomes"][0]["record_identifier"] == "event-abc123"
+
+
+def test_disposal_redrive_rendering_never_leaks_bucket_name_or_aws_detail():
+    """Technical Design Section 22.9.3: the sanitized, operator-facing
+    `DisposalRedriveResult` output must never leak raw AWS credentials, a
+    stack trace, or the recovery bucket name -- guaranteed structurally
+    since `DisposalRedriveResult` has no bucket-name field, but this proves
+    neither rendering path introduces one incidentally, and that a raw
+    `ClientError`-shaped rejection reason (e.g.
+    "recovery_object_read_failed:AccessDenied") never carries the sentinel
+    bucket name through to output."""
+    result = CommandResult(
+        command="retention disposal-recorder redrive",
+        stage="dev",
+        status="failed",
+        summary="Disposal-recorder redrive rejected",
+        data=_redrive_data(
+            outcome=REDRIVE_OUTCOME_REJECTED,
+            rejection_reason="recovery_object_read_failed:AccessDenied",
+            record_outcomes=[],
+            record_count=0,
+            success_count=0,
+            failure_count=0,
+            exit_code=1,
+        ),
+        exit_code=1,
+    )
+    for output_format in ("text", "json"):
+        rendered = render(result, output=output_format)
+        assert _SENTINEL_RECOVERY_BUCKET not in rendered
+        assert "Traceback" not in rendered
+        assert "boto3" not in rendered
+        assert "botocore" not in rendered

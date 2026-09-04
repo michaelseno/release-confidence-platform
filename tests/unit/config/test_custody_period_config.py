@@ -103,6 +103,31 @@ def test_retention_marker_is_rejected_as_evidence_class(tmp_path: Path) -> None:
     assert exc_info.value.error_type == _ERROR_TYPE
 
 
+def test_disposal_recovery_is_rejected_as_evidence_class(tmp_path: Path) -> None:
+    """A1.4a Increment 3 (Technical Design Section 22.9.2, "CustodyPeriodConfigLoader
+    does not, and must not, resolve this value"): disposal_recovery is an
+    operational duration, not an evidentiary class -- mirrors
+    test_retention_marker_is_rejected_as_evidence_class above exactly, on
+    the same basis retention_marker is already rejected.
+    """
+    payload = {
+        "evidentiary_classes": {
+            "raw_evidence": {},
+            "aggregate_metadata": {},
+            "intelligence": {},
+            "report": {},
+            "certificate": {},
+        },
+        "operational_durations": {"retention_marker": {}, "disposal_recovery": {"dev": 7}},
+    }
+    _write_custody_periods_json(tmp_path, payload)
+
+    with pytest.raises(ConfigError) as exc_info:
+        CustodyPeriodConfigLoader(root=tmp_path).resolve("disposal_recovery", "dev")
+
+    assert exc_info.value.error_type == _ERROR_TYPE
+
+
 # ---------------------------------------------------------------------------
 # Failure classifications -- every condition raises ConfigError with
 # CUSTODY_PERIOD_CONFIG_MISSING and no distinguishing sub-code.
@@ -288,7 +313,14 @@ def test_production_custody_periods_json_has_expected_schema_and_no_configured_v
     assert set(payload["evidentiary_classes"]) == set(EVIDENCE_CLASSES)
     for evidence_class, stage_values in payload["evidentiary_classes"].items():
         assert stage_values == {}, f"{evidence_class} must be unconfigured, got {stage_values!r}"
-    assert payload["operational_durations"] == {"retention_marker": {}}
+    # A1.4a Increment 3 (Technical Design Section 22.9.2 item 9, A1.4a.0
+    # Round 3 item 9): disposal_recovery is a new, seventh key in the same
+    # operational_durations namespace retention_marker already uses --
+    # still unconfigured, no numeric custody-duration value introduced.
+    assert payload["operational_durations"] == {
+        "retention_marker": {},
+        "disposal_recovery": {},
+    }
 
 
 @pytest.mark.parametrize("evidence_class", EVIDENCE_CLASSES)

@@ -8,5 +8,9 @@
   "schedule_name_prefix": "rcp-prod",
   "scheduler_execution_target_arn": "arn:aws:lambda:us-east-1:000000000000:function:release-confidence-platform-prod-scheduledExecution",
   "scheduler_finalization_target_arn": "arn:aws:lambda:us-east-1:000000000000:function:release-confidence-platform-prod-auditFinalization",
-  "scheduler_role_arn": "arn:aws:iam::000000000000:role/release-confidence-platform-prod-scheduler-invoke"
+  "scheduler_role_arn": "arn:aws:iam::000000000000:role/release-confidence-platform-prod-scheduler-invoke",
+  "disposal_recovery_bucket_name": "rcp-prod-disposal-recovery-placeholder",
+  "disposal_recorder_function_arn": "arn:aws:lambda:us-east-1:000000000000:function:release-confidence-platform-prod-evidenceDisposalRecorder",
+  "disposal_recorder_event_source_mapping_uuid": "rcp-prod-disposal-recorder-esm-uuid-placeholder",
+  "metadata_table_stream_arn": "arn:aws:dynamodb:us-east-1:000000000000:table/rcp-prod-audit-metadata-placeholder/stream/2024-01-01T00:00:00.000"
 }

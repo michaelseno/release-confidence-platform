@@ -52,3 +52,23 @@ Outputs:
       Fn::GetAtt:
         - MetadataTable
         - Arn
+  # Evidence Governance Workstream A1.4a -- Technical Design Section 22.9.5
+  # ("Explicit supersession of Round 3 item 10(a)"). Reinstated solely to
+  # serve the operator CLI's own StageConfig.metadata_table_stream_arn field
+  # -- a categorically different, external (non-CloudFormation) consumer
+  # from evidenceDisposalRecorder's own event-source-mapping EventSourceArn
+  # property and EvidenceDisposalRecorderLambdaRole's own IAM statement,
+  # both of which continue to resolve the stream ARN via the identical
+  # same-stack Fn::GetAtt: [MetadataTable, StreamArn] reference and never
+  # consume this Output.
+  MetadataTableStreamArn:
+    Description: >-
+      MetadataTable DynamoDB Streams ARN, for the operator CLI's own
+      StageConfig.metadata_table_stream_arn field (redrive envelope/
+      provenance validation, Technical Design Section 22.9.3/22.9.5). Not
+      consumed by any same-stack resource -- those resolve this ARN via a
+      direct Fn::GetAtt reference instead.
+    Value:
+      Fn::GetAtt:
+        - MetadataTable
+        - StreamArn

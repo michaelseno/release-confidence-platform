@@ -88,6 +88,8 @@ def render(result: CommandResult, *, output: str = "text") -> str:
     }
     if result.command in _retention_hold_commands:
         _append_hold_operation_fields(lines, payload)
+    if result.command == "retention disposal-recorder redrive":
+        _append_disposal_redrive_fields(lines, payload)
     actions = (
         payload.get("planned_actions")
         or payload.get("planned_schedules")
@@ -347,6 +349,39 @@ def _append_hold_operation_fields(lines: list[str], payload: dict[str, Any]) -> 
         lines.append(f"disposition: {payload['disposition']}")
 
 
+def _append_disposal_redrive_fields(lines: list[str], payload: dict[str, Any]) -> None:
+    """Text rendering for `DisposalRedriveResult`
+    (`evidence_retention/disposal_recorder_redrive.py`, A1.4a Increment 2;
+    Technical Design Section 22.9.3's "Output contract"), for
+    `rcp retention disposal-recorder redrive`.
+
+    Never renders the recovery bucket name, a raw AWS error body, a stack
+    trace, or the recovered object's own unvalidated content -- none of
+    `DisposalRedriveResult`'s fields carry any of these (the bucket name is
+    never part of the result; `rejection_reason` is always one of this
+    module's own short, named reason codes, never a passthrough of
+    `ClientError`'s raw message body beyond its own `Code` field).
+    """
+    if payload.get("outcome") is not None:
+        lines.append(f"outcome: {payload['outcome']}")
+    if payload.get("rejection_reason") is not None:
+        lines.append(f"rejection_reason: {payload['rejection_reason']}")
+    if payload.get("record_count") is not None:
+        lines.append(f"record_count: {payload['record_count']}")
+    if payload.get("success_count") is not None:
+        lines.append(f"success_count: {payload['success_count']}")
+    if payload.get("failure_count") is not None:
+        lines.append(f"failure_count: {payload['failure_count']}")
+    record_outcomes = payload.get("record_outcomes") or []
+    if record_outcomes:
+        lines.append("record_outcomes:")
+        for record_outcome in record_outcomes:
+            lines.append(
+                f"  - {record_outcome.get('record_identifier')}: "
+                f"{record_outcome.get('disposition')} ({record_outcome.get('reason')})"
+            )
+
+
 def _audit_run_failure_next_step(payload: dict[str, Any], stage: str | None) -> str:
     explicit_next_step = payload.get("next_step")
     if explicit_next_step:
@@ -433,6 +468,18 @@ def _error_next_step(code: str, message: str, stage: str | None) -> str:
             "RCP_SCHEDULER_GROUP_NAME, RCP_SCHEDULER_EXECUTION_TARGET_ARN, "
             "RCP_SCHEDULER_FINALIZATION_TARGET_ARN, and RCP_SCHEDULER_ROLE_ARN from deployed "
             "scheduler outputs, then verify EventBridge Scheduler permissions and retry"
+        )
+    if code == "DISPOSAL_RECORDER_CONFIG_ERROR":
+        stage_name = stage or "<stage>"
+        return (
+            f"run rcp config stage-info --stage {stage_name} --output text and verify "
+            "disposal_recovery_bucket_name, disposal_recorder_function_arn, "
+            "disposal_recorder_event_source_mapping_uuid, and metadata_table_stream_arn; export "
+            "RCP_DISPOSAL_RECOVERY_BUCKET_NAME, RCP_DISPOSAL_RECORDER_FUNCTION_ARN, "
+            "RCP_DISPOSAL_RECORDER_EVENT_SOURCE_MAPPING_UUID, and/or "
+            "RCP_METADATA_TABLE_STREAM_ARN from deployed disposal-recorder outputs, confirm both "
+            "ARNs' own regions match the stage's configured region, and confirm "
+            "audit_metadata_table matches the stream ARN's own table segment, then retry"
         )
     if code in {"STORAGE_CONFIG_ERROR", "STORAGE_PERMISSION_ERROR"} or (
         code == "STORAGE_ERROR" and "S3 config" in message

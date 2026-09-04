@@ -16,6 +16,9 @@ import apps.backend.handlers.aggregation_handler as aggregation_handler
 import apps.backend.handlers.audit_finalization_handler as audit_finalization_handler
 import apps.backend.handlers.orchestrator_handler as orchestrator_handler
 import apps.backend.handlers.scheduled_execution_handler as scheduled_execution_handler
+from apps.backend.handlers import (
+    evidence_disposal_recorder_handler,
+)
 
 
 def test_orchestrator_handler_callable():
@@ -45,6 +48,14 @@ def test_aggregation_handler_callable():
     relies on PYTHONPATH=/var/task/src set in serverless.yml instead.
     """
     assert callable(aggregation_handler.handler)
+
+
+def test_evidence_disposal_recorder_handler_callable():
+    """evidence_disposal_recorder_handler.handler must be a callable after
+    import (A1.4a Increment 2) -- mirrors the other four handlers' own
+    import-smoke coverage.
+    """
+    assert callable(evidence_disposal_recorder_handler.handler)
 
 
 # ---------------------------------------------------------------------------
