@@ -88,13 +88,34 @@ class DisposalRepository:
     # ------------------------------------------------------------------
 
     def get_disposal_record(
-        self, client_id: str, audit_id: str, disposal_id: str
+        self,
+        client_id: str,
+        audit_id: str,
+        disposal_id: str,
+        *,
+        consistent_read: bool = False,
     ) -> dict[str, Any] | None:
         """Read a single DisposalRecord by its disposal_id.
 
         Returns the record dict if found, or None if absent.
+
+        `consistent_read` (ADR Decision 13, Non-Negotiable Invariant 39;
+        Technical Design Section 22.3): defaults to False (DynamoDB's own
+        default, eventually consistent) so every existing caller remains
+        behaviorally unchanged -- mirrors HoldRepository.get_legal_hold's
+        exact pattern. `evidenceDisposalRecorder`'s duplicate-conflict
+        verification (Section 22.3) is the first caller requiring
+        `consistent_read=True`: a `ConditionalCheckFailedException` read-back
+        may immediately follow a conflicting write by another concurrent
+        invocation, and an eventually-consistent read has no transactional
+        backstop to catch staleness on this path. When False (the default),
+        `ConsistentRead` is omitted from the underlying GetItem call entirely
+        rather than explicitly passed as False.
         """
-        return self._get_item(self.disposal_record_key(client_id, audit_id, disposal_id))
+        key = self.disposal_record_key(client_id, audit_id, disposal_id)
+        if consistent_read:
+            return self._get_item(key, consistent_read=True)
+        return self._get_item(key)
 
     # ------------------------------------------------------------------
     # Writes — DisposalRecord (write-once, append-only)
@@ -110,6 +131,13 @@ class DisposalRepository:
         disposed_identity_ref: str,
         disposed_at: str,
         recorded_at: str,
+        disposal_id_scheme: str,
+        source_kind: str,
+        source_stream_identity: str | None = None,
+        source_event_id: str | None = None,
+        source_bucket: str | None = None,
+        source_object_key: str | None = None,
+        source_object_version_id: str | None = None,
         source_created_at: str | None = None,
         custody_period_days_applied: int | None = None,
     ) -> None:
@@ -124,6 +152,18 @@ class DisposalRepository:
         Never sets a ttl_disposal_at attribute on the written item (ADR
         Non-Negotiable Invariant 1).
 
+        `disposal_id_scheme`, `source_kind`, and the five source-identity
+        fields (ADR Non-Negotiable Invariant 49; Technical Design Section
+        7.3/22.2/22.3, A1.4a implementation scope) are persisted verbatim --
+        the identical raw values `disposal_recorder.py` hashed into
+        `disposal_id` -- so Section 22.3's duplicate-conflict verification
+        can compare source identity directly without re-deriving it. This
+        method does not itself enforce the source-kind-conditional field
+        shape (which of the five fields must be present/absent for a given
+        `source_kind`) -- that is `DisposalRecord`'s own model-level
+        validator (models.py); callers are expected to construct a valid
+        `DisposalRecord` first and pass its fields through.
+
         Raises:
             AssertionError: If the computed SK is not a disposal SK.
             ConditionalWriteError: If a record with this disposal_id already exists.
@@ -135,11 +175,18 @@ class DisposalRepository:
             **key,
             "record_type": DISPOSAL_RECORD_RECORD_TYPE,
             "disposal_id": disposal_id,
+            "disposal_id_scheme": disposal_id_scheme,
+            "source_kind": source_kind,
             "client_id": client_id,
             "audit_id": audit_id,
             "evidence_class": evidence_class,
             "disposal_mechanism": disposal_mechanism,
             "disposed_identity_ref": disposed_identity_ref,
+            "source_stream_identity": source_stream_identity,
+            "source_event_id": source_event_id,
+            "source_bucket": source_bucket,
+            "source_object_key": source_object_key,
+            "source_object_version_id": source_object_version_id,
             "disposed_at": disposed_at,
             "recorded_at": recorded_at,
             "source_created_at": source_created_at,
@@ -151,8 +198,13 @@ class DisposalRepository:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _get_item(self, key: dict[str, str]) -> dict[str, Any] | None:
-        response = self._call("get_item", Key=key)
+    def _get_item(
+        self, key: dict[str, str], *, consistent_read: bool = False
+    ) -> dict[str, Any] | None:
+        if consistent_read:
+            response = self._call("get_item", Key=key, ConsistentRead=True)
+        else:
+            response = self._call("get_item", Key=key)
         return response.get("Item")
 
     def _put_once(self, item: dict[str, Any]) -> None:

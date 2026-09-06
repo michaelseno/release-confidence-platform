@@ -139,6 +139,23 @@ custom:
     report: ${file(../config/custody_periods.json):evidentiary_classes.report.${self:provider.stage}}
     certificate: ${file(../config/custody_periods.json):evidentiary_classes.certificate.${self:provider.stage}}
     retention_marker: ${file(../config/custody_periods.json):operational_durations.retention_marker.${self:provider.stage}}
+    # Evidence Governance Workstream A1.4a -- Technical Design Section
+    # 22.9.2 (A1.4a.0 Round 3 item 9): the recovery bucket is operational
+    # recovery storage, not an evidentiary class -- its duration is
+    # configured through the same operational_durations namespace
+    # retention_marker already uses, never evidentiary_classes. No numeric
+    # duration value is introduced by this correction.
+    disposal_recovery: ${file(../config/custody_periods.json):operational_durations.disposal_recovery.${self:provider.stage}}
+  # Evidence Governance Workstream A1.4a -- Technical Design Section 22.9.5
+  # item 1 (A1.4a.0 Round 7 item 3): the recovery bucket's own name is
+  # deterministic from stage, mirroring rawResultsBucketName's/
+  # metadataTableName's own existing entries exactly. infra/serverless.yml
+  # is this value's own authoritative source -- consumed directly by
+  # infra/resources/evidence-disposal-recovery-bucket.yml's own
+  # AWS::S3::Bucket resource as its BucketName property, and manually
+  # transcribed into config/stages/{stage}.json's own
+  # disposal_recovery_bucket_name StageConfig field at deployment time.
+  disposalRecoveryBucketName: ${self:custom.resourcePrefix}-${self:provider.stage}-disposal-recovery
 
 package:
   patterns:
@@ -205,6 +222,139 @@ functions:
     # Days/NoncurrentDays references above.
     environment:
       CUSTODY_PERIOD_DAYS_AGGREGATE_METADATA: ${self:custom.custodyPeriodDays.aggregate_metadata.${self:provider.stage}}
+  # Evidence Governance Workstream A1.4a -- ADR Decision 13 / Non-Negotiable
+  # Invariants 38-51 (adr_evidence_retention_disposal_enforcement.md);
+  # Technical Design Section 22 in full
+  # (evidence_governance_workstream_a1_retention_enforcement_technical_design.md).
+  #
+  # Consumes both DynamoDB Streams TTL-driven REMOVE events (MetadataTable)
+  # and S3 EventBridge "Object Deleted" notifications (RawResultsBucket
+  # Lifecycle permanent deletions), producing a durable DisposalRecord for
+  # each (FR-A1-5/AC-A1-6). References the dedicated
+  # EvidenceDisposalRecorderLambdaRole (Technical Design Section 22.11) --
+  # never the shared provider.iam.role.statements block.
+  evidenceDisposalRecorder:
+    handler: apps.backend.handlers.evidence_disposal_recorder_handler.handler
+    timeout: 60
+    memorySize: 256
+    role:
+      Fn::GetAtt:
+        - EvidenceDisposalRecorderLambdaRole
+        - Arn
+    environment:
+      METADATA_TABLE_STREAM_ARN:
+        Fn::GetAtt:
+          - MetadataTable
+          - StreamArn
+      AWS_ACCOUNT_ID:
+        Fn::Sub: "${AWS::AccountId}"
+    # Lambda asynchronous-invocation retry configuration, plane (ii)
+    # (Technical Design Section 22.8/22.10) -- the S3 EventBridge path's own
+    # async-invoke failure destination and retry budget. AWS's own maximum
+    # permitted values for this mechanism (a 0-2 retry range, a 60-21600
+    # second age window) are used directly, not an arbitrary pick. Never
+    # applied to the DynamoDB Streams path -- that path's own retry/failure
+    # contract is entirely the stream event's own MaximumRetryAttempts/
+    # MaximumRecordAgeInSeconds/DestinationConfig below, a structurally
+    # distinct mechanism.
+    destinations:
+      onFailure:
+        arn:
+          Fn::GetAtt:
+            - evidenceDisposalRecorderDLQ
+            - Arn
+        type: sqs
+    maximumEventAge: 21600
+    maximumRetryAttempts: 2
+    events:
+      # DynamoDB Streams TTL-driven REMOVE path (Technical Design Section
+      # 22.4/22.10). Explicit, non-default parameter selection throughout --
+      # StartingPosition LATEST (never TRIM_HORIZON, so this recorder never
+      # silently backfills pre-existing stream content); FilterCriteria
+      # scoped to eventName == REMOVE at the event-source-mapping level
+      # (defense-in-depth cost reduction only -- the handler's own
+      # eventName == REMOVE check, Section 22.4, is never removed or
+      # weakened on this filter's assumption alone); batch size 25;
+      # MaximumRetryAttempts 3; MaximumRecordAgeInSeconds 72000 (20h, within
+      # DynamoDB Streams' own fixed 24h retention window);
+      # ParallelizationFactor 1 (DynamoDB Streams' own strict per-shard
+      # ordering, retained at the default); ReportBatchItemFailures +
+      # BisectBatchOnFunctionError together (Section 22.10's corrected
+      # contract -- the function's own returned lowest-failed-sequence-
+      # number is the checkpoint/bisection boundary directly).
+      #
+      # DestinationConfig.OnFailure (plane iii, targeting the dedicated
+      # recovery bucket -- never evidenceDisposalRecorderDLQ) and
+      # MetricsConfig (EventCount opt-in, required for
+      # OnFailureDestinationDeliveredEventCount/DroppedEventCount to emit
+      # at all, Section 22.10) are deliberately NOT configured via this
+      # event's own `destinations`/`metricsConfig` keys: this Serverless
+      # Framework version (3.40.0) does not expose a first-class
+      # metricsConfig stream-event key at all (confirmed by direct
+      # inspection of this installed version's own event compiler), and its
+      # `destinations.onFailure` key restricts the destination `type` to
+      # sns/sqs only and -- for any function using a dedicated, non-default
+      # execution role, as this one does -- would still unconditionally
+      # attempt to append an SQS-shaped IAM statement to the SHARED
+      # IamRoleLambdaExecution role if one exists in this template (it
+      # does, for the four functions still using provider.iam.role.statements),
+      # which would incorrectly grant an unrelated statement on this
+      # function's own S3 recovery-bucket ARN to that shared role. Both
+      # properties are instead applied via `resources.extensions` below,
+      # patching the rendered AWS::Lambda::EventSourceMapping resource's
+      # own Properties directly once its logical ID is confirmed by Pass
+      # 1's render (Technical Design Section 22.9.5/22.10's own documented
+      # resources.extensions fallback for this exact gap).
+      - stream:
+          type: dynamodb
+          arn:
+            Fn::GetAtt:
+              - MetadataTable
+              - StreamArn
+          batchSize: 25
+          startingPosition: LATEST
+          maximumRetryAttempts: 3
+          maximumRecordAgeInSeconds: 72000
+          parallelizationFactor: 1
+          bisectBatchOnFunctionError: true
+          functionResponseType: ReportBatchItemFailures
+          filterPatterns:
+            - eventName:
+                - REMOVE
+      # S3 Lifecycle permanent-deletion path, via EventBridge (Technical
+      # Design Section 22.5/22.8/22.10) -- plane (i)'s own RetryPolicy
+      # (MaximumRetryAttempts 10, MaximumEventAgeInSeconds 3600) and
+      # DeadLetterConfig, pointed at evidenceDisposalRecorderDLQ, targeting
+      # this function. This is DELIBERATELY NOT configured via this
+      # function's own native `events: - eventBridge:` shorthand (Technical
+      # Design Section 22.9.5/22.14's own documented render-confirmation
+      # discipline is what surfaced this): this Serverless Framework
+      # version's (3.40.0) own EventBridge-event compiler derives that
+      # shorthand's own auto-generated AWS::Events::Rule logical ID from the
+      # function's own fully-resolved, STAGE-BAKED AWS Lambda function name
+      # (confirmed by direct two-stage comparison of an actual local
+      # render's own generated cloudformation-template-update-stack.json:
+      # rendering this exact function/event configuration for --stage dev
+      # produced logical ID `Releaseconfidenceplatformdev...EventBridgeRule`,
+      # while --stage staging produced
+      # `Releaseconfidenceplatformstaging...EventBridgeRule` -- a DIFFERENT
+      # logical ID per stage, for the identical template source).
+      # evidence-retention-dlq.yml's own AWS::SQS::QueuePolicy (Technical
+      # Design Section 22.11/22.14) must reference this rule's own ARN via a
+      # single, stage-INVARIANT Fn::GetAtt target across every stage this
+      # one template renders for -- a stage-variant logical ID cannot serve
+      # that reference at all. The rule and its own resource-based
+      # Lambda::Permission are therefore hand-authored instead, in
+      # infra/resources/evidence-disposal-recorder-outputs.yml (Pass 2,
+      # alongside the two Outputs, both of which already require Pass 1's
+      # confirmed EvidenceDisposalRecorderLambdaFunction logical ID), with a
+      # logical ID of this correction's own choosing --
+      # EvidenceDisposalRecorderEventBridgeRule -- confirmed stable
+      # (identical across every stage) by the same two-stage render
+      # comparison. This also matches this codebase's own established
+      # convention (scheduler.yml, phase4-aggregation-iam.yml) of
+      # hand-authoring resource-based Lambda::Permission grants rather than
+      # relying on framework shorthand.
 
 resources:
   - ${file(resources/s3.yml)}
@@ -213,3 +363,19 @@ resources:
   - ${file(resources/phase4-aggregation-iam.yml)}
   - ${file(resources/scheduler.yml)}
   - ${file(resources/evidence-retention-dlq.yml)}
+  # Evidence Governance Workstream A1.4a -- Technical Design Section
+  # 22.9.5's corrected seven-step infrastructure-render sequence, Pass 0:
+  # neither fragment below references a logical ID that sequence exists to
+  # discover -- both are complete, self-contained resource definitions the
+  # evidenceDisposalRecorder function block above already refers to (its
+  # `role` property and, via resources.extensions once confirmed, its
+  # event-source mapping's own OnFailure destination) -- so both import
+  # lines are added before Pass 1, not deferred to Pass 2 alongside the
+  # Outputs fragment below.
+  - ${file(resources/evidence-disposal-recorder-iam.yml)}
+  - ${file(resources/evidence-disposal-recovery-bucket.yml)}
+  # Pass 2: added only after Pass 1's render confirmed the
+  # AWS::Lambda::Function and AWS::Lambda::EventSourceMapping logical IDs
+  # this fragment's own Outputs/resources.extensions/hand-authored
+  # EventBridge rule target.
+  - ${file(resources/evidence-disposal-recorder-outputs.yml)}

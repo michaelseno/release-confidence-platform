@@ -10,14 +10,18 @@
 # alertable condition -- never a silent gap in FR-A1-5's durable-record
 # guarantee.
 #
-# evidenceDisposalRecorder itself (the Lambda function, its event source
-# mappings, and the EventBridge rule that would target
-# evidenceDisposalRecorderDLQ.DestinationConfig.OnFailure /
-# DeadLetterConfig) is A1.3/A1.4 scope and does not exist yet -- this file
-# defines only the queue and its depth alarm, both of which stand on their
-# own without any Lambda reference. No placeholder/stub Lambda resource is
-# defined here; none is required for these two resources to be valid,
-# deployable CloudFormation.
+# evidenceDisposalRecorder itself (the Lambda function and its DynamoDB
+# Streams event source mapping) is now wired in infra/serverless.yml
+# (A1.4a). This queue serves exactly two failure planes going forward
+# (Technical Design Section 22.8, A1.4a.0 Round 2 item 2): plane (i)
+# (EventBridge-to-Lambda delivery failure, S3 path) and plane (ii) (Lambda
+# asynchronous-invocation failure, S3 path) -- never plane (iii) (DynamoDB
+# Streams event-source-mapping processing failure), which routes to the
+# dedicated recovery bucket instead
+# (infra/resources/evidence-disposal-recovery-bucket.yml), never this
+# queue. The recovery bucket's own Object Created notification rule (plane
+# (v)) also targets this queue, as a pure notification, distinguishable by
+# shape/source from a genuine plane-(i)/(ii) failure message.
 Resources:
   evidenceDisposalRecorderDLQ:
     Type: AWS::SQS::Queue
@@ -56,14 +60,51 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
 
+  # Evidence Governance Workstream A1.4a -- Technical Design Section
+  # 22.11/22.14 (A1.4a.0 Round 3 item 10(d)/10(f)). Grants sqs:SendMessage
+  # to events.amazonaws.com, scoped by aws:SourceArn to EXACTLY the two
+  # EventBridge rule ARNs legitimately authorized to target this queue --
+  # the plane-(i) rule (S3-Lifecycle-deletion-events-to-recorder,
+  # infra/serverless.yml's evidenceDisposalRecorder eventBridge event) and
+  # the recovery-bucket notification rule (plane (v),
+  # EvidenceDisposalRecoveryBucketObjectCreatedRule,
+  # infra/resources/evidence-disposal-recovery-bucket.yml) -- never a
+  # blanket policy admitting any EventBridge rule in the account.
+  evidenceDisposalRecorderDLQPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - Ref: evidenceDisposalRecorderDLQ
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowEventBridgeRulesSendMessage
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource:
+              Fn::GetAtt:
+                - evidenceDisposalRecorderDLQ
+                - Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn:
+                  - Fn::GetAtt:
+                      - EvidenceDisposalRecorderEventBridgeRule
+                      - Arn
+                  - Fn::GetAtt:
+                      - EvidenceDisposalRecoveryBucketObjectCreatedRule
+                      - Arn
+
 Outputs:
   EvidenceDisposalRecorderDLQArn:
-    Description: SQS DLQ ARN for evidenceDisposalRecorder failure destinations (A1.3/A1.4 wiring).
+    Description: SQS DLQ ARN for evidenceDisposalRecorder failure destinations (planes i/ii, A1.4a).
     Value:
       Fn::GetAtt:
         - evidenceDisposalRecorderDLQ
         - Arn
   EvidenceDisposalRecorderDLQUrl:
-    Description: SQS DLQ URL for evidenceDisposalRecorder failure destinations (A1.3/A1.4 wiring).
+    Description: SQS DLQ URL for evidenceDisposalRecorder failure destinations (planes i/ii, A1.4a).
     Value:
       Ref: evidenceDisposalRecorderDLQ

@@ -7,6 +7,7 @@
     "certificate": {}
   },
   "operational_durations": {
-    "retention_marker": {}
+    "retention_marker": {},
+    "disposal_recovery": {}
   }
 }

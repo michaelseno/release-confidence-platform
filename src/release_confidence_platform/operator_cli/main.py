@@ -25,7 +25,9 @@ from release_confidence_platform.audit_platform_integrity.cert_retrieve_commands
     build_cert_retrieve_parser,
 )
 from release_confidence_platform.evidence_retention.commands import (
+    build_disposal_recorder_redrive_parser,
     build_retention_hold_parser,
+    dispatch_disposal_recorder_redrive,
     dispatch_retention_hold,
 )
 
@@ -128,6 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
     retention = sub.add_parser("retention", help="Manage evidence retention legal holds")
     retention_sub = retention.add_subparsers(dest="retention_command", required=True)
     build_retention_hold_parser(retention_sub)
+    build_disposal_recorder_redrive_parser(retention_sub)
     generate = sub.add_parser("generate", help="Generate intelligence artifacts")
     generate_sub = generate.add_subparsers(dest="generate_command", required=True)
     intel_gen = generate_sub.add_parser(
@@ -531,6 +534,68 @@ def dispatch(args: argparse.Namespace) -> CommandResult:
             data=result,
             exit_code=0,
         )
+    if args.group == "retention" and args.retention_command == "disposal-recorder":
+        from release_confidence_platform.config.stage_config import (
+            StageConfigLoader,  # noqa: PLC0415
+        )
+        from release_confidence_platform.evidence_retention.disposal_repository import (
+            DisposalRepository,  # noqa: PLC0415
+        )
+        from release_confidence_platform.storage.aws_client_factory import (
+            AwsClientFactory,  # noqa: PLC0415
+        )
+
+        stage_config = StageConfigLoader().load(args.stage)
+        # Technical Design Section 22.9.5's "Ordering" paragraph (ADR
+        # Non-Negotiable Invariant 51; TC-G5/TC-G5-pos): resolved and
+        # validated BEFORE AwsClientFactory construction and before any AWS
+        # call -- mirroring schedule_command's existing
+        # validate_scheduler_config()-before-AwsClientFactory(...) ordering.
+        stage_config.validate_disposal_recorder_config()
+
+        factory = AwsClientFactory(stage_config)
+        # TC-I4: the S3 client used to read the recovery object is
+        # constructed here, from the operator's own resolved
+        # AwsClientFactory credentials -- never from
+        # EvidenceDisposalRecorderLambdaRole, and never a second, dedicated
+        # IAM role this design does not provision.
+        dynamodb_client = factory._session.client("dynamodb")
+        s3_client = factory._session.client("s3")
+        repository = DisposalRepository(stage_config.audit_metadata_table, dynamodb_client)
+
+        result = dispatch_disposal_recorder_redrive(
+            args, stage_config=stage_config, s3_client=s3_client, repository=repository
+        )
+        exit_code = int(result.get("exit_code", 1))
+        outcome = result.get("outcome")
+        if outcome == "processed":
+            failure_count = result.get("failure_count") or 0
+            record_count = result.get("record_count") or 0
+            status = (
+                "success"
+                if failure_count == 0
+                else "failed"
+                if failure_count == record_count
+                else "partial_failure"
+            )
+            summary = (
+                f"Disposal-recorder redrive processed {result.get('success_count')}/"
+                f"{record_count} records for {args.recovery_object_key}"
+            )
+        else:
+            status = "failed"
+            summary = (
+                f"Disposal-recorder redrive rejected for {args.recovery_object_key}: "
+                f"{result.get('rejection_reason')}"
+            )
+        return CommandResult(
+            command="retention disposal-recorder redrive",
+            stage=args.stage,
+            status=status,
+            summary=summary,
+            data=result,
+            exit_code=exit_code,
+        )
     if args.group == "retention":
         from release_confidence_platform.config.stage_config import (
             StageConfigLoader,  # noqa: PLC0415
@@ -673,6 +738,11 @@ def _command_name(args: argparse.Namespace) -> str:
     if getattr(args, "group", None) == "certify":
         return f"certify {getattr(args, 'certify_command', 'unknown')}"
     if getattr(args, "group", None) == "retention":
+        if getattr(args, "retention_command", None) == "disposal-recorder":
+            return (
+                "retention disposal-recorder "
+                f"{getattr(args, 'disposal_recorder_command', 'unknown')}"
+            )
         return f"retention hold {getattr(args, 'hold_command', 'unknown')}"
     return f"audit {getattr(args, 'audit_command', 'unknown')}"
 

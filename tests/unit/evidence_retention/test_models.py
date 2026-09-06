@@ -76,17 +76,57 @@ def _valid_legal_hold_event_data(**overrides: Any) -> dict[str, Any]:
 
 
 def _valid_disposal_record_data(**overrides: Any) -> dict[str, Any]:
+    """Defaults to a valid DynamoDB-TTL-path shape (ADR Non-Negotiable
+    Invariant 49; Technical Design Section 7.3/22.2/22.3): the seven new
+    source-identity fields are populated per the `source_kind ==
+    "dynamodb_ttl_remove"` branch -- `source_stream_identity`/
+    `source_event_id` present, all three S3-only fields absent.
+    """
     disposal_id = generate_disposal_id()
     data = {
         "PK": f"CLIENT#{_CLIENT_ID}",
         "SK": f"AUDIT#{_AUDIT_ID}#DISPOSAL#{disposal_id}",
         "record_type": "disposal_record",
         "disposal_id": disposal_id,
+        "disposal_id_scheme": "v1",
+        "source_kind": "dynamodb_ttl_remove",
+        "source_stream_identity": (
+            "arn:aws:dynamodb:us-east-1:111111111111:table/MetadataTable/stream/2026-01-01T00:00:00.000"
+        ),
+        "source_event_id": "event-abc123",
         "client_id": _CLIENT_ID,
         "audit_id": _AUDIT_ID,
         "evidence_class": "raw_evidence",
         "disposal_mechanism": "DYNAMODB_TTL",
         "disposed_identity_ref": f"CLIENT#{_CLIENT_ID}#AUDIT#{_AUDIT_ID}#RUN#run1",
+        "disposed_at": "2026-07-18T00:00:00.000Z",
+        "recorded_at": "2026-07-18T00:05:00.000Z",
+    }
+    data.update(overrides)
+    return data
+
+
+def _valid_disposal_record_s3_data(**overrides: Any) -> dict[str, Any]:
+    """S3-Lifecycle-path shape counterpart to `_valid_disposal_record_data`:
+    `source_bucket`/`source_object_key`/`source_object_version_id` present,
+    both DynamoDB-only fields absent.
+    """
+    disposal_id = generate_disposal_id()
+    data = {
+        "PK": f"CLIENT#{_CLIENT_ID}",
+        "SK": f"AUDIT#{_AUDIT_ID}#DISPOSAL#{disposal_id}",
+        "record_type": "disposal_record",
+        "disposal_id": disposal_id,
+        "disposal_id_scheme": "v1",
+        "source_kind": "s3_lifecycle_delete",
+        "source_bucket": "rcp-raw-results-dev",
+        "source_object_key": f"reports/{_CLIENT_ID}/{_AUDIT_ID}/artifact.json",
+        "source_object_version_id": "3sZDF9DjX.mgY2EnI0AaWQ",
+        "client_id": _CLIENT_ID,
+        "audit_id": _AUDIT_ID,
+        "evidence_class": "report",
+        "disposal_mechanism": "S3_LIFECYCLE_NONCURRENT_VERSION_EXPIRATION",
+        "disposed_identity_ref": f"reports/{_CLIENT_ID}/{_AUDIT_ID}/artifact.json",
         "disposed_at": "2026-07-18T00:00:00.000Z",
         "recorded_at": "2026-07-18T00:05:00.000Z",
     }
@@ -382,6 +422,138 @@ def test_disposal_record_to_dict_returns_plain_dict():
     result = record.to_dict()
     assert isinstance(result, dict)
     assert result["disposal_mechanism"] == "DYNAMODB_TTL"
+
+
+def test_disposal_record_rejects_unknown_source_kind():
+    data = _valid_disposal_record_data(source_kind="manual_operator_delete")
+    with pytest.raises(ValidationError):
+        DisposalRecord(**data)
+
+
+# ---------------------------------------------------------------------------
+# DisposalRecord -- Area (j), Invariant 49 model-validator coverage
+# (QA plan Section 3.10, TC-J1-TC-J7, TC-J8a-c, TC-J9a-b)
+# ---------------------------------------------------------------------------
+
+
+def test_tc_j1_valid_shape_dynamodb_path():
+    """TC-J1: source_kind=dynamodb_ttl_remove with exactly
+    source_stream_identity + source_event_id populated and all three S3-only
+    fields absent -> validation passes."""
+    record = DisposalRecord(**_valid_disposal_record_data())
+    assert record.source_kind == "dynamodb_ttl_remove"
+    assert record.source_stream_identity is not None
+    assert record.source_event_id is not None
+    assert record.source_bucket is None
+    assert record.source_object_key is None
+    assert record.source_object_version_id is None
+
+
+def test_tc_j2_valid_shape_s3_path():
+    """TC-J2: source_kind=s3_lifecycle_delete with exactly source_bucket +
+    source_object_key + source_object_version_id populated and both
+    DynamoDB-only fields absent -> validation passes."""
+    record = DisposalRecord(**_valid_disposal_record_s3_data())
+    assert record.source_kind == "s3_lifecycle_delete"
+    assert record.source_bucket is not None
+    assert record.source_object_key is not None
+    assert record.source_object_version_id is not None
+    assert record.source_stream_identity is None
+    assert record.source_event_id is None
+
+
+def test_tc_j3_missing_required_field_dynamodb_path_stream_identity():
+    """TC-J3: source_kind=dynamodb_ttl_remove, source_stream_identity
+    absent, source_event_id present -> validation fails."""
+    data = _valid_disposal_record_data(source_stream_identity=None)
+    with pytest.raises(ValidationError):
+        DisposalRecord(**data)
+
+
+def test_tc_j4_missing_required_field_dynamodb_path_event_id():
+    """TC-J4: source_kind=dynamodb_ttl_remove, source_event_id absent,
+    source_stream_identity present -> validation fails."""
+    data = _valid_disposal_record_data(source_event_id=None)
+    with pytest.raises(ValidationError):
+        DisposalRecord(**data)
+
+
+def test_tc_j5_missing_required_field_s3_path_bucket():
+    """TC-J5: source_kind=s3_lifecycle_delete, source_bucket absent, other
+    two S3 fields present -> validation fails."""
+    data = _valid_disposal_record_s3_data(source_bucket=None)
+    with pytest.raises(ValidationError):
+        DisposalRecord(**data)
+
+
+def test_tc_j6_missing_required_field_s3_path_object_key():
+    """TC-J6: source_kind=s3_lifecycle_delete, source_object_key absent,
+    other two S3 fields present -> validation fails."""
+    data = _valid_disposal_record_s3_data(source_object_key=None)
+    with pytest.raises(ValidationError):
+        DisposalRecord(**data)
+
+
+def test_tc_j7_missing_required_field_s3_path_object_version_id():
+    """TC-J7: source_kind=s3_lifecycle_delete, source_object_version_id
+    absent, other two S3 fields present -> validation fails."""
+    data = _valid_disposal_record_s3_data(source_object_version_id=None)
+    with pytest.raises(ValidationError):
+        DisposalRecord(**data)
+
+
+def test_tc_j8a_forbidden_cross_source_field_dynamodb_path_source_bucket():
+    """TC-J8a: source_kind=dynamodb_ttl_remove, both required DynamoDB
+    fields present and correctly shaped, but forbidden S3-only field
+    source_bucket is ALSO populated -> validation fails."""
+    data = _valid_disposal_record_data(source_bucket="some-other-bucket")
+    with pytest.raises(ValidationError):
+        DisposalRecord(**data)
+
+
+def test_tc_j8b_forbidden_cross_source_field_dynamodb_path_source_object_key():
+    """TC-J8b: source_kind=dynamodb_ttl_remove, both required DynamoDB
+    fields present, but forbidden S3-only field source_object_key is ALSO
+    populated -> validation fails."""
+    data = _valid_disposal_record_data(source_object_key="reports/c1/a1/x.json")
+    with pytest.raises(ValidationError):
+        DisposalRecord(**data)
+
+
+def test_tc_j8c_forbidden_cross_source_field_dynamodb_path_source_object_version_id():
+    """TC-J8c: source_kind=dynamodb_ttl_remove, both required DynamoDB
+    fields present, but forbidden S3-only field source_object_version_id is
+    ALSO populated -> validation fails."""
+    data = _valid_disposal_record_data(source_object_version_id="v123")
+    with pytest.raises(ValidationError):
+        DisposalRecord(**data)
+
+
+def test_tc_j9a_forbidden_cross_source_field_s3_path_source_stream_identity():
+    """TC-J9a (symmetric case): source_kind=s3_lifecycle_delete, all three
+    required S3 fields present, but forbidden DynamoDB-only field
+    source_stream_identity is ALSO populated -> validation fails."""
+    data = _valid_disposal_record_s3_data(source_stream_identity="arn:aws:dynamodb:...")
+    with pytest.raises(ValidationError):
+        DisposalRecord(**data)
+
+
+def test_tc_j9b_forbidden_cross_source_field_s3_path_source_event_id():
+    """TC-J9b (symmetric case): source_kind=s3_lifecycle_delete, all three
+    required S3 fields present, but forbidden DynamoDB-only field
+    source_event_id is ALSO populated -> validation fails."""
+    data = _valid_disposal_record_s3_data(source_event_id="event-xyz")
+    with pytest.raises(ValidationError):
+        DisposalRecord(**data)
+
+
+def test_disposal_record_rejects_empty_string_as_required_source_field():
+    """Required means non-None AND non-empty (Technical Design Section 7.3:
+    "(non-`None`, non-empty)") -- an empty string must not satisfy the
+    required-field check."""
+    data = _valid_disposal_record_data(source_stream_identity="")
+    with pytest.raises(ValidationError):
+        DisposalRecord(**data)
 
 
 # ---------------------------------------------------------------------------

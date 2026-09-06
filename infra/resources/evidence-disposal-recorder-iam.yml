@@ -1,0 +1,150 @@
+# Evidence Governance Workstream A1.4a -- ADR Decision 13 / Non-Negotiable
+# Invariant 47 (adr_evidence_retention_disposal_enforcement.md); Technical
+# Design Section 22.11
+# (evidence_governance_workstream_a1_retention_enforcement_technical_design.md).
+#
+# Dedicated, least-privilege execution role for the evidenceDisposalRecorder
+# Lambda ONLY -- following the exact AuditFinalizationLambdaRole/
+# AuditAggregationLambdaRole shape already established in
+# phase4-aggregation-iam.yml (a dedicated AWS::IAM::Role, never an expansion
+# of the shared provider.iam.role.statements block). No redrive-actor IAM
+# principal or policy statement is defined in this file (Technical Design
+# Section 22.11, "No second, separate IAM principal for the redrive actor"):
+# the `rcp retention disposal-recorder redrive` command operates entirely
+# under the operator's own existing, pre-configured AWS credentials -- an
+# operational prerequisite, not a deployable IAM resource this correction
+# provisions.
+#
+# This fragment file requires its own resources: import line in
+# infra/serverless.yml, added in Pass 0 of Technical Design Section 22.9.5's
+# two-pass render sequence -- this role's own logical ID references no
+# logical ID that sequence exists to discover, so its import line does not
+# need to wait for Pass 1's render the way the Outputs fragment's import
+# line does.
+Resources:
+  EvidenceDisposalRecorderLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: evidence-disposal-recorder-runtime
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # 1. CloudWatch Logs, scoped to this function's own log group
+              # only -- mirrors AuditFinalizationLambdaRole's identical
+              # log-group-scoping pattern (phase4-aggregation-iam.yml).
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - arn:aws:logs:${self:provider.region}:*:log-group:/aws/lambda/${self:service}-${self:provider.stage}-evidenceDisposalRecorder:*
+              # 2. DynamoDB Streams read, scoped to MetadataTable's own
+              # stream ARN via a same-stack Fn::GetAtt reference -- three
+              # actions in this single statement (Technical Design Section
+              # 22.11 item 2). Never the bare table ARN for these three
+              # actions, since they are Streams-specific operations.
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                Resource:
+                  - Fn::GetAtt:
+                      - MetadataTable
+                      - StreamArn
+              # dynamodb:ListStreams is restored as its own, separately
+              # scoped statement (Technical Design Section 22.11 item 2,
+              # restoring the omission Round 2/Round 3 made and Round 4
+              # reversed): this is an account/table-level discovery action
+              # AWS does not support scoping to a single stream or table
+              # ARN -- Resource: "*" is the only achievable scope, per AWS's
+              # own AWSLambdaDynamoDBExecutionRole managed-policy reference.
+              - Effect: Allow
+                Action:
+                  - dynamodb:ListStreams
+                Resource: "*"
+              # 3. DisposalRecord PutItem/GetItem, scoped to MetadataTable's
+              # own table ARN (not the stream ARN) -- PutItem for the
+              # disposal write, GetItem for the duplicate-conflict
+              # read-back. No Query, UpdateItem, or DeleteItem action is
+              # granted -- the recorder never queries, updates, or deletes
+              # anything.
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                Resource:
+                  - Fn::GetAtt:
+                      - MetadataTable
+                      - Arn
+              # 4. Failure-destination sqs:SendMessage, scoped to
+              # evidenceDisposalRecorderDLQ's own ARN -- planes (i)/(ii)
+              # only (Technical Design Section 22.8/22.11 item 4). Never
+              # used for the DynamoDB Streams plane (iii) -- that plane's
+              # own OnFailure destination is the dedicated recovery bucket
+              # below, not this queue.
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource:
+                  - Fn::GetAtt:
+                      - evidenceDisposalRecorderDLQ
+                      - Arn
+              # 5/6. Recovery-bucket write permission -- s3:PutObject scoped
+              # to the recovery-bucket object ARN, and s3:ListBucket scoped
+              # to the recovery-bucket ARN itself (both required per AWS's
+              # own documented IAM requirements for a DynamoDB
+              # event-source-mapping S3 failure destination, Technical
+              # Design Section 22.11 items 5/6), carrying an
+              # s3:ResourceAccount same-account condition (the correct,
+              # AWS-documented condition key -- never aws:ResourceAccount).
+              # s3:GetObject is explicitly NEVER granted on the recovery
+              # bucket to this role, under any justification -- recovery-
+              # object read access belongs exclusively to the redrive
+              # command's own operator-CLI credential resolution, never
+              # this execution role.
+              # s3:ResourceAccount is resolved via the CloudFormation
+              # pseudo-parameter AWS::AccountId (Fn::Sub), never Serverless
+              # Framework's own ${aws:accountId} variable source -- that
+              # source resolves against the LOCAL CLI's own configured AWS
+              # credentials at package/render time (confirmed by direct
+              # invocation: it returns a real account ID even for a local
+              # `sls package`), which would silently violate this
+              # workstream's own no-AWS-credentials/no-AWS-call render
+              # contract (Technical Design Section 22.9.5/22.14) merely by
+              # this role's own IAM statement being present in the
+              # template -- entirely apart from whether the resulting value
+              # is even correct for the account this stack is ultimately
+              # deployed into. Fn::Sub: "${AWS::AccountId}" is a pure
+              # CloudFormation intrinsic, resolved by AWS at actual deploy
+              # time against the deploying account, never evaluated or
+              # substituted by Serverless Framework locally.
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource:
+                  - arn:aws:s3:::${self:custom.disposalRecoveryBucketName}/*
+                Condition:
+                  StringEquals:
+                    s3:ResourceAccount:
+                      Fn::Sub: "${AWS::AccountId}"
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - arn:aws:s3:::${self:custom.disposalRecoveryBucketName}
+                Condition:
+                  StringEquals:
+                    s3:ResourceAccount:
+                      Fn::Sub: "${AWS::AccountId}"

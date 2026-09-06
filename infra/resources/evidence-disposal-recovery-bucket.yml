@@ -1,0 +1,178 @@
+# Evidence Governance Workstream A1.4a -- ADR Decision 13 / Non-Negotiable
+# Invariant 45 (adr_evidence_retention_disposal_enforcement.md); Technical
+# Design Section 22.9.1/22.9.2
+# (evidence_governance_workstream_a1_retention_enforcement_technical_design.md).
+#
+# Dedicated, private S3 recovery bucket -- never RawResultsBucket -- that is
+# the DynamoDB Streams event-source mapping's own native
+# DestinationConfig.OnFailure target for plane (iii) (Technical Design
+# Section 22.8/22.9.1). Mirrors RawResultsBucket's own existing security
+# posture (infra/resources/s3.yml) as a starting precedent, diverging where
+# this bucket's own narrower purpose/access boundary requires a different
+# answer (Technical Design Section 22.9.2): no VersioningConfiguration (this
+# bucket's content is write-once-per-batch, never overwritten in place), a
+# purpose-limited Lifecycle rule with no tag-filter (this content is never
+# itself subject to legal hold), and its own Object Created notification
+# rule (below) rather than RawResultsBucket's evidence-deletion rule.
+#
+# This fragment file requires its own resources: import line in
+# infra/serverless.yml, added in Pass 0 of Technical Design Section 22.9.5's
+# two-pass render sequence -- this bucket's own logical ID references no
+# logical ID that sequence exists to discover, so its import line does not
+# need to wait for Pass 1's render the way the Outputs fragment's import
+# line does.
+Resources:
+  EvidenceDisposalRecoveryBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      # The single authoritative, deterministic source of this bucket's
+      # name -- infra/serverless.yml's own custom.disposalRecoveryBucketName
+      # entry (Technical Design Section 22.9.5 item 1) -- consumed directly,
+      # never an inline, separately-computed name string duplicating the
+      # same pattern independently.
+      BucketName: ${self:custom.disposalRecoveryBucketName}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # Server-side encryption -- BucketEncryption with SSE-S3 (AES256)
+      # enabled by default, mirroring the platform's general
+      # default-encryption posture for S3 resources (Technical Design
+      # Section 22.9.2). No customer-managed KMS key is introduced.
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      # Versioning: not enabled. This bucket's content is write-once-per-
+      # batch and never overwritten in place by this design (Technical
+      # Design Section 22.9.2) -- no VersioningConfiguration property is
+      # set.
+      #
+      # Purpose-limited Lifecycle configuration -- a policy statement, not a
+      # numeric value (Technical Design Section 22.9.2). No tag-filter
+      # condition -- this content is never itself subject to legal hold,
+      # mirroring retention-markers/'s existing purpose-limited-disposal
+      # pattern (infra/resources/s3.yml) exactly. Days is sourced
+      # exclusively from
+      # custom.custodyPeriodDays.disposal_recovery.${self:provider.stage}
+      # (no fallback value supplied for any stage) -- if a stage's value is
+      # unset, Serverless Framework variable resolution fails at
+      # package/deploy time (an unresolved-variable error), not a silent
+      # default, exactly mirroring every other custody-adjacent duration in
+      # this workstream. No numeric duration value is introduced by this
+      # correction.
+      LifecycleConfiguration:
+        Rules:
+          - Id: disposal-recovery-expiration
+            Status: Enabled
+            Filter:
+              Prefix: ""
+            Expiration:
+              Days: ${self:custom.custodyPeriodDays.disposal_recovery.${self:provider.stage}}
+      # Failure-object notification and operator alerting (Technical Design
+      # Section 22.9.2) -- mirrors RawResultsBucket's own established
+      # EventBridgeConfiguration: {} pattern (infra/resources/s3.yml). The
+      # dedicated Object Created rule below consumes this bucket's own
+      # EventBridge notification stream.
+      NotificationConfiguration:
+        EventBridgeConfiguration: {}
+  # Secure-transport enforcement: a bucket policy statement denying any
+  # request where aws:SecureTransport is false (Technical Design Section
+  # 22.9.2). RawResultsBucket today has no equivalent bucket policy of its
+  # own -- this correction introduces the pattern for the recovery bucket
+  # specifically, per Product Strategy's explicit requirement.
+  EvidenceDisposalRecoveryBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: EvidenceDisposalRecoveryBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - Fn::Sub: "arn:aws:s3:::${EvidenceDisposalRecoveryBucket}"
+              - Fn::Sub: "arn:aws:s3:::${EvidenceDisposalRecoveryBucket}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+  # Recovery-bucket notification rule (Technical Design Section 22.9.2,
+  # A1.4a.0 Round 3 item 10(c)/Round 4 item 7): a pure notification --
+  # distinguishable, by its own shape/source, from an actual plane-(i)/(ii)
+  # failure message -- whose purpose is to cause the already-provisioned
+  # evidenceDisposalRecorderDLQAlarm to fire, giving an operator an alerting
+  # surface for "a recovery object landed and needs attention". Co-located
+  # in this same file, following this codebase's own established pattern of
+  # co-locating a resource with its own directly-related EventBridge/
+  # notification wiring.
+  EvidenceDisposalRecoveryBucketObjectCreatedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: ${self:service}-${self:provider.stage}-disposal-recovery-object-created
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - Object Created
+        detail:
+          bucket:
+            name:
+              - ${self:custom.disposalRecoveryBucketName}
+      State: ENABLED
+      Targets:
+        - Id: evidenceDisposalRecorderDLQNotificationTarget
+          Arn:
+            Fn::GetAtt:
+              - evidenceDisposalRecorderDLQ
+              - Arn
+          # Reuses the exact values already selected and justified for the
+          # plane-(i) rule's own RetryPolicy (Technical Design Section
+          # 22.9.2/22.10) -- both rules deliver to the identical target
+          # under the identical delivery mechanism, with the identical
+          # plausible transient-failure cause.
+          RetryPolicy:
+            MaximumRetryAttempts: 10
+            MaximumEventAgeInSeconds: 3600
+  # Notification-delivery observability (Technical Design Section 22.9.2,
+  # A1.4a.0 Round 4 item 7): a dedicated CloudWatch alarm on this rule's own
+  # FailedInvocations metric, dimensioned by RuleName -- distinct from any
+  # alarm already covering the plane-(i) rule.
+  EvidenceDisposalRecoveryNotificationFailedInvocationsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: ${self:service}-${self:provider.stage}-disposal-recovery-notification-failed
+      AlarmDescription: >-
+        Fires when EvidenceDisposalRecoveryBucketObjectCreatedRule fails to
+        deliver its own notification message -- distinct from the plane-(i)
+        rule's own alarm. A failure here means an operator never learns a
+        recoverable batch exists at all, silently defeating the entire
+        payload-preservation guarantee's own operational discovery
+        mechanism.
+      Namespace: AWS/Events
+      MetricName: FailedInvocations
+      Dimensions:
+        - Name: RuleName
+          Value:
+            Ref: EvidenceDisposalRecoveryBucketObjectCreatedRule
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+Outputs:
+  EvidenceDisposalRecoveryBucketName:
+    Description: >-
+      Dedicated evidenceDisposalRecorder recovery-bucket name (DynamoDB
+      Streams plane (iii) OnFailure destination). Not the source that
+      populates StageConfig.disposal_recovery_bucket_name -- that field is
+      populated from custom.disposalRecoveryBucketName's own deterministic
+      value, transcribed manually into config/stages/{stage}.json (Technical
+      Design Section 22.9.5 item 1). This Output exists only for
+      same-stack/operator-visibility purposes, mirroring
+      RawResultsBucketName's existing Output (infra/resources/s3.yml).
+    Value: ${self:custom.disposalRecoveryBucketName}

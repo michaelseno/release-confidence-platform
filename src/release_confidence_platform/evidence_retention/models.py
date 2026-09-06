@@ -258,6 +258,32 @@ class LegalHoldEvent(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+# Source-kind bounded set (ADR Decision 13, Non-Negotiable Invariant 49;
+# Technical Design Section 7.3/22.2/22.3). Defined here, not in constants.py,
+# because DisposalRecord's own model_validator (below) is the sole enforcer
+# of the source-kind-conditional field shape this set governs; the identical
+# two literal values are independently defined again in disposal_recorder.py
+# (the module that actually produces DisposalRecord instances) rather than
+# imported from here, to avoid a circular import between the two modules.
+SOURCE_KIND_DYNAMODB_TTL_REMOVE = "dynamodb_ttl_remove"
+SOURCE_KIND_S3_LIFECYCLE_DELETE = "s3_lifecycle_delete"
+_SOURCE_KINDS: frozenset[str] = frozenset(
+    {SOURCE_KIND_DYNAMODB_TTL_REMOVE, SOURCE_KIND_S3_LIFECYCLE_DELETE}
+)
+
+# Fields required/forbidden per source_kind (ADR Non-Negotiable Invariant 49;
+# Technical Design Section 7.3's "Source-kind-dependent field validation").
+_DYNAMODB_ONLY_SOURCE_FIELDS: tuple[str, ...] = (
+    "source_stream_identity",
+    "source_event_id",
+)
+_S3_ONLY_SOURCE_FIELDS: tuple[str, ...] = (
+    "source_bucket",
+    "source_object_key",
+    "source_object_version_id",
+)
+
+
 class DisposalRecord(BaseModel):
     """Durable, queryable evidence that a specific disposal action occurred.
 
@@ -266,12 +292,40 @@ class DisposalRecord(BaseModel):
     append-only, never mutated after write. Never carries a ttl_disposal_at
     attribute (ADR Non-Negotiable Invariant 1) — this is a compliance/audit-
     trail artifact, not evidence subject to its own custody clock.
+
+    Seven source-identity fields (A1.4a.0 Round 2 item 6; count corrected
+    Round 3 item 5; ADR Non-Negotiable Invariant 49; Technical Design Section
+    7.3/22.2/22.3): `disposal_id_scheme` and `source_kind` are always
+    required; exactly one of the two source-identity groups below is
+    required, conditioned on `source_kind`, and the other group's fields
+    must be absent (None) -- enforced by `_source_kind_conditional_fields`
+    below, never left to caller discipline:
+      - DynamoDB path (`source_kind == "dynamodb_ttl_remove"`):
+        `source_stream_identity` + `source_event_id` required;
+        `source_bucket`/`source_object_key`/`source_object_version_id`
+        forbidden (must be None).
+      - S3 path (`source_kind == "s3_lifecycle_delete"`):
+        `source_bucket` + `source_object_key` + `source_object_version_id`
+        required; `source_stream_identity`/`source_event_id` forbidden
+        (must be None).
+    These fields are the identical raw values hashed into `disposal_id`
+    (Technical Design Section 22.2) -- persisted verbatim, never re-derived
+    -- so Section 22.3's duplicate-conflict verification can compare source
+    identity directly. `recorded_at` remains the only field excluded from
+    that comparison.
     """
 
     PK: str
     SK: str
     record_type: str
     disposal_id: str
+    disposal_id_scheme: str
+    source_kind: str
+    source_stream_identity: str | None = None
+    source_event_id: str | None = None
+    source_bucket: str | None = None
+    source_object_key: str | None = None
+    source_object_version_id: str | None = None
     client_id: str
     audit_id: str
     evidence_class: str
@@ -288,6 +342,15 @@ class DisposalRecord(BaseModel):
         if v != DISPOSAL_RECORD_RECORD_TYPE:
             raise ValueError(
                 f"record_type must be '{DISPOSAL_RECORD_RECORD_TYPE}', got {v!r}"
+            )
+        return v
+
+    @field_validator("source_kind")
+    @classmethod
+    def _source_kind_in_bounded_set(cls, v: str) -> str:
+        if v not in _SOURCE_KINDS:
+            raise ValueError(
+                f"source_kind must be one of {sorted(_SOURCE_KINDS)}, got {v!r}"
             )
         return v
 
@@ -335,6 +398,49 @@ class DisposalRecord(BaseModel):
             raise ValueError(
                 f"recorded_at ({self.recorded_at!r}) must not be before "
                 f"disposed_at ({self.disposed_at!r})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _source_kind_conditional_fields(self) -> DisposalRecord:
+        """Enforce ADR Non-Negotiable Invariant 49's source-kind-conditional
+        field shape as a construction-time rule, not descriptive-only
+        documentation (Technical Design Section 7.3's "Source-kind-dependent
+        field validation" note). Exactly one of the two source-identity
+        groups is required, and the other group's fields must be absent
+        (None) -- "required" here means non-None AND non-empty-string, per
+        Section 7.3's own "(non-`None`, non-empty)" wording.
+        """
+        if self.source_kind == SOURCE_KIND_DYNAMODB_TTL_REMOVE:
+            required, forbidden_group = (
+                _DYNAMODB_ONLY_SOURCE_FIELDS,
+                _S3_ONLY_SOURCE_FIELDS,
+            )
+        elif self.source_kind == SOURCE_KIND_S3_LIFECYCLE_DELETE:
+            required, forbidden_group = (
+                _S3_ONLY_SOURCE_FIELDS,
+                _DYNAMODB_ONLY_SOURCE_FIELDS,
+            )
+        else:
+            # Unreachable in practice -- _source_kind_in_bounded_set already
+            # rejects any other value before this validator runs. No branch
+            # to fall through to silently.
+            return self
+
+        missing = [name for name in required if not getattr(self, name)]
+        if missing:
+            raise ValueError(
+                f"source_kind={self.source_kind!r} requires {list(required)} "
+                f"to be present (non-None, non-empty); missing/empty: {missing}"
+            )
+
+        present_forbidden = [
+            name for name in forbidden_group if getattr(self, name) is not None
+        ]
+        if present_forbidden:
+            raise ValueError(
+                f"source_kind={self.source_kind!r} forbids {list(forbidden_group)} "
+                f"from being set; unexpectedly present: {present_forbidden}"
             )
         return self
 
